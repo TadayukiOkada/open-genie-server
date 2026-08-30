@@ -20,7 +20,14 @@ HEADING = re.compile(r"^(#{1,6}) +(.*)")
 
 
 def _markdown_files():
-    return sorted(p for p in REPO_ROOT.rglob("*.md") if ".git" not in p.parts)
+    """Every Markdown file the repository ships.
+
+    Dot-directories are skipped, not just .git: pytest writes a README.md into
+    .pytest_cache, so including them makes the suite's own artefacts part of
+    its input and the test count differ between a first run and a second.
+    """
+    return sorted(p for p in REPO_ROOT.rglob("*.md")
+                  if not any(part.startswith(".") for part in p.parts))
 
 
 def _parse(path: Path):
