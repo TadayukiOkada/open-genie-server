@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-genie-server"
+description = "OpenAI-compatible REST API server for Qualcomm Genie (libGenie.so) on the Hexagon NPU"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Tadayuki OKADA" }]
+keywords = ["qualcomm", "genie", "qairt", "hexagon", "npu", "openai", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Android",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The server does not start without these.
+#
+# tokenizers is a runtime dependency rather than an extra on purpose: without
+# it token counts fall back to len(text.split()), which is not merely a wrong
+# usage number — it feeds the context-overflow check and the default
+# max_tokens, so a language that does not space its words silently gets the
+# wrong prompt budget. See docs/MANUAL.md, "Token counting". Android is the
+# one target where it cannot be installed (no wheel, and it is Rust); the
+# fallback exists for that case, and "Running on Android" says what it costs.
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "tokenizers",
+]
+
+dynamic = ["version"]
+
+[project.optional-dependencies]
+# numpy is needed for TWO unrelated things, which is why it appears twice.
+# Without it, logprobs and prompt-scoring requests are rejected with HTTP 400
+# up front (docs/MANUAL.md, "Logprobs").
+logprobs = ["numpy"]
+
+# VLM_SLOTS (image input) needs numpy as well as pillow. Without either,
+# genie_node.py/vlm_specs.py fail to import and VLM support is silently
+# disabled; the server still runs, text-only.
+vlm = ["numpy", "pillow"]
+
+# The offline suite (tests/, no NPU and no libGenie.so). These are not
+# optional for a green run: without requests and jsonschema eight grammar
+# tests fail with ModuleNotFoundError, and without numpy eight logprobs tests
+# do. The host-side integration runner (tests/integration/) uses requests too.
+test = ["pytest", "httpx", "requests", "jsonschema", "numpy"]
+
+[project.scripts]
+genie-server = "genie_server.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/TadayukiOkada/open-genie-server"
+Documentation = "https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md"
+Changelog = "https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+# Single source of truth: genie_server/__init__.py. docs/CHANGELOG.md's
+# heading is the only other place a version number appears.
+version = { attr = "genie_server.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# tests/integration/ needs a board and a config file naming it; it is run by
+# hand from the host that can reach the device, never as part of `pytest`.
+testpaths = ["tests"]
+addopts = "--ignore=tests/integration"

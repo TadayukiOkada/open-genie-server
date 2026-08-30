@@ -1,0 +1,54 @@
+{
+  "_comment": "Host-side integration test config. Copy to test_config.json and adjust; --base-url on the command line overrides base_url. Keys starting with _ are documentation only.",
+
+  "base_url": "http://192.168.1.2:8080",
+  "request_timeout": 180,
+  "model": "genie-local",
+
+  "prefix_cache": { "enabled": true },
+
+  "prompt_logprobs": {
+    "_comment": "Prompt scoring (lm_eval loglikelihood) test. The runner enables the server-side switch itself, verifies the disabled->400 gate, and disables it again afterwards.",
+    "enabled": true,
+    "prompt": "The Eiffel Tower is located in the city of Paris."
+  },
+
+  "performance_policy": { "enabled": true, "restore": "balanced" },
+
+  "switch": {
+    "_comment": "Model hot-swap test: loads model_dir, runs a smoke completion, then loads restore_model_dir back. unload_first=true is the server default (old model freed before the new one loads) and is the reliable order; it is set explicitly here so the test does not drift if the default ever changes.",
+    "enabled": true,
+    "slot": "",
+    "model_dir": "/home/root/models/qwen3_0_6b-genie-w4a16-qualcomm_sa8775p",
+    "restore_model_dir": "/home/root/models/qwen3_4b_instruct_2507-genie-w4a16-qualcomm_sa8775p",
+    "unload_first": true
+  },
+
+  "grammar": {
+    "_comment": "Grammar-constrained decoding (docs/MANUAL.md). Grammar is fixed per model, so each kind needs its own model directory: build them on the target with 'python3 setup_grammar_models.py --base <model bundle> --out /home/root/grammar_test'. Every G0x test switches the slot itself and G08 restores restore_model_dir.",
+    "enabled": false,
+    "slot": "",
+    "unload_first": true,
+    "json_schema_model_dir": "/home/root/grammar_test/json_schema",
+    "regex_model_dir": "/home/root/grammar_test/regex",
+    "ebnf_model_dir": "/home/root/grammar_test/ebnf",
+    "bad_backend_model_dir": "/home/root/grammar_test/bad_backend",
+    "restore_model_dir": "/home/root/models/qwen3_0_6b-genie-w4a16-qualcomm_sa8775p"
+  },
+
+  "lora": {
+    "_comment": "Set 'adapter' to a LoRA adapter name defined in the model's genie_config.json, then enabled=true.",
+    "enabled": false,
+    "engine": "primary",
+    "adapter": "<lora-adapter-name>"
+  },
+
+  "vlm": {
+    "_comment": "Needs a VLM_SLOTS entry on the server (see examples/config/env_config.vlm.sample.json). image_path empty = a built-in 64x64 red PNG is sent; set a real image path for a meaningful description check. 'model' routes to the VLM slot by its model directory name.",
+    "enabled": true,
+    "model": "qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p",
+    "slot": "",
+    "image_path": "",
+    "question": "Describe this image in one sentence."
+  }
+}

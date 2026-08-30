@@ -1,0 +1,27 @@
+# Runtime configuration/artifacts genie-server.py creates or expects next to
+# itself — machine- and deployment-specific, never meant to be versioned.
+env_config.json
+/prefix_cache/
+/.htp_ext_cache/
+
+# Integration-test working files. test_config.json points at a specific board
+# (base_url, model directories, LoRA adapter names); copy
+# tests/integration/test_config.sample.json and edit that instead. reports/ is
+# the run history the harness writes.
+/tests/integration/test_config.json
+/tests/integration/reports/
+
+# Python
+__pycache__/
+*.pyc
+
+# Packaging build artefacts (pip install -e . writes the egg-info)
+/build/
+/dist/
+*.egg-info/
+
+# Editors / OS
+.DS_Store
+
+# Session handoff notes — local only, never publish
+HANDOFF.md

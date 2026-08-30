@@ -1,0 +1,28 @@
+{
+  "_comment": "Dual-NSP sample: two independent text models, one per Hexagon NSP core. Requests route by the 'model' field (= model directory name) or an explicit 'slot' field. Copy next to genie-server.py as env_config.json and adjust paths.",
+
+  "_comment_order": "SLOT ORDER MATTERS: TEXT_SLOTS is loaded first-to-last, and on SA8255P, the FIRST model has to be a smaller one (e.g. single-CL 1.7B) or the second fails to load with 'err 1002' (e.g. loading 4B first then 1.7B fails, but single-CL 1.7B then 4B succeeds). The second model must also be pinned to a different device_id. Slot names are logical addresses for routing (e.g. 'tool_call', 'chat'); device_id assigns physical cores. See MANUAL.md, 'Multi Text Slots'.",
+
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "HEXAGON_VERSION": "v73",
+  "MODELS_BASE_DIR": "/home/root/models",
+  "PREFIX_CACHE_DIR": "/home/root/prefix_cache",
+
+  "_comment_poll": "POLL:false turns off the HTP backend's busy-wait (measured on SA8255P: ~260% CPU for no latency gain). Remove it to keep whatever each model bundle sets.",
+  "POLL": false,
+
+  "TEXT_SLOTS": [
+    {
+      "_comment": "First = the smaller model (tool_call / fast). Loading this first makes the pair load.",
+      "name": "tool_call",
+      "device_id": 0,
+      "model_root": "qwen3_1_7b-genie-w4a16-qualcomm_sa8775p"
+    },
+    {
+      "_comment": "Second = the larger model (chat / quality) on a different device_id.",
+      "name": "chat",
+      "device_id": 1,
+      "model_root": "qwen3_4b_instruct_2507-genie-w4a16-qualcomm_sa8775p"
+    }
+  ]
+}

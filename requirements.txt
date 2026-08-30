@@ -1,0 +1,17 @@
+# Kept so that `pip install -r requirements.txt` keeps working. The
+# dependency lists themselves now live in pyproject.toml, where they are one
+# thing instead of two that drift apart.
+#
+# This line is the equivalent of:
+#
+#     pip install .[logprobs,vlm]
+#
+# which is what a full install looks like: the server itself (fastapi,
+# uvicorn, tokenizers) plus numpy for logprobs and prompt scoring, plus numpy
+# and pillow for VLM slots. Add [test] for the offline suite.
+#
+# NOTE (Android): tokenizers, numpy and pillow publish no Android wheel, and
+# neither does pydantic-core, which FastAPI needs. Install the core with
+# `--no-deps` there and see docs/MANUAL.md, "Running on Android", for what
+# each missing wheel costs and how to cross-build the one that is mandatory.
+.[logprobs,vlm]

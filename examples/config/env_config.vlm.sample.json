@@ -1,0 +1,22 @@
+{
+  "_comment": "VLM sample: Qwen3-VL through the GenieNode/GeniePipeline composable pipeline. A chat request carrying an image_url content part is routed to a VLM slot automatically. Copy next to genie-server.py as env_config.json and adjust paths.",
+
+  "_comment_text_slots": "NO TEXT SLOTS HERE, to keep this sample to one thing. A text model and a VLM CAN be resident together on the SA8255P we tested, but only when the text bundle is exported at a SINGLE context length and the two slots are on DIFFERENT device_id; with a multi-context-length text bundle the second slot fails with 'err 1002' whichever loads first. For that configuration start from env_config.text-vlm.sample.json instead, and read MANUAL.md, 'Loading two models at once'.",
+
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "HEXAGON_VERSION": "v73",
+  "MODELS_BASE_DIR": "/home/root/models",
+  "PREFIX_CACHE_DIR": "/home/root/prefix_cache",
+  "INFERENCE_TIMEOUT": 180,
+
+  "VLM_SLOTS": [
+    {
+      "_comment": "max_tokens caps generation for the whole slot: the request's own max_tokens cannot reach the VLM path (GenieNode takes it once, at node creation). 0 = uncapped.",
+      "name": "vision",
+      "device_id": 0,
+      "model_root": "qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p",
+      "spec": "qwen3_vl",
+      "max_tokens": 1024
+    }
+  ]
+}

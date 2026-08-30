@@ -1,0 +1,69 @@
+{
+    "dialog": {
+        "version": 1,
+        "type": "basic",
+        "context": {
+            "version": 1,
+            "size": 4096,
+            "n-vocab": 151936,
+            "bos-token": 151643,
+            "eos-token": 151645,
+            "grammar": {
+                "backend": "xgrammar",
+                "type": "json-schema",
+                "file": "grammar_schema.txt"
+            }
+        },
+        "sampler": {
+            "version": 1,
+            "seed": 42,
+            "temp": 0.8,
+            "top-k": 40,
+            "top-p": 0.95
+        },
+        "tokenizer": {
+            "version": 1,
+            "path": "tokenizer.json"
+        },
+        "engine": {
+            "version": 1,
+            "n-threads": 3,
+            "backend": {
+                "version": 1,
+                "type": "QnnHtp",
+                "QnnHtp": {
+                    "version": 1,
+                    "use-mmap": true,
+                    "spill-fill-bufsize": 0,
+                    "mmap-budget": 0,
+                    "poll": true,
+                    "cpu-mask": "0xe0",
+                    "kv-dim": 128,
+                    "allow-async-init": false,
+                    "enable-graph-switching": false
+                },
+                "extensions": "htp_backend_ext_config.json"
+            },
+            "model": {
+                "version": 1,
+                "type": "binary",
+                "binary": {
+                    "version": 1,
+                    "ctx-bins": [
+                        "part1_of_4.bin",
+                        "part2_of_4.bin",
+                        "part3_of_4.bin",
+                        "part4_of_4.bin"
+                    ]
+                }
+            }
+        },
+        "embedding": {
+            "version": 1,
+            "type": "lut",
+            "lut-path": "embedding_weights.raw",
+            "size": 2560,
+            "datatype": "float32"
+        }
+    }
+}

@@ -1,0 +1,18 @@
+{
+  "_comment": "Single-slot sample for SA8775P: Qwen3-4B-Instruct on the default NSP. Copy next to genie-server.py as env_config.json and adjust paths. Keys starting with _ are ignored by the server.",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "HEXAGON_VERSION": "v73",
+  "_comment_poll": "POLL:false turns off the HTP backend's busy-wait (measured on SA8255P: ~260% CPU for no latency gain). Remove it to keep whatever the model bundle sets.",
+  "POLL": false,
+  "_comment_slot": "model_root is the only key a slot needs; name defaults to slot0 and an unset device_id means the model's own HTP config decides which core it lands on. A relative model_root resolves under MODELS_BASE_DIR, the same way POST /v1/models/switch resolves model_dir; write it absolute to load a model from outside that directory.",
+  "TEXT_SLOTS": [
+    {"model_root": "qwen3_4b_instruct_2507-genie-w4a16-qualcomm_sa8775p"}
+  ],
+  "MODELS_BASE_DIR": "/home/root/models",
+  "PREFIX_CACHE_DIR": "/home/root/prefix_cache",
+  "INFERENCE_TIMEOUT": 120,
+  "HOST": "0.0.0.0",
+  "PORT": 8080,
+  "_prompt_logprobs": "set PROMPT_LOGPROBS: true to allow lm_eval loglikelihood scoring from startup (or toggle at runtime via POST /v1/server/prompt_logprobs)",
+  "PROMPT_LOGPROBS": false
+}

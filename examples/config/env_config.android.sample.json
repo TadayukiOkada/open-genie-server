@@ -1,0 +1,16 @@
+{
+  "_comment": "Android target (e.g. an Android guest VM on an automotive SoC). See docs/MANUAL.md, 'Running on Android' — the DSP-side libc++.so.1 and libc++abi.so.1 must be staged into the SDK's lib/hexagon-<ver>/unsigned/ directory first, or every dialog fails with 'Failed to create device: 14001'.",
+  "QAIRT_SDK_ROOT": "/data/local/tmp/qairt/2.48.40.260702",
+  "_comment_platform": "auto detects Android; set it explicitly only when the SDK is laid out for a different target than the one you are running on.",
+  "TARGET_PLATFORM": "auto",
+  "HEXAGON_VERSION": "v73",
+  "MODELS_BASE_DIR": "/data/local/tmp",
+  "PREFIX_CACHE_DIR": "/data/local/tmp/prefix_cache",
+  "INFERENCE_TIMEOUT": 300,
+  "HOST": "0.0.0.0",
+  "PORT": 8080,
+  "TEXT_SLOTS": [
+    {"name": "chat", "device_id": 1, "model_root": "qwen3_0_6b-genie-w4a16"}
+  ],
+  "PROMPT_LOGPROBS": false
+}

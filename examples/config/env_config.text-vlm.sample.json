@@ -1,0 +1,36 @@
+{
+  "_comment": "Text + VLM sample: a small text model and a Qwen3-VL, both resident at once. A chat request carrying an image_url content part routes to the VLM slot automatically; everything else goes to the text slot. Copy next to genie-server.py as env_config.json and adjust paths.",
+
+  "_comment_coresidency": "THIS COMBINATION IS FRAGILE AND HAS TO BE MEASURED. On the SA8255P we tested it loads only when BOTH of these hold: (1) the text bundle is exported at a SINGLE context length, and (2) the two slots are on DIFFERENT device_id. The identical setup with a multi-context-length text bundle fails with 'err 1002' even though that bundle allocates byte-for-byte the same amount - so on-disk size and 'Allocated total size' will not tell you in advance. SLOT_LOAD_ORDER did not matter here, but leaving it text-first costs nothing. See MANUAL.md, 'Loading two models at once'.",
+
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "HEXAGON_VERSION": "v73",
+  "MODELS_BASE_DIR": "/home/root/models",
+  "PREFIX_CACHE_DIR": "/home/root/prefix_cache",
+  "INFERENCE_TIMEOUT": 300,
+
+  "_comment_poll": "POLL:false turns off the HTP backend's busy-wait (measured on SA8255P: ~260% CPU for no latency gain). Remove it to keep whatever each model bundle sets.",
+  "POLL": false,
+
+  "SLOT_LOAD_ORDER": "text-first",
+
+  "TEXT_SLOTS": [
+    {
+      "_comment": "A SINGLE-context-length bundle. This is the part that decides whether the VLM fits next to it.",
+      "name": "chat",
+      "device_id": 0,
+      "model_root": "qwen3_0_6b-genie-w4a16-qualcomm_sa8775p"
+    }
+  ],
+
+  "VLM_SLOTS": [
+    {
+      "_comment": "Different device_id from the text slot - the same core does not work. max_tokens caps generation for the whole slot: the request's own max_tokens cannot reach the VLM path (GenieNode takes it once, at node creation). 0 = uncapped.",
+      "name": "vision",
+      "device_id": 1,
+      "model_root": "qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p",
+      "spec": "qwen3_vl",
+      "max_tokens": 1024
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+# Offline test suite — no NPU, no libGenie.so, no network.
+#
+# Everything here runs against tests/fake_genie.py, so it says nothing about
+# the device. The on-board suite is tests/integration/, which needs a board
+# and is run by hand from the host that can reach it (docs/MANUAL.md,
+# "Integration tests").
+name: offline tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One row per environment we actually run on, plus the floor:
+        #   3.10 — requires-python's floor, and what the board's venv has
+        #   3.12 — the newer runtime the board images are moving to
+        #   3.14 — the Android guest (see MANUAL.md, "Running on Android")
+        # The package supports the whole 3.10-3.14 range; this matrix covers
+        # the ends and the versions in use, not every step between them.
+        python-version: ["3.10", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install the package and its test dependencies
+        # An editable install of the real thing, so the suite exercises the
+        # package as it is distributed. [test] is not optional for a green
+        # run: missing 'requests' or 'jsonschema' shows up as 8
+        # ModuleNotFoundError failures in test_grammar.py, not as a skip, and
+        # missing numpy as 8 more in the logprobs tests.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[logprobs,vlm,test]
+
+      - name: Run the offline suite
+        run: python -m pytest tests/ -q
