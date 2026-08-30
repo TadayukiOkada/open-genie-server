@@ -82,7 +82,8 @@ Qualcomm のスタックは1つのハードウェアに3通りの名前を付け
 | `genie_server/config.py` | `env_config.json` のパース、プロセス環境変数の設定 |
 | `genie_server/capi.py` | GenieDialog C APIのctypesバインディング(`GenieLib`)+ SDK定数 |
 | `genie_server/templates.py` | チャットテンプレート描画(chatml/llama3/llama2/gemma/gemma4)、prefix分割、`/no_think` |
-| `genie_server/tools.py` | OpenAI `tools`(function calling): Hermes形式プロンプト生成 + 出力パース |
+| `genie_server/tools.py` | OpenAI `tools`(function calling)の Hermes 方言: プロンプト生成・出力パース・ストリーミングフィルタ |
+| `genie_server/tool_formats.py` | ツール呼び出し方言のレジストリ(Hermes / gemma4)と、スロットがどれを使うかの判定 |
 | `genie_server/slots.py` | `Slot`/`SlotManager`: モデルロード、ルーティング、ホットスワップ |
 | `genie_server/prefix_cache.py` | ディスク上のKVキャッシュスナップショット |
 | `genie_server/engine.py` | 生成エンジン: ロック、ウォッチドッグ、SDKパラメータ、prefixキャッシュ、`finish_reason` |
@@ -126,7 +127,10 @@ open-genie-server は `libGenie.so` の薄いクライアントです。した�
 
 **検証済みの組み合わせ**: QAIRT **2.49.40.260810** および **2.49.1.260821**、
 `aarch64-oe-linux-gcc11.2`、SA8255Pボード、Qwen3 w4a16 のコンテキストバイナリ
-(`qwen3_0_6b`、`qwen3_4b_instruct_2507`)。
+(`qwen3_0_6b`、`qwen3_4b_instruct_2507`)。加えて **2.48.40.260702**、
+`aarch64-android`、同じボードのAndroidゲスト([Androidで動かす](#androidで動かす))。
+**2.48 は3つのリセット欠陥をどれも持ちません** — いずれも 2.49 のスケジューラと
+ともに入ったものです。ここに挙げた中で、素のライブラリが不利にならない唯一のビルドです。
 
 以降のこの節は欠陥の話ではなく、**エクスポート時の選択** — バンドルにいくつの
 コンテキスト長をコンパイルするか — についてです。
@@ -321,10 +325,17 @@ API より下の層で2つのNSPが何かを共有している(メモリ帯域�
    **これらのバンドルでは**閾値は0.6Bと1.7Bの間にあった。**3サイズしか試していないので、
    それ以上には絞り込めていない。**
    **この閾値はモデルだけで決まる性質ではない — 次の表を参照。**
-4. **2本目は別のNSPに置く必要がある。** 同一デバイスの構成だけが失敗した。
-   ただしこの実行は**同じモデルを2回**ロードしており、生成されるHTP拡張設定は
-   `"context": {"weight_sharing_enabled": true}`を持つ。**weight sharingの競合が原因である
-   可能性は排除できていない。** 別モデル同士を同一NSPに載せる構成は未検証。
+4. **2本目は別のNSPに置く必要がある。** 表の中で同一デバイスの構成だけが失敗した。
+   この実行は**同じモデルを2回**ロードしており、生成されるHTP拡張設定が
+   `"context": {"weight_sharing_enabled": true}` を持つため、当初は
+   weight sharing の競合が原因である可能性を排除できていなかった。**現在は排除済み。**
+   電源サイクル直後から**別モデル同士**で取り直すと、0.6B → 1.7B は
+   `device_id` 0 と **0** で `context index = 2 : err 1002`、同じ組み合わせを
+   0 と **1** に置くと両スロットがロードされ生成もできる。2本目の確保シーケンスは
+   両者で**バイト単位に同一**(276,431,360 / 8 buffers)で、違いは `device_id` だけである。
+   したがってこれは weight sharing ではなく**コアあたりの上限**である。
+   その上限が何で決まるかは未解明 — 0.6B + 0.6B も 0.6B + 1.7B も同じく1コアでは落ちるので
+   **1本目だけで上限に達している可能性**があるが、これより小さいバンドルが無いため詰められていない。
 
 **単一コンテキスト長でエクスポートすると閾値が上がる。** 1.7B と 4B を後から
 単一コンテキスト長(`context_lengths: [4096]`、エクスポート時のツールチェーンも
@@ -493,7 +504,8 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 |---|---|---|
 | `/v1/completions`, `/v1/chat/completions` | body の `model`、または body の `slot`(スロット**名**)で上書き | プライマリスロット(`slots[0]`) |
 | `/v1/prefix/warmup`, `/v1/lora/*` | body の `model` | プライマリスロット |
-| `/v1/server/performance_policy`(GET), `/v1/lora/current` | クエリパラメータ `?model=` | プライマリスロット |
+| `/v1/server/performance_policy`(GET) | クエリパラメータ `?model=`(`?slot=` は不可) | プライマリスロット |
+| `/v1/lora/current` | クエリパラメータ `?slot=`(スロット**名**)、無ければ `?model=` | プライマリスロット |
 | `/v1/server/idle` | クエリパラメータ `?slot=`(スロット**名**) | プライマリスロット |
 | `POST /v1/models/switch` | body の `slot`(スロット**名**、モデルIDではない) | プライマリスロット |
 
@@ -527,7 +539,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `GENIE_PROFILE` | 任意 | `false` | 各テキストスロットに `GenieProfile` をバインドし、SDK自身が計測したTTFT/プレフィル/デコードのKPIを `GET /v1/server/profile` で取得できるようにする([プロファイリング](#プロファイリングsdk側のkpi)参照)。変更には再起動が必要。 |
 | `PROMPT_LOGPROBS` | 任意 | `false` | プロンプトスコアリング(`echo`+`logprobs`のteacher forcing、lm_evalのloglikelihoodタスクが使用)を起動時から有効化。実行時は`POST /v1/server/prompt_logprobs`でも切り替え可([Logprobs](#logprobs)参照)。 |
 | `PROMPT_LOGPROBS_MAX_TOKENS` | 任意 | `4096` | このトークン数を超えるプロンプトのスコアリング要求を拒否(各リクエストはプロンプト全体をデコード速度で処理するため)。 |
-| `TOOL_CALL_RECOVERY` | 任意 | `false` | `<tool_call>` マーカーが化けた・欠落したツール呼び出しを、JSON の `name` がそのリクエストで宣言されたツール名と一致するかどうかで回収します。`qwen3_4b_instruct_2507` の w4a16 は `<tool_call>` トークンの代わりにキリル文字を出し(呼び出しの約半数)、`qwen3_0_6b` はタグ自体を出しません。いずれも呼び出しの中身は正しいので、OFF のままだとクライアントのコードが `message.tool_calls` を読んでいるのに `finish_reason: "stop"` のプレーンテキストが返ります。**それでも既定は OFF です**: これは計測対象のバンドルの欠陥を隠すものであり、しかも `/v1/chat/completions` にしか効かないため、同じモデルが `/v1/completions`(回収の余地が無い)と違うスコアを出してしまうからです。バンドルの欠陥にかかわらずアプリを動かしたいときに ON にし、**得られた結果はモデルのものではなくアプリのものとして読んでください**。`qwen3_1_7b` はマーカーを確実に出すので何も要りません。[Function calling](API.ja.md#function-calling-tools) を参照。 |
+| `TOOL_CALL_RECOVERY` | 任意 | `false` | マーカーの出し方が不正なツール呼び出しを回収します。**両方言に効き、修復は2種類**: 開きマーカーが化けた・欠落した呼び出し(JSON の `name` がそのリクエストで宣言されたツール名と一致するかで判定)と、モデルが開いて中身も正しく埋めたのに閉じなかった呼び出しです。`qwen3_4b_instruct_2507` の w4a16 は `<tool_call>` トークンの代わりにキリル文字を出し(呼び出しの約半数)、`qwen3_0_6b` はタグ自体を出しません。いずれも呼び出しの中身は正しいので、OFF のままだとクライアントのコードが `message.tool_calls` を読んでいるのに `finish_reason: "stop"` のプレーンテキストが返ります。**それでも既定は OFF です**: これは計測対象のバンドルの欠陥を隠すものであり、しかも `/v1/chat/completions` にしか効かないため、同じモデルが `/v1/completions`(回収の余地が無い)と違うスコアを出してしまうからです。バンドルの欠陥にかかわらずアプリを動かしたいときに ON にし、**得られた結果はモデルのものではなくアプリのものとして読んでください**。`qwen3_1_7b` はマーカーを確実に出すので何も要りません。[Function calling](API.ja.md#function-calling-tools) を参照。 |
 
 出来合いのサンプル(シングルスロット/デュアルNSP/テキスト+VLM、SA8775Pのモデルパス入り)は [examples/config/](../examples/config/) にあります。単一スロット構成の例:
 
@@ -561,8 +573,13 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 - `dialog.engine.backend.extensions`
 - `dialog.engine.model.binary.ctx-bins`(配列)
 - `dialog.context.grammar.file`(設定されている場合。[Grammar制約デコーディング](#grammar制約デコーディング)参照)
+- `dialog.embedding.lut-path` と `dialog.perlayer-embedding.lut-path`(設定されている場合。Gemma系バンドルが持ちます。Qwen3 のエクスポートにはありません)
+- `dialog.engine.model.binary.lora.adapters[].bin-sections[]`(設定されている場合。LoRAアダプタの重み)
+- `dialog.ssd-q1.forecast-prefix-name`(設定されている場合。投機デコードの forecast prefix。**これだけは `engine.model.binary` の下ではなく `dialog` の直下**です)
 
 いずれかのファイルが見つからない場合、起動時ロードは `sys.exit(1)`、`/v1/models/switch` 経由のロードはHTTP 500エラーになります(サーバ自体は落ちません)。
+
+**なぜ解決が必要か**: SDKはこれらを素のファイルハンドルで開くため、バンドル内の**相対パス**はモデルディレクトリではなく**サーバの作業ディレクトリ**を基準に解決されます。しかもエラーメッセージはそのどちらも示しません — LUT が無いときは `"Embedding File not present."`、forecast prefix が開けないときは「キャッシュが壊れている」ように見えるメッセージが出ます。先に `model_root` 基準で解決しておくことで、どこから起動してもバンドルが動きます。
 
 #### `QnnHtp.poll` はCPUを約260%使うが、ここでは何の得も無い
 
@@ -618,7 +635,12 @@ pip install .[logprobs,vlm]      # 開発中は -e . でも可
 インストールすると `genie-server` コマンドが入ります。インストールしない場合も、
 リポジトリ直下のランチャーが自分で `src/` を `sys.path` に足すので、
 クローンしたままで動きます。`genie_server/` を `genie-server.py` の隣にコピーした
-配置(実機がこの形)でも同様です。
+配置でも同様です。ランチャーは「インストール済みパッケージ → 隣の `genie_server/`
+→ `src/`」の順に探すので、どちらの配置でも動きます。当方のボードはリリース版の
+wheel を venv に入れ、`genie-server` コマンドで起動しています。**避けるべき配置は
+1つだけ** — インストール済みパッケージとディレクトリコピーを併存させることです。
+コピーがインストール済みパッケージを隠してしまい、どちらが動いているのか
+分からなくなります。
 
 ```bash
 genie-server                     # インストール済みの場合
@@ -741,14 +763,20 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 > `eos-token` はサーバではなく**バンドル側の設定**です — 応答に `<turn\|>` が繰り返し現れたら、
 > まずこの配列を疑ってください。
 >
-> **gemma4 には、このサーバがまだ使っていないネイティブマーカーがあります。**
+> **gemma4 のツールマーカーは独自のもので、サーバはそれを話します。**
 > ツール呼び出しは `<\|tool_call>call:NAME{...}<tool_call\|>`、宣言は
 > `<\|tool>declaration:NAME{...}<tool\|>`、応答は
-> `<\|tool_response>response:NAME{...}<tool_response\|>`、文字列引数は
-> `key:<\|"\|>value<\|"\|>`、推論は `<\|channel>thought...<channel\|>` です。
-> 本サーバはツールの宣言・解析を依然として Hermes 形式の `<tool_call>` JSON で行うため、
-> **gemma4 モデルに対するツール呼び出しはまだ配線されていません** —
-> モデルは自身のマーカーで答え、それが本文として届きます。
+> `<\|tool_response>response:NAME{...}<tool_response\|>` で、文字列引数は
+> JSON のクォートではなく `<\|"\|>` で囲みます。このテンプレートのスロットは、
+> Hermes 形式の `<tool_call>` JSON ではなくこの方言でツール呼び出しを
+> 宣言・解析・再描画します — [`TOOL_FORMAT`](#設定-env_configjson) と、
+> ストリーミングの違いを説明している
+> [Function calling](./API.ja.md#function-calling-tools) を参照してください。
+>
+> まだ使っていないマーカーが1系統あります: 推論
+> (`<\|channel>thought...<channel\|>`)です。`enable_thinking` は Qwen3 の
+> `/no_think` ソフトスイッチであり、本サーバに gemma4 版の相当物はありません。
+> gemma4 バンドルはバンドル自身の既定の思考モードのままになります。
 
 ## Prefix KVキャッシュ
 
@@ -800,7 +828,16 @@ HITはバッチ単位でプレフィルを丸ごと消すので:
 
 ## Grammar制約デコーディング
 
-Genie SDK(qualla)は`basic` dialog(本サーバが使う型)でgrammar制約デコーディング(XGrammarバックエンド)をサポートしています。JSON Schema/正規表現/EBNFのいずれかで出力を制約し、無効なトークンをロジットマスキングで排除します(jump-forward高速化込み)。
+Genie SDK(qualla)は `basic` dialog(大半のバンドルが宣言する型)でgrammar制約デコーディング(XGrammarバックエンド)をサポートしています。JSON Schema/正規表現/EBNFのいずれかで出力を制約し、無効なトークンをロジットマスキングで排除します(jump-forward高速化込み)。
+
+> [!WARNING]
+> **制約を実際に適用するのは `basic` dialog だけです。** grammar オブジェクトを
+> 生成するのは基底の `Dialog` なので、どの dialog 型でも文句を言わずにロードされますが、
+> サンプリングした logits に `maskLogits` を掛けているのは `dialogs/basic.cpp` だけです。
+> `ssd-q1`(投機デコード)バンドルに `grammar` ブロックを付けると、モデルはロードされ、
+> 設定の検証も通り、ログにも何も出ず、**出力は制約されません**。SDK もサーバも
+> それを教えてくれないので、制約された応答を信用する前にバンドルの `dialog.type` が
+> `basic` であることを確認してください。
 
 **重要な制約: これはモデル/スロット単位で固定される機能であり、リクエストごとに切り替えることはできません。** Genie SDKの公開C API(`GenieDialog.h`)にはgrammarを実行時に設定・変更する関数が一切無く(`GenieDialog_setValue`のような汎用setterも存在しない)、grammarは`GenieDialog_create()`が内部でDialogを構築する際に`genie_config.json`から一度だけ読み込まれます。変更するには`GenieDialogConfig`からDialogを作り直す必要があり、これは`/v1/models/switch`と同等のコスト(モデル再ロード)です。
 
@@ -1312,9 +1349,10 @@ tokenizer_backend=huggingface,tokenizer=<hf_model>,max_tokens=512,num_concurrent
 `/v1/completions` を話すため、本サーバに対してそのまま実行できます。実行スクリプト・
 インストール手順・カテゴリ別の所要時間は [examples/bfcl](../examples/bfcl) を参照。
 
-**BFCL は本サーバのチャットテンプレートとツールパースをバイパスします。** HF
-tokenizer のチャットテンプレートから Hermes プロンプトを自前で組み立て、
-`/v1/completions` に生テキストを送り、応答から `<tool_call>` を自前でパースします。
+**BFCL は本サーバのチャットテンプレートとツールパースをバイパスします。**
+各ハンドラがプロンプトを自前で組み立て(HF tokenizer のチャットテンプレートから
+Hermes 形式、gemma4 ハンドラなら gemma4 のマーカー)、`/v1/completions` に
+生テキストを送り、応答から呼び出しを自前でパースします。
 `/v1/chat/completions`・`tools`・`tool_choice`・`TOOL_CALL_RECOVERY` は一切関与しません。
 リーダーボードとしては正しい設計ですが、**`<tool_call>` マーカーが不安定なモデルは
 実力より大幅に低い点数になり、本サーバの回収機能では救えません** — マーカーが化けた
@@ -1374,6 +1412,6 @@ APIを残してあるのは、コストが無く、答えがターゲットご�
 - `--workers` を1より大きくして起動しないこと(各スロットのグローバルなNPUハンドル状態が壊れます)。
 - `POST /v1/models/switch` は既定で旧モデルを解放してから新モデルをロードするため、ロードに失敗するとそのスロットは完全に未ロード状態になることがあり、以降そのスロットに触れる全エンドポイントが次のswitch成功まで`503`を返します。`"unload_first": false` は新旧を同時にHTPデバイスへ載せることで旧モデルをフォールバックとして残せますが、**SA8255Pボードではこの同時常駐は当てになりません** — 36回のスワップを実測した結果、成否はどのモデルの組み合わせかでは決まらず(同じ組み合わせがあるときは6/6、別のときは0/8)、デバイスのメモリに余裕があり、かつ自分たちのスワップをそこでテスト済みの場合にのみ使う価値があります。エンドポイント自身の説明を参照。
 - 2つのスロットが同じ`active_model_id`(モデルディレクトリ名)を持つ場合、`model`フィールドによる自動ルーティングは`slots`配列内で後にあるスロットを優先します。`/v1/completions`/`/v1/chat/completions`のbodyに明示的に`"slot": "<名前>"`を指定すればそのスロットを直接指定できます(`model`によるルーティングより優先)。他にもスロット名を直接使うAPI(`/v1/models/switch`の`slot`、`/v1/server/idle`の`?slot=`)があります。
-- **`dialog.type` が `ssd-q1`(投機デコード)のバンドルには、パッチ版ライブラリが要ります。** 本サーバは毎クエリ前にリセットしますが、素の 2.49 ではこの種のダイアログがそれに耐えないためです。同じ理由で LoRA も使えません。症状・原因・パッチを当てられない場合の対処は [D5](./QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す) にあります。
+- **素の 2.49.x ライブラリでは、`dialog.type` が `ssd-q1`(投機デコード)のバンドルにパッチ版が要ります。** 本サーバは毎クエリ前にリセットしますが、素の 2.49 ではこの種のダイアログがそれに耐えないためです。同じ理由で LoRA も使えません。これは投機デコードバンドル一般の制約ではなく **2.49 の回帰**で、2.48.40.260702 では正しく動きますし、以後の SDK で直る可能性もあります。症状・原因・手元の SDK のソースで1分で確かめる方法・パッチを当てられない場合の対処は [D5](./QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す) にあります。
 - Grammar制約([該当セクション](#grammar制約デコーディング))はモデル/スロット単位で固定であり、`response_format`のようなリクエスト単位の切り替えには対応していません(Genie SDKの公開APIに実行時変更手段が無いため)。
 - VLM([該当セクション](#vlmマルチモーダル対応))は単発リクエストのみ(会話履歴なし)。リクエスト側の`max_tokens`/`stop`は無視され、生成長は代わりにスロット単位の`VLM_SLOTS[].max_tokens`で制限されます。クライアントが切断しても実行は止まりません — `GenieNode`/`GeniePipeline`にabort呼び出しが無いため、応答が終わるまでスロットは占有され、次のリクエストは待たされます。ストリーミングは動作し、非ストリーミングと同じテキストを返します。LoRA・Prefix KVキャッシュ・grammar制約・`/v1/models/switch`はVLMスロットには非対応です。

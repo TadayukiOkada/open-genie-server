@@ -65,7 +65,8 @@ The full list is in [MANUAL.md](MANUAL.md#limitations) and the
 - `n > 1` is rejected; one text slot serializes its requests behind one
   dialog handle; VLM slots are single-turn and support neither LoRA, prefix
   caching, grammar, nor hot-swapping.
-- A bundle whose `dialog.type` is `ssd-q1` needs a patched library.
+- A bundle whose `dialog.type` is `ssd-q1` needs a patched library **on
+  2.49.x** — a 2.49 regression, not a property of such bundles.
 - Holding two models on one HTP device at once is not dependable, and whether
   a second model fits at all depends on what loaded first rather than on the
   total size.

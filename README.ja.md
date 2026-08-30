@@ -25,7 +25,7 @@ Qualcomm Genie C API (`libGenie.so`) を OpenAI互換のREST APIとして公開�
 ## 特徴
 
 - `/v1/completions`・`/v1/chat/completions` — OpenAI互換のテキスト/チャット補完(ストリーミング対応。`/v1` なしのパスにも登録)
-- **Function calling(`tools`)対応** — Qwen3系モデル向けのHermes形式ツール呼び出し。出力の `<tool_call>` をOpenAIの `message.tool_calls` / `finish_reason: "tool_calls"` に変換し、ストリーミング中は正しくホールドバック
+- **Function calling(`tools`)対応** — プロンプトの方言を2つ実装し、スロットのチャットテンプレートから自動で選択。Qwen3系向けの Hermes `<tool_call>` JSON と、gemma4 独自の `<|tool_call>call:NAME{...}` トークン。どちらでもワイヤー形式はOpenAIのままで、`message.tool_calls` / `finish_reason: "tool_calls"` に変換し、ストリーミング中にテキストとして漏らさない
 - `lm_eval`(`local-completions` / `local-chat-completions`)にそのまま対応。トークンID形式のプロンプトもサーバ側でデコード
 - **Logprobs対応**(SDKのカスタムサンプラーフック経由): 生成トークンの`logprobs`/`top_logprobs`(トークンあたり数msのオーバーヘッド、未使用時はゼロ)に加え、**プロンプトスコアリング**(`echo`+`logprobs`のteacher forcing)でlm_evalのloglikelihoodタスク(hellaswag, arc, mmlu等)も実行可能 — デコード速度で走るため`POST /v1/server/prompt_logprobs`によるゲート付き
 - Open WebUIフレンドリー — parts配列形式 `content` のフラット化、`GET /health`、CORS、ストリーミング `usage` チャンク(`stream_options.include_usage`)
@@ -204,7 +204,7 @@ pull request のたびに Python 3.10 / 3.12 で実行されます
 ## 既知の制約
 
 - **本サーバは、このページ冒頭で説明した素のライブラリでのリセット系欠陥を防ぎません** — 検知も復旧もしません。回避はデプロイ側の選択です — [QAIRT バージョン別の問題点](./docs/QAIRT_VERSIONS.ja.md)を参照。
-- **投機デコード向けにビルドされたバンドル(`"dialog": {"type": "ssd-q1"}`)にはパッチ版ライブラリが要り、それ無しでは LoRA も使えません。** 理由と、バンドル側の1行の書き換えで回避する方法は [D5](./docs/QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す) を参照。
+- **2.49.x のライブラリでは、投機デコード向けにビルドされたバンドル(`"dialog": {"type": "ssd-q1"}`)にパッチ版が要り、それ無しでは LoRA も使えません。** これはバンドル側の性質ではなく **2.49 の回帰**で、2.48.40.260702 では正しく動きます。理由と、バンドル側の1行の書き換えで回避する方法は [D5](./docs/QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す) を参照。
 - 1テキストスロット = 1 `GenieDialog` ハンドルで、スロット内のリクエストはそのスロット自身のロックで直列化されます(`TEXT_SLOTS` 未設定時は単一スロットのみで、従来通り全リクエストが直列化されます)。
 - `n > 1`(1リクエストでの複数補完同時生成)は非対応で、`400` で拒否されます。
 - Llama2/Mistralテンプレートはシステムプロンプトを `[INST]` に埋め込むため、prefix KVキャッシュの対象外。

@@ -110,15 +110,23 @@ curl $base_url/v1/chat/completions \
 
 #### Function calling (`tools`)
 
-リクエストにOpenAI `tools` が付いていると、サーバはそれを**Hermes形式**でsystemプロンプトに描画します — Qwen3系モデルが実際に学習しているフォーマットで、Qualcomm自身の`qai-appbuilder` GenieAPIServiceリファレンスと同じアプローチです:
+OpenAIの `tools` はワイヤーフォーマットであってプロンプトフォーマットではありません。そこでサーバは、**そのスロットのモデルが学習している方言**でsystemプロンプトに描画します。実装済みの方言は2つで、スロットは自身のチャットテンプレートから選びます(`TOOL_FORMAT` で上書き可 — [MANUAL](./MANUAL.ja.md#設定-env_configjson) 参照):
 
-- 関数シグネチャは `<tools></tools>` XMLタグでsystemプロンプト末尾に追記されます(systemメッセージが無ければ新規作成)。このブロックはキャッシュ可能なsystem prefixの一部なので、prefix KVキャッシュの恩恵を受けます。
+| 方言 | 対象スロット | 宣言 | 呼び出し |
+|---|---|---|---|
+| `hermes`(既定) | `gemma4` 以外の全テンプレート | `<tools>` … `</tools>` | `<tool_call>{"name": …, "arguments": …}</tool_call>` |
+| `gemma4` | `gemma4` テンプレート | `<\|tool>declaration:NAME{...}<tool\|>` | `<\|tool_call>call:NAME{...}<tool_call\|>` |
+
+Hermes は Qwen3系モデルが実際に学習しているフォーマットで、Qualcomm自身の `qai-appbuilder` GenieAPIService リファレンスと同じアプローチです。gemma4 の方は Google 自身のもので、**JSONではありません** — 文字列は `<\|"\|>` で囲まれ、キーは dictsort 順に並びます。**送受信するワイヤー形式はどちらでもOpenAIのまま**で、違うのはプロンプトと解析だけです。以下は Hermes を基準に説明し、gemma4 が異なる箇所を都度示します。
+
+- 関数シグネチャは `<tools></tools>` XMLタグでsystemプロンプト末尾に追記されます(systemメッセージが無ければ新規作成)。このブロックはキャッシュ可能なsystem prefixの一部なので、prefix KVキャッシュの恩恵を受けます。gemma4 も同じくsystemターンに宣言を置きます(gemma4 では `system` が独立ターンなのでこれができます)。
 - モデル出力中の `<tool_call>{"name": ..., "arguments": ...}</tool_call>` ブロックはOpenAIの `message.tool_calls`(`call_...` idを生成)にパースされ、`finish_reason` は `"tool_calls"` になります。複数ブロックは複数(並列)ツール呼び出しに。JSONとしてパースできないブロックは黙って捨てずに `content` に残します。
 - **モデルが開いたまま閉じなかったブロックはテキストのまま残る**(`TOOL_CALL_RECOVERY` が ON のときだけ回収する)。小さいモデルは`</tool_call>`を落としてJSON直後にEOSを出すことがある(`qwen3_0_6b` w4a16 で観測。gemma4 も自身のマーカーで同じことをする)。**回収は可能**だが — 生成は終わっており JSON も完全 — **自分の呼び出しを閉じないモデルには、開きマーカーを化けさせるのと同種の欠陥がある**。既定で修復すると、回収の余地が無い `/v1/completions` に比べてこのエンドポイントでだけバンドルの成績が良く見えることになる。`max_tokens`でJSONの途中で切れた場合は、どちらの設定でも`content`に残る(引数を捏造しないため)。
 - **マーカーが化けた・欠落した呼び出しも、その`name`がこのリクエストで宣言されたツール名なら回収する**(`TOOL_CALL_RECOVERY`、**既定OFF** — 計測対象のバンドルの欠陥を隠すものであり、しかもこのエンドポイントにしか効かず `/v1/completions` には効かないため)。SA8255Pのモデル2つがこれを必要とする。`qwen3_4b_instruct_2507`のw4a16は`<tool_call>`トークンの代わりにキリル文字(`ФРАГМЕНТ`、`Флагорное`など、**リクエストごとに違う文字列**)を出し、`temperature: 0`・20プロンプトの実測で呼び出しの**約半数**を失う。`qwen3_0_6b`はタグ自体を出さずthinkブロックの後に裸のJSONを置き、約4分の1を失う。どちらも呼び出しの中身は正しいので、この機能が無ければ、クライアントのコードが`message.tool_calls`を読んでいるのに`finish_reason: "stop"`のプレーンテキストが返る。`qwen3_1_7b`は喪失0%でこの機能を必要としない。
 - **判別の決め手は宣言済みツール名との一致である。** 閉じタグだけが無い場合に裸のJSONをテキストのまま残していたのは、JSONで正当に回答するモデルを関数呼び出しと誤読しないためだった。`name`が実際に送られてきたツールであることを要求すれば、その懸念は無くなる。それ以外の名前のJSONは`content`に残り、`TOOL_CALL_RECOVERY`が`false`(既定)のときは全て`content`に残る — マーカーを確実に出すモデルにとっても、これが正しい設定である。化けたマーカー自体も呼び出しと一緒に取り除く: 隣接する行のうち空白を含まないものをマーカーとみなすため、**ツール呼び出しの隣にある本物の一語だけの行も失われる**。
-- 往復の履歴も理解します: `tool_calls` 付きassistantメッセージは `<tool_call>` ブロックに再描画され、`role: "tool"` の結果メッセージは `<tool_response>` ブロック(chatml)/ `ipython` ターン(llama3)として、モデル自身のチャットテンプレート通りに描画されます。
-- **ストリーミング**: `<tool_call>` ブロックはホールドバックされ(テキストとしてクライアントに漏れません)、生成完了後に完全な呼び出しを載せた `delta.tool_calls` チャンクを1つ送出し、`finish_reason: "tool_calls"` で終わります。`TOOL_CALL_RECOVERY`をONにしたとき、化けたマーカーはタグではないため、気づく前にcontentとして流れ出てしまい取り消せません。そこでテキストを1行ずつ保留し、呼び出しの本体でもその隣のマーカーでもないと確定してから流します。散文は通常どおりストリーミングされますが、最初の1語だけは「その行がマーカーではない」ことを示す空白が来るまで待ちます。
+- 往復の履歴も理解します: `tool_calls` 付きassistantメッセージは `<tool_call>` ブロックに再描画され、`role: "tool"` の結果メッセージは `<tool_response>` ブロック(chatml)/ `ipython` ターン(llama3)として、モデル自身のチャットテンプレート通りに描画されます。gemma4 スロットではどちらもその方言で再描画されます — 呼び出しは `<\|tool_call>call:NAME{...}<tool_call\|>`、結果は `<\|tool_response>response:NAME{...}<tool_response\|>` を載せた user ターンです。
+- **ストリーミング(Hermes)**: `<tool_call>` ブロックはホールドバックされ(テキストとしてクライアントに漏れません)、生成完了後に完全な呼び出しを載せた `delta.tool_calls` チャンクを1つ送出し、`finish_reason: "tool_calls"` で終わります。`TOOL_CALL_RECOVERY`をONにしたとき、化けたマーカーはタグではないため、気づく前にcontentとして流れ出てしまい取り消せません。そこでテキストを1行ずつ保留し、呼び出しの本体でもその隣のマーカーでもないと確定してから流します。散文は通常どおりストリーミングされますが、最初の1語だけは「その行がマーカーではない」ことを示す空白が来るまで待ちます。
+- **ストリーミング(gemma4)**: 応答を**丸ごとバッファし**、最後にまとめて解決します。したがってクライアントには content と `tool_calls` が終盤のチャンクで届き、**それまでテキストは1文字も流れません**(チャンク列としては正しいSSEですが、逐次的には届きません)。Hermes には手書きの逐次フィルタがあり gemma4 には無い、というだけの違いです。バッファ方式は方言を書いたその日から使えるようにするためのもので、後から逐次版に差し替えてもクライアントから見える違いは**テキストが届くタイミングだけ**です。チャンク形状の確認が目的でないなら、gemma4 では非ストリーミングを使ってください。
 
 ```bash
 curl $base_url/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -131,7 +139,7 @@ curl $base_url/v1/chat/completions -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Function callingはQwen3系(chatml)モデルで最もよく機能します。llama3系にも同じHermesブロックをベストエフォートで注入します。整形式の呼び出しを実際に出力するかどうかはモデル側の性質であり、サーバは保証しません。
+Function callingはQwen3系(chatml)モデルで最もよく機能します。llama3系・llama2系には固有の方言を実装していないため、同じHermesブロックをベストエフォートで注入します。整形式の呼び出しを実際に出力するかどうかはモデル側の性質であり、サーバは保証しません — そしてその差は大きく、実測した `gemma4-e2b` バンドルは自身の方言こそ正しく話すものの、呼ぶ関数を頻繁に間違えます([examples/bfcl](../examples/bfcl/README.ja.md#gemma4) 参照)。
 
 ## サーバの状態と制御
 
@@ -148,14 +156,19 @@ Function callingはQwen3系(chatml)モデルで最もよく機能します。lla
   "context_occupancy": 128,
   "slots": [
     {"name": "tool_call", "device_id": 0, "active_model": "tool-model", "active_lora": "",
-     "phase": "idle", "detail": "", "context_occupancy": 128},
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 128},
     {"name": "chat", "device_id": 1, "active_model": "general", "active_lora": "finetune-v2",
-     "phase": "idle", "detail": "", "context_occupancy": 0}
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0}
+  ],
+  "vlm_slots": [
+    {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl"}
   ]
 }
 ```
 
 - 各スロットの `context_occupancy` は、そのスロットのロックが即時取得できた場合のみ `GenieDialog_getValue(GENIE_DIALOG_PARAM_CONTEXT_OCCUPANCY)` で取得(取得できなければ `null`)。推論中でも本エンドポイント自体はブロックしません。
+- **`loaded` は「モデルが載っていないスロット」と「単に待機中のスロット」を区別する手段です。** `/v1/models/switch` が旧モデルを解放した後に新モデルのロードに失敗すると、そのスロットは `"loaded": false` のまま残り、以後そのスロットに触る全エンドポイントが、次の切り替えが成功するまで `503` を返します。
+- `vlm_slots` は常に存在し、VLMスロットが無ければ空配列です。VLMスロットは `phase` と `context_occupancy` を持ちません(composable pipeline がどちらも公開していないため)。
 
 ### GET /v1/server/idle
 
@@ -272,8 +285,10 @@ curl -X POST $base_url/v1/prefix/warmup \
 > LoRAを使う前に知っておく価値のある点が2つあります。ひとつは、バンドルが
 > **実質恒等のアダプタ**を同梱していることがある点(選んでも何も起きないように
 > 見えるのは、実際に何も起きていないため)。**別のアダプタとではなく、解放した状態と
-> 比較してください**。もうひとつは、**`dialog.type` が `ssd-q1` のバンドルでは、
-> ライブラリにパッチを当てない限り LoRA が一切使えない**点です —
+> 比較してください**。もうひとつは、素の **2.49.x** ライブラリでは
+> **`dialog.type` が `ssd-q1` のバンドルで LoRA が一切使えない**点です —
+> SDK がアダプタ切替後のリセットを要求し、そのリセットがこの種のダイアログを
+> 壊すためです。パッチ版、あるいは 2.48.40.260702 ではどちらも起きません:
 > [D5](./QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す)。
 
 > [!IMPORTANT]
@@ -299,6 +314,11 @@ curl -X POST $base_url/v1/prefix/warmup \
 **同じモデルディレクトリを2つのスロットに載せていると、モデル名では区別できず**、
 2本目には `slot` でしか到達できません。同じモデルを二度ロードしないなら、
 `model` だけで足ります。
+
+このルールより前からある GET が2つだけ、片方しか受け付けません:
+`/v1/server/idle` は `?slot=` のみ(`?model=` は不可)、
+`GET /v1/server/performance_policy` は `?model=` のみ(`?slot=` は不可)です。
+それ以外はどちらも受け付けます。
 
 ## モデルとLoRA
 
@@ -367,7 +387,7 @@ curl -X POST $base_url/v1/lora/release \
 
 ### GET /v1/lora/current
 
-現在適用中のLoRAアダプタ名を取得します。`?model=` でスロットを選択。対象スロットのロックを1秒だけ試行し、取得できなければキャッシュ済みの値を `"live": false` で返します(推論をブロックしないため)。
+現在適用中のLoRAアダプタ名を、SDKから読み戻して返します(`""` はベースモデル)。スロットの選択は [スロットの選び方](#スロットの選び方) と同じく `?slot=` が優先で、`?model=` がフォールバックです。対象スロットのロックを1秒だけ試行し、取得できなければキャッシュ済みの値を `"live": false` で返します(推論をブロックしないため)。
 
 ```json
 {"slot": "chat", "lora_adapter_name": "my-lora", "live": true}

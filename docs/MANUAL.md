@@ -85,7 +85,8 @@ The rest is Qualcomm's or ours:
 | `genie_server/config.py` | `env_config.json` parsing, process-environment setup |
 | `genie_server/capi.py` | ctypes bindings for the GenieDialog C API (`GenieLib`) + SDK constants |
 | `genie_server/templates.py` | chat-template rendering (chatml/llama3/llama2/gemma/gemma4), prefix splitting, `/no_think` |
-| `genie_server/tools.py` | OpenAI `tools` (function calling): Hermes prompt rendering + output parsing |
+| `genie_server/tools.py` | OpenAI `tools` (function calling), Hermes dialect: prompt rendering, output parsing, streaming filter |
+| `genie_server/tool_formats.py` | the registry of tool-call dialects (Hermes, gemma4) and which one a slot uses |
 | `genie_server/slots.py` | `Slot`/`SlotManager`: model loading, request routing, hot-swap |
 | `genie_server/prefix_cache.py` | on-disk KV-cache snapshots |
 | `genie_server/engine.py` | the generation engine: lock, watchdog, SDK params, prefix cache, `finish_reason` |
@@ -129,7 +130,11 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 
 **Verified against:** QAIRT **2.49.40.260810** and **2.49.1.260821**,
 `aarch64-oe-linux-gcc11.2`, on an SA8255P board, with Qwen3 w4a16 context
-binaries (`qwen3_0_6b`, `qwen3_4b_instruct_2507`).
+binaries (`qwen3_0_6b`, `qwen3_4b_instruct_2507`); and **2.48.40.260702**,
+`aarch64-android`, on the Android guest of the same board
+([Running on Android](#running-on-android)). **2.48 carries none of the three
+reset defects** — they arrived with 2.49's scheduler — so it is the one build
+here on which a stock library is not a liability.
 
 The rest of this section is about an export choice that is *not* a defect: how
 many context lengths to compile into a bundle.
@@ -338,11 +343,19 @@ Read together these give four statements that hold across every run:
    tried, so it was not pinned down further. **The threshold is not a property
    of the model alone — see the next table.**
 4. **The second model must go on the other NSP.** The one same-device
-   configuration failed. Note this run also loaded the *same* model twice, and
-   the generated HTP extension config carries
-   `"context": {"weight_sharing_enabled": true}` — so a weight-sharing conflict
-   is not excluded as the cause. Two *different* models on one NSP was not
-   tested.
+   configuration in the table failed, and because it also loaded the *same*
+   model twice — the generated HTP extension config carries
+   `"context": {"weight_sharing_enabled": true}` — a weight-sharing conflict
+   was initially not excluded as the cause. **It has since been excluded.**
+   Re-run with two *different* models, from a power cycle: 0.6B then 1.7B at
+   `device_id` 0 and **0** fails at `context index = 2 : err 1002`, and the
+   same pair at 0 and **1** loads and answers on both slots. The second
+   model's allocation sequence is byte-identical in the two runs
+   (276,431,360 across 8 buffers); the only difference is the `device_id`. So
+   this is a per-core limit, not weight sharing. What sets that limit is still
+   unknown — 0.6B + 0.6B and 0.6B + 1.7B fail alike on one core, which is
+   consistent with the first model alone reaching it, and there was no smaller
+   bundle to narrow it with.
 
 **A single-context-length export raises the threshold.** The 1.7B and the 4B
 were later re-exported at one context length (`context_lengths: [4096]`, and
@@ -530,7 +543,8 @@ The DSP-side skel library search path is built dynamically from the set of `devi
 |---|---|---|
 | `/v1/completions`, `/v1/chat/completions` | body's `model`, or body's `slot` (slot **name**) to override | primary slot (`slots[0]`) |
 | `/v1/prefix/warmup`, `/v1/lora/*` | body's `model` | primary slot |
-| `/v1/server/performance_policy` (GET), `/v1/lora/current` | query param `?model=` | primary slot |
+| `/v1/server/performance_policy` (GET) | query param `?model=` (no `?slot=`) | primary slot |
+| `/v1/lora/current` | query param `?slot=` (slot **name**), else `?model=` | primary slot |
 | `/v1/server/idle` | query param `?slot=` (slot **name**) | primary slot |
 | `POST /v1/models/switch` | body's `slot` (slot **name**, not a model ID) | primary slot |
 
@@ -564,7 +578,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `GENIE_PROFILE` | optional | `false` | Binds a `GenieProfile` to every text slot; read the SDK's own TTFT / prefill / decode KPIs from `GET /v1/server/profile` (see [Profiling](#profiling-sdk-side-kpis)). Needs a restart to change. |
 | `PROMPT_LOGPROBS` | optional | `false` | Enables prompt scoring (`echo`+`logprobs` teacher forcing, used by lm_eval loglikelihood tasks) at startup. Also toggleable at runtime via `POST /v1/server/prompt_logprobs` — see [Logprobs](#logprobs). |
 | `PROMPT_LOGPROBS_MAX_TOKENS` | optional | `4096` | Reject prompt-scoring requests longer than this many tokens (each request runs its whole prompt at decode speed). |
-| `TOOL_CALL_RECOVERY` | optional | `false` | Recover a tool call whose `<tool_call>` marker the model mangled or omitted, by matching the JSON's `name` against the tool names the request itself declared. `qwen3_4b_instruct_2507` w4a16 emits Cyrillic in place of the `<tool_call>` token on about half its calls and `qwen3_0_6b` omits the tags altogether, and in both cases the call body is correct — so with this off, the caller gets prose with `finish_reason: "stop"` while their code reads `message.tool_calls`. **Off by default anyway**: it conceals a defect in the bundle you are measuring, and it applies only to `/v1/chat/completions`, so the same model scores differently there than on `/v1/completions`, which has no recovery to apply. Turn it on when you want the application to work in spite of the bundle, and read the result as the application's rather than the model's. `qwen3_1_7b` marks its calls reliably and needs nothing. See [Function calling](API.md#function-calling-tools). |
+| `TOOL_CALL_RECOVERY` | optional | `false` | Recover a tool call the model marked badly. Two repairs, in both dialects: a call whose opening marker was mangled or omitted (matched by the JSON's `name` against the tool names the request itself declared), and a call the model opened, filled in correctly, and never closed. `qwen3_4b_instruct_2507` w4a16 emits Cyrillic in place of the `<tool_call>` token on about half its calls and `qwen3_0_6b` omits the tags altogether, and in both cases the call body is correct — so with this off, the caller gets prose with `finish_reason: "stop"` while their code reads `message.tool_calls`. **Off by default anyway**: it conceals a defect in the bundle you are measuring, and it applies only to `/v1/chat/completions`, so the same model scores differently there than on `/v1/completions`, which has no recovery to apply. Turn it on when you want the application to work in spite of the bundle, and read the result as the application's rather than the model's. `qwen3_1_7b` marks its calls reliably and needs nothing. See [Function calling](API.md#function-calling-tools). |
 
 Ready-made samples (single-slot / dual-NSP / text+VLM, with SA8775P model paths) are in [examples/config/](../examples/config/). Single-slot configuration example:
 
@@ -598,8 +612,13 @@ Each slot's `model_root`'s `genie_config.json` is passed as-is to the Genie SDK'
 - `dialog.engine.backend.extensions`
 - `dialog.engine.model.binary.ctx-bins` (an array)
 - `dialog.context.grammar.file` (if set — see [Grammar-Constrained Decoding](#grammar-constrained-decoding))
+- `dialog.embedding.lut-path` and `dialog.perlayer-embedding.lut-path` (if set — Gemma-class bundles carry these; the Qwen3 exports do not)
+- `dialog.engine.model.binary.lora.adapters[].bin-sections[]` (if set — the adapter weights)
+- `dialog.ssd-q1.forecast-prefix-name` (if set — the speculative-decoding forecast prefix; note this one sits directly under `dialog`, not under `engine.model.binary`)
 
 If any of these files is missing, the startup load calls `sys.exit(1)`; a load via `/v1/models/switch` returns an HTTP 500 instead (the server itself keeps running).
+
+**Why the server resolves them at all**: the SDK opens each of these with a plain file handle, so a *relative* path in the bundle resolves against the server's working directory rather than the model directory — and the resulting error names neither. A missing LUT is `"Embedding File not present."`, and a forecast prefix that cannot be opened reports a corrupt cache. Resolving them against `model_root` first means a bundle works wherever the server was started from.
 
 #### `QnnHtp.poll` costs ~260% CPU and buys nothing here
 
@@ -657,7 +676,12 @@ The distribution is `open-genie-server`, the import package is `genie_server`,
 and the install adds a `genie-server` command. Without an install, the
 repository-root launcher puts `src/` on `sys.path` itself, so a plain checkout
 runs as-is; so does a deployment where `genie_server/` was copied next to
-`genie-server.py`, which is how the device is set up.
+`genie-server.py`. The launcher looks in that order — installed package, then
+a sibling `genie_server/`, then `src/` — so a device set up either way keeps
+working. Our own board runs the released wheel in a virtualenv, started
+through the `genie-server` command; **keeping a directory copy beside it as
+well is the one arrangement to avoid**, since the copy shadows the installed
+package and you can no longer tell which one answered.
 
 ```bash
 genie-server                     # if installed
@@ -786,14 +810,20 @@ Prompt format per template:
 > content. `eos-token` is the bundle's to set, not the server's — if you see
 > repeated `<turn\|>` in replies, that array is the place to look.
 >
-> **gemma4 has more native markers than this server currently uses.** Tool
+> **gemma4's tool markers are its own, and the server speaks them.** Tool
 > calls are `<\|tool_call>call:NAME{...}<tool_call\|>`, declarations
 > `<\|tool>declaration:NAME{...}<tool\|>`, responses
-> `<\|tool_response>response:NAME{...}<tool_response\|>`, string arguments
-> `key:<\|"\|>value<\|"\|>`, and reasoning `<\|channel>thought...<channel\|>`.
-> This server still declares and parses tools in the Hermes `<tool_call>` JSON
-> form, so **tool calling against a gemma4 model is not yet wired up** — the
-> model answers in its own markers and they arrive as content.
+> `<\|tool_response>response:NAME{...}<tool_response\|>`, and a string
+> argument is wrapped in `<\|"\|>` rather than quoted as JSON. A slot on this
+> template declares, parses and re-renders tool calls in that dialect instead
+> of the Hermes `<tool_call>` JSON form — see [`TOOL_FORMAT`](#configuration-env_configjson)
+> and [Function calling](./API.md#function-calling-tools), which covers what
+> streaming does differently here.
+>
+> One marker family is still unused: reasoning
+> (`<\|channel>thought...<channel\|>`). `enable_thinking` is Qwen3's
+> `/no_think` soft switch and has no gemma4 equivalent in this server, so a
+> gemma4 bundle is left in whatever thinking mode it defaults to.
 
 ## Prefix KV Cache
 
@@ -847,7 +877,16 @@ happens once per prefix, in warmup, off the request path.
 
 ## Grammar-Constrained Decoding
 
-The Genie SDK (qualla) supports grammar-constrained decoding (the XGrammar backend) on `basic` dialogs (the type this server uses). Output can be constrained by JSON Schema, regex, or EBNF, with invalid tokens excluded via logit masking (including jump-forward acceleration).
+The Genie SDK (qualla) supports grammar-constrained decoding (the XGrammar backend) on `basic` dialogs — the type most bundles declare. Output can be constrained by JSON Schema, regex, or EBNF, with invalid tokens excluded via logit masking (including jump-forward acceleration).
+
+> [!WARNING]
+> **Only a `basic` dialog applies the constraint.** The grammar object is built
+> by the base `Dialog`, so any dialog type loads it without complaint, but
+> `dialogs/basic.cpp` is the only one that calls `maskLogits` on the sampled
+> logits. Put a `grammar` block on an `ssd-q1` (speculative-decoding) bundle and
+> the model loads, the config validates, nothing is logged — and the output is
+> unconstrained. Neither the SDK nor this server tells you; check that the
+> bundle's `dialog.type` is `basic` before trusting a constrained response.
 
 **Important limitation: this is fixed per model/slot, and cannot be switched per request.** The Genie SDK's public C API (`GenieDialog.h`) has no function to set or change grammar at runtime at all (there's no generic setter like `GenieDialog_setValue` either) — grammar is read from `genie_config.json` exactly once, when `GenieDialog_create()` builds the Dialog internally. Changing it requires rebuilding the Dialog from a `GenieDialogConfig`, which costs the same as `/v1/models/switch` (a full model reload).
 
@@ -1351,9 +1390,10 @@ speak `/v1/completions`, so it runs against this server unchanged. See
 [examples/bfcl](../examples/bfcl) for a runner script, the install notes, and
 per-category timings.
 
-**BFCL bypasses this server's chat template and tool parsing.** It builds the
-Hermes prompt itself from the HF tokenizer's chat template, sends raw text to
-`/v1/completions`, and parses `<tool_call>` blocks out of the reply on its own —
+**BFCL bypasses this server's chat template and tool parsing.** Each handler
+builds its own prompt — Hermes from the HF tokenizer's chat template, or
+gemma4's markers for the gemma4 handlers — sends raw text to
+`/v1/completions`, and parses the calls out of the reply on its own —
 `/v1/chat/completions`, `tools`, `tool_choice` and `TOOL_CALL_RECOVERY` play no
 part. That is correct for a leaderboard, but it means **a model whose
 `<tool_call>` marker is unreliable scores far below its ability and this server's
@@ -1414,6 +1454,6 @@ Recommended steps for getting reproducible benchmark numbers:
 - Never start with `--workers` greater than 1 (it breaks each slot's global NPU handle state).
 - `POST /v1/models/switch` frees the old model before loading the new one by default, so a slot can end up with no model loaded at all if the new load fails; every endpoint that touches that slot then returns `503` until a later switch succeeds. `"unload_first": false` keeps the old model as a fallback by holding both on the slot's HTP device at once, but **that overlap is not dependable on the SA8255P board** — over 36 measured swaps the outcome did not follow from which models were involved (the same pair went 6/6 in one run and 0/8 in another), so it is only worth using where the device has memory to spare and your own swaps have been tested there. See the endpoint's own docs.
 - If two slots share the same `active_model_id` (model directory name), automatic routing by the `model` field prefers whichever slot appears later in the `slots` array. Pass an explicit `"slot": "<name>"` in the request body to `/v1/completions`/`/v1/chat/completions` to target one directly (it overrides `model`-based routing), or use the other APIs that address slots directly by name (`/v1/models/switch`'s `slot`, `/v1/server/idle`'s `?slot=`).
-- **A bundle whose `dialog.type` is `ssd-q1` (speculative decoding) needs a patched library**, because this server resets before every query and a stock 2.49 does not survive that on such a dialog. LoRA is unusable there for the same reason. [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) has the symptom, the cause, and what to change if you cannot patch.
+- **On a stock 2.49.x library, a bundle whose `dialog.type` is `ssd-q1` (speculative decoding) needs a patched one**, because this server resets before every query and a stock 2.49 does not survive that on such a dialog. LoRA is unusable there for the same reason. This is a 2.49 regression rather than a limitation of speculative-decoding bundles — 2.48.40.260702 runs them correctly, and a later SDK may too. [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) has the symptom, the cause, the one-minute check against your own SDK's sources, and what to change if you cannot patch.
 - Grammar constraints ([see the relevant section](#grammar-constrained-decoding)) are fixed per model/slot and don't support per-request switching like `response_format` (the Genie SDK's public API has no runtime way to change it).
 - VLM ([see the relevant section](#vlm-multimodal-support)) only supports single-shot requests (no conversation history). A request's own `max_tokens`/`stop` are ignored — generation is bounded by `VLM_SLOTS[].max_tokens` for the whole slot instead — and a client disconnect does not stop the run: there is no `GenieNode`/`GeniePipeline` abort call, so the slot stays busy until the answer finishes and the next request waits. Streaming does work, and returns the same text as the non-streaming call. LoRA, the prefix KV cache, grammar constraints, and `/v1/models/switch` are unsupported on VLM slots.

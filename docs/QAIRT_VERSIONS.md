@@ -49,8 +49,12 @@ section below says how to check a build we have not seen.
   is present in both. For D1 and D2 those files are `qualla/dialog.cpp` and
   `qualla/engines/qnn-htp/KVCache/kvmanager.{cpp,hpp}`, and for D5 it is
   `qualla/dialogs/ssd-q1.cpp`; all of them are identical between
-  2.49.40.260810 and 2.49.1.260821. This is a source argument, not a
-  hardware run: we have not re-run the D1/D2 reproducers on 2.49.1.
+  2.49.40.260810 and 2.49.1.260821. `ssd-q1.cpp` **differs** from
+  2.48.40.260702's, and that difference is exactly what D5 is: the two
+  builds' `SelfSpecDecDialog::reset()` are byte-identical, and 2.49's
+  `completeInit()` is what grew the slot calls that `reset()` does not
+  mirror. This is a source argument, not a hardware run: we have not re-run
+  the D1/D2 reproducers on 2.49.1.
 - **not reproduced** — the reproducer was run and did not trigger. This is
   weaker than "absent": it means that sequence is safe on that build, not that
   no sequence is.

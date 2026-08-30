@@ -111,15 +111,23 @@ The streaming response is SSE (`text/event-stream`); per the OpenAI spec, it sta
 
 #### Function calling (`tools`)
 
-When a request carries OpenAI `tools`, the server renders them into the system prompt in the **Hermes format** — the convention Qwen3-class models are actually trained on, and the same approach as Qualcomm's own `qai-appbuilder` GenieAPIService reference:
+OpenAI's `tools` are a wire format, not a prompt format, so the server renders them into the system prompt in **the dialect the slot's model was trained on**. Two are implemented, and a slot picks one from its chat template (`TOOL_FORMAT` overrides — see [MANUAL](./MANUAL.md#configuration-env_configjson)):
 
-- Function signatures go inside `<tools></tools>` XML tags appended to the system prompt (one is synthesized if the request has none). This block is part of the cacheable system prefix, so it benefits from the prefix KV cache.
+| Dialect | Slots | Declaration | Call |
+|---|---|---|---|
+| `hermes` (default) | every template but `gemma4` | `<tools>` … `</tools>` | `<tool_call>{"name": …, "arguments": …}</tool_call>` |
+| `gemma4` | the `gemma4` template | `<\|tool>declaration:NAME{...}<tool\|>` | `<\|tool_call>call:NAME{...}<tool_call\|>` |
+
+Hermes is the convention Qwen3-class models are actually trained on, and the same approach as Qualcomm's own `qai-appbuilder` GenieAPIService reference. gemma4's is Google's own: not JSON — strings are wrapped in a `<\|"\|>` delimiter and keys come in dictsort order. **The wire shape you send and receive is OpenAI's either way**; only the prompt and the parsing differ. The rest of this section describes Hermes and notes where gemma4 differs.
+
+- Function signatures go inside `<tools></tools>` XML tags appended to the system prompt (one is synthesized if the request has none). This block is part of the cacheable system prefix, so it benefits from the prefix KV cache. gemma4 declares into the system turn the same way, which it can because `system` is its own turn there.
 - `<tool_call>{"name": ..., "arguments": ...}</tool_call>` blocks in the model output are parsed into OpenAI `message.tool_calls` (with generated `call_...` ids) and `finish_reason` becomes `"tool_calls"`. Multiple blocks become multiple (parallel) tool calls. Unparseable blocks are left in `content` rather than dropped.
 - **A block the model opened but never closed stays text**, unless `TOOL_CALL_RECOVERY` is on. Small models drop the `</tool_call>` tag and emit EOS straight after the JSON (observed on `qwen3_0_6b` w4a16, and on gemma4 with its own markers). It is recoverable — generation has stopped and the JSON is complete — but a model that will not terminate its own call has a defect of the same kind as one that mangles the opening marker, and repairing it by default would make the bundle score better here than on `/v1/completions`, which has no recovery to apply. A generation cut off mid-JSON by `max_tokens` stays in `content` either way: guessing at it would invent arguments.
 - **A call whose marker was mangled or omitted is recovered too, if its `name` is one this request declared** (`TOOL_CALL_RECOVERY`, **off by default** — it hides a defect in the bundle you are measuring, and it reaches only this endpoint, never `/v1/completions`). Two models on the SA8255P need it. `qwen3_4b_instruct_2507` w4a16 substitutes Cyrillic for the `<tool_call>` token — `ФРАГМЕНТ`, `Флагорное`, a different string per request — on roughly **half** of its calls, measured over 20 prompts at `temperature: 0`; `qwen3_0_6b` omits the tags entirely and drops bare JSON after its think block, losing about a quarter. The call body is correct in both cases, so without this the caller gets prose with `finish_reason: "stop"` while their code reads `message.tool_calls`. `qwen3_1_7b` loses none and does not need this.
 - **The declared-name match is the whole discriminator.** Bare JSON was deliberately left as text when only the closing tag was missing, because a model legitimately answering in JSON would be misread as calling a function; requiring `name` to be a tool the caller actually sent removes that. JSON naming anything else stays in `content`, and so does everything when `TOOL_CALL_RECOVERY` is `false`, the default — which is also the right setting for a model that marks its calls reliably. The mangled marker itself is dropped along with the call: a neighbouring line with no whitespace in it is taken as the marker, which means a genuine one-word line beside a tool call is lost too.
-- The tool round-trip history is understood on the way back in: assistant messages with `tool_calls` are re-rendered as `<tool_call>` blocks, and `role: "tool"` result messages are rendered as `<tool_response>` blocks (chatml) / `ipython` turns (llama3), matching the models' own chat templates.
-- **Streaming**: `<tool_call>` blocks are held back (never leaked to the client as text); after generation completes, one `delta.tool_calls` chunk with the complete calls is emitted, followed by `finish_reason: "tool_calls"`. With `TOOL_CALL_RECOVERY` turned on, a mangled marker is not a tag and so would stream out as content before anything noticed, which is too late to take back — so text is additionally held one line at a time until it is provably neither a call body nor the marker beside one. Prose streams as usual apart from its first word, which waits for the space that proves the line is not a marker.
+- The tool round-trip history is understood on the way back in: assistant messages with `tool_calls` are re-rendered as `<tool_call>` blocks, and `role: "tool"` result messages are rendered as `<tool_response>` blocks (chatml) / `ipython` turns (llama3), matching the models' own chat templates. A gemma4 slot re-renders both in its own dialect — the call as `<\|tool_call>call:NAME{...}<tool_call\|>`, the result as a user turn holding `<\|tool_response>response:NAME{...}<tool_response\|>`.
+- **Streaming (Hermes)**: `<tool_call>` blocks are held back (never leaked to the client as text); after generation completes, one `delta.tool_calls` chunk with the complete calls is emitted, followed by `finish_reason: "tool_calls"`. With `TOOL_CALL_RECOVERY` turned on, a mangled marker is not a tag and so would stream out as content before anything noticed, which is too late to take back — so text is additionally held one line at a time until it is provably neither a call body nor the marker beside one. Prose streams as usual apart from its first word, which waits for the space that proves the line is not a marker.
+- **Streaming (gemma4)**: the reply is **buffered whole** and resolved at the end, so a client gets its content and `tool_calls` in the final chunks and **no text before then** — the chunk sequence is a valid SSE stream, but nothing arrives incrementally. Hermes has a hand-written incremental filter and gemma4 does not; the buffered path is what lets a dialect work the day it is written, and swapping in an incremental one later changes nothing a client can see except when the text arrives. Use non-streaming requests for gemma4 unless you specifically want the chunk shape.
 
 ```bash
 curl $base_url/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -132,7 +140,7 @@ curl $base_url/v1/chat/completions -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Function calling works best with Qwen3-family (chatml) models; for llama3-family the same Hermes block is injected as a best effort. Whether the model actually emits well-formed calls is a property of the model, not the server.
+Function calling works best with Qwen3-family (chatml) models; for llama3-family and llama2-family the same Hermes block is injected as a best effort, since no dialect of their own is implemented. Whether the model actually emits well-formed calls is a property of the model, not the server — and it varies a lot: the `gemma4-e2b` bundle we measured speaks its own dialect correctly but calls the wrong function often (see [examples/bfcl](../examples/bfcl/README.md#gemma4)).
 
 ## Server status and control
 
@@ -149,14 +157,19 @@ A non-blocking snapshot of current state. Since `bench_ttft.py` and similar tool
   "context_occupancy": 128,
   "slots": [
     {"name": "tool_call", "device_id": 0, "active_model": "tool-model", "active_lora": "",
-     "phase": "idle", "detail": "", "context_occupancy": 128},
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 128},
     {"name": "chat", "device_id": 1, "active_model": "general", "active_lora": "finetune-v2",
-     "phase": "idle", "detail": "", "context_occupancy": 0}
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0}
+  ],
+  "vlm_slots": [
+    {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl"}
   ]
 }
 ```
 
 - Each slot's `context_occupancy` is fetched via `GenieDialog_getValue(GENIE_DIALOG_PARAM_CONTEXT_OCCUPANCY)` only if that slot's lock can be acquired immediately (`null` if it can't). This endpoint itself never blocks, even during inference.
+- **`loaded` is how you tell a slot that has no model from one that is merely idle.** A `/v1/models/switch` that frees the old model and then fails to load the new one leaves that slot `"loaded": false`, and every endpoint touching it answers `503` until a later switch succeeds.
+- `vlm_slots` is always present, empty when none are configured. VLM slots report no `phase` or `context_occupancy`: the composable pipeline exposes neither.
 
 ### GET /v1/server/idle
 
@@ -275,8 +288,10 @@ curl -X POST $base_url/v1/prefix/warmup \
 > Two things are worth knowing before you reach for LoRA. A bundle may ship an
 > adapter that is effectively the identity, so selecting it looks like nothing
 > happened because nothing did — compare against the released state rather than
-> against another adapter. And **LoRA cannot be used at all on a bundle whose
-> `dialog.type` is `ssd-q1` unless the library is patched** —
+> against another adapter. And on a stock **2.49.x** library, **LoRA cannot be
+> used at all on a bundle whose `dialog.type` is `ssd-q1`** — the SDK requires
+> a reset after switching adapters, and that reset is what corrupts such a
+> dialog there. A patched library, or 2.48.40.260702, has neither problem:
 > [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog).
 
 > [!IMPORTANT]
@@ -303,6 +318,10 @@ written here once rather than at each of them.
 same model directory are indistinguishable by model name**, and the second one
 is reachable only by slot. If you never load the same model twice, `model`
 alone is enough.
+
+Two GETs predate the rule and accept only one of the two: `/v1/server/idle`
+takes `?slot=` and not `?model=`, and `GET /v1/server/performance_policy`
+takes `?model=` and not `?slot=`. Everything else accepts both.
 
 ## Models and LoRA
 
@@ -371,7 +390,7 @@ curl -X POST $base_url/v1/lora/release \
 
 ### GET /v1/lora/current
 
-Gets the name of the currently-applied LoRA adapter. `?model=` selects the slot. Tries to acquire the target slot's lock for up to 1 second; if it can't, returns the cached value with `"live": false` (so this never blocks inference).
+Gets the name of the currently-applied LoRA adapter, read live from the SDK (`""` means the base model). `?slot=` selects the slot and `?model=` is the fallback, as in [Selecting a slot](#selecting-a-slot). Tries to acquire the target slot's lock for up to 1 second; if it can't, returns the cached value with `"live": false` (so this never blocks inference).
 
 ```json
 {"slot": "chat", "lora_adapter_name": "my-lora", "live": true}

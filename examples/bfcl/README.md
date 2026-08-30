@@ -19,11 +19,14 @@ with no changes on either side.
 
 ## Read this before reading any number you get
 
-**BFCL bypasses this server's chat template and tool parsing.** The OSS handlers
-build the Hermes prompt themselves from the HF tokenizer's chat template, send it
-to `/v1/completions` as raw text, and parse `<tool_call>` blocks out of the reply
-on their own. `/v1/chat/completions`, `tools`, `tool_choice` and
-`TOOL_CALL_RECOVERY` are not involved.
+**BFCL bypasses this server's chat template and tool parsing.** Each handler
+builds the prompt itself — Hermes from the HF tokenizer's chat template for the
+Qwen3 handlers, gemma4's own markers for the [gemma4](#gemma4) ones below —
+sends it to `/v1/completions` as raw text, and parses the calls out of the reply
+on its own. `/v1/chat/completions`, `tools`, `tool_choice` and
+`TOOL_CALL_RECOVERY` are not involved, and neither is the server's own dialect
+registry: a handler and the server can implement the same dialect and still
+disagree, so a BFCL score is not a test of the server's tool support.
 
 That is the right design for a leaderboard — it measures the model, comparably
 across servers — but it has a consequence here:

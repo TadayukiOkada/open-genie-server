@@ -25,7 +25,7 @@ See [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/d
 ## Features
 
 - `/v1/completions` / `/v1/chat/completions` — OpenAI-compatible text/chat completion (streaming supported; also registered without the `/v1` prefix)
-- **Function calling (`tools`)** — Hermes-format tool calling for Qwen3-class models: `<tool_call>` output is parsed into OpenAI `message.tool_calls` / `finish_reason: "tool_calls"`, held back correctly during streaming
+- **Function calling (`tools`)** — two prompt dialects, chosen per slot from its chat template: Hermes `<tool_call>` JSON for Qwen3-class models, and gemma4's own `<|tool_call>call:NAME{...}` tokens. Either way the wire shape is OpenAI's — parsed into `message.tool_calls` / `finish_reason: "tool_calls"`, and never leaked as text mid-stream
 - Works out of the box with `lm_eval` (`local-completions` / `local-chat-completions`; token-id prompts are decoded server-side)
 - **Logprobs** via the SDK's custom-sampler hook: per-token `logprobs`/`top_logprobs` for generated tokens (a few ms/token overhead, zero when unused), and **prompt scoring** (`echo`+`logprobs` teacher forcing) that makes lm_eval loglikelihood tasks (hellaswag, arc, mmlu, ...) work — gated behind `POST /v1/server/prompt_logprobs` since it runs at decode speed
 - Open WebUI-friendly: parts-array `content` flattening, `GET /health`, CORS, streaming `usage` chunks (`stream_options.include_usage`)
@@ -206,7 +206,7 @@ To exercise a real device end-to-end from the host PC (with a Markdown/JSON repo
 ## Known limitations
 
 - **This server does not guard against the stock-library reset defects** described at the top of this page — it neither detects nor recovers from them. Avoiding them is a deployment choice: see [QAIRT Version Issues](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md).
-- **A bundle built for speculative decoding (`"dialog": {"type": "ssd-q1"}`) needs a patched library**, and cannot use LoRA without one. See [D5](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) for why, and for the one-line change to the bundle that avoids it.
+- **On a 2.49.x library, a bundle built for speculative decoding (`"dialog": {"type": "ssd-q1"}`) needs a patched one**, and cannot use LoRA without it. This is a 2.49 regression, not a property of such bundles: 2.48.40.260702 runs them correctly. See [D5](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) for why, and for the one-line change to the bundle that avoids it.
 - One text slot = one `GenieDialog` handle; requests to a slot are serialized by that slot's own lock (with `TEXT_SLOTS` unset there's only a single slot, so every request is serialized, same as before).
 - `n > 1` (multiple completions per request) is not supported; it is rejected with a `400`.
 - The Llama2/Mistral template folds the system prompt into `[INST]`, so it's not eligible for prefix KV caching.
