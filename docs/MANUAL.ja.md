@@ -828,16 +828,18 @@ HITはバッチ単位でプレフィルを丸ごと消すので:
 
 ## Grammar制約デコーディング
 
-Genie SDK(qualla)は `basic` dialog(大半のバンドルが宣言する型)でgrammar制約デコーディング(XGrammarバックエンド)をサポートしています。JSON Schema/正規表現/EBNFのいずれかで出力を制約し、無効なトークンをロジットマスキングで排除します(jump-forward高速化込み)。
+Genie SDK(qualla)がgrammar制約デコーディング(XGrammarバックエンド)をサポートしている dialog 型は2つ、`basic`(大半のバンドルが宣言する型)と `eaglet` です。JSON Schema/正規表現/EBNFのいずれかで出力を制約し、無効なトークンをロジットマスキングで排除します(jump-forward高速化込み)。
 
-> [!WARNING]
-> **制約を実際に適用するのは `basic` dialog だけです。** grammar オブジェクトを
-> 生成するのは基底の `Dialog` なので、どの dialog 型でも文句を言わずにロードされますが、
-> サンプリングした logits に `maskLogits` を掛けているのは `dialogs/basic.cpp` だけです。
-> `ssd-q1`(投機デコード)バンドルに `grammar` ブロックを付けると、モデルはロードされ、
-> 設定の検証も通り、ログにも何も出ず、**出力は制約されません**。SDK もサーバも
-> それを教えてくれないので、制約された応答を信用する前にバンドルの `dialog.type` が
-> `basic` であることを確認してください。
+> [!NOTE]
+> **grammar を実装していない dialog 型は、無視するのではなく拒否します。**
+> `Dialog::create()` が `supportsGrammar()` 仮想関数で門番をしており、これを
+> override しているのは `basic` と `eaglet` だけです。それ以外の型
+> — たとえば `ssd-q1` — に `grammar` ブロックを付けるとロードが
+> `Dialog type '<type>' does not support grammar-constrained decoding.
+> Supported types: "basic", "eaglet".` で失敗します。SDK 自身のコメントに
+> 「grammar ブロックが黙って無視されるのを防ぐため」と書かれているとおりで、
+> 制約の効かない出力が黙って返るのではなく、起動失敗
+> (または `/v1/models/switch` の HTTP 500)になります。
 
 **重要な制約: これはモデル/スロット単位で固定される機能であり、リクエストごとに切り替えることはできません。** Genie SDKの公開C API(`GenieDialog.h`)にはgrammarを実行時に設定・変更する関数が一切無く(`GenieDialog_setValue`のような汎用setterも存在しない)、grammarは`GenieDialog_create()`が内部でDialogを構築する際に`genie_config.json`から一度だけ読み込まれます。変更するには`GenieDialogConfig`からDialogを作り直す必要があり、これは`/v1/models/switch`と同等のコスト(モデル再ロード)です。
 

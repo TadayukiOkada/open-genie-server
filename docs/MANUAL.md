@@ -877,16 +877,17 @@ happens once per prefix, in warmup, off the request path.
 
 ## Grammar-Constrained Decoding
 
-The Genie SDK (qualla) supports grammar-constrained decoding (the XGrammar backend) on `basic` dialogs — the type most bundles declare. Output can be constrained by JSON Schema, regex, or EBNF, with invalid tokens excluded via logit masking (including jump-forward acceleration).
+The Genie SDK (qualla) supports grammar-constrained decoding (the XGrammar backend) on two dialog types: `basic` — the type most bundles declare — and `eaglet`. Output can be constrained by JSON Schema, regex, or EBNF, with invalid tokens excluded via logit masking (including jump-forward acceleration).
 
-> [!WARNING]
-> **Only a `basic` dialog applies the constraint.** The grammar object is built
-> by the base `Dialog`, so any dialog type loads it without complaint, but
-> `dialogs/basic.cpp` is the only one that calls `maskLogits` on the sampled
-> logits. Put a `grammar` block on an `ssd-q1` (speculative-decoding) bundle and
-> the model loads, the config validates, nothing is logged — and the output is
-> unconstrained. Neither the SDK nor this server tells you; check that the
-> bundle's `dialog.type` is `basic` before trusting a constrained response.
+> [!NOTE]
+> **A dialog type that does not implement grammar refuses it rather than
+> ignoring it.** `Dialog::create()` gates on a `supportsGrammar()` virtual that
+> only `basic` and `eaglet` override, so a `grammar` block on any other type —
+> `ssd-q1`, for one — fails the load with `Dialog type '<type>' does not
+> support grammar-constrained decoding. Supported types: "basic", "eaglet".`
+> The SDK's own comment says the gate is there to stop a grammar block being
+> silently ignored, so you get a startup failure (or an HTTP 500 from
+> `/v1/models/switch`) rather than quietly unconstrained output.
 
 **Important limitation: this is fixed per model/slot, and cannot be switched per request.** The Genie SDK's public C API (`GenieDialog.h`) has no function to set or change grammar at runtime at all (there's no generic setter like `GenieDialog_setValue` either) — grammar is read from `genie_config.json` exactly once, when `GenieDialog_create()` builds the Dialog internally. Changing it requires rebuilding the Dialog from a `GenieDialogConfig`, which costs the same as `/v1/models/switch` (a full model reload).
 
