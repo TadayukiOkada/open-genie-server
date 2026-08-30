@@ -137,6 +137,43 @@ def test_cross_file_anchors_resolve(path):
     assert not broken, f"{path.name}: no heading for {broken}"
 
 
+SELF_URL = "https://github.com/TadayukiOkada/open-genie-server"
+
+
+@pytest.mark.parametrize("path", _markdown_files(),
+                         ids=lambda p: str(p.relative_to(REPO_ROOT)))
+def test_links_into_our_own_repo_point_at_files_that_exist(path):
+    """README.md addresses this repository by URL rather than by relative
+    path, because it is also the PyPI project page and PyPI resolves relative
+    links against pypi.org — every one of them would 404 there.
+
+    That would otherwise take those links out of the reach of the checks
+    below, which is most of README's links. So the URLs are resolved back to
+    paths and checked the same way: the file has to exist, a #fragment has to
+    name a heading in it, and blob/ vs tree/ has to match file vs directory.
+
+    Only README.md pays this price. Every other document keeps relative
+    links, which work in a clone, in a fork and offline.
+    """
+    _headings, prose = _parse(path)
+    broken = []
+    for m in re.finditer(re.escape(SELF_URL) + r"/(blob|tree)/master/([^)#\s]+)(#[^)\s]*)?",
+                         prose):
+        kind, rel, fragment = m.group(1), m.group(2), (m.group(3) or "")[1:]
+        target = REPO_ROOT / rel
+        if not target.exists():
+            broken.append(f"{rel} (no such path)")
+            continue
+        if kind == "blob" and target.is_dir():
+            broken.append(f"{rel} (directory linked as blob/)")
+        if kind == "tree" and target.is_file():
+            broken.append(f"{rel} (file linked as tree/)")
+        if fragment and target.is_file() and target.suffix == ".md":
+            if fragment not in _anchors(_parse(target)[0]):
+                broken.append(f"{rel}#{fragment} (no such heading)")
+    assert not broken, f"{path.name}: {broken}"
+
+
 @pytest.mark.parametrize("path", _markdown_files(),
                          ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_relative_links_point_at_files_that_exist(path):

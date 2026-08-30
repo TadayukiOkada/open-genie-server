@@ -1,26 +1,26 @@
 # open-genie-server
 
-*English | [日本語](./README.ja.md)*
+*English | [日本語](https://github.com/TadayukiOkada/open-genie-server/blob/master/README.ja.md)*
 
-A single-process FastAPI server that exposes the Qualcomm Genie C API (`libGenie.so`) as an OpenAI-compatible REST API. It lets you drive LLMs running on a [Hexagon NPU](./docs/MANUAL.md#glossary) — Qualcomm's name for the accelerator this server talks to through the QNN HTP backend — from ordinary OpenAI-compatible HTTP clients — `lm_eval`, `curl`, the OpenAI SDK, [Open WebUI](https://github.com/open-webui/open-webui), and so on. The implementation lives in the `genie_server` package (`src/genie_server/`); `genie-server.py` is the launcher.
+A single-process FastAPI server that exposes the Qualcomm Genie C API (`libGenie.so`) as an OpenAI-compatible REST API. It lets you drive LLMs running on a [Hexagon NPU](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#glossary) — Qualcomm's name for the accelerator this server talks to through the QNN HTP backend — from ordinary OpenAI-compatible HTTP clients — `lm_eval`, `curl`, the OpenAI SDK, [Open WebUI](https://github.com/open-webui/open-webui), and so on. The implementation lives in the `genie_server` package (`src/genie_server/`); `genie-server.py` is the launcher.
 
 > [!IMPORTANT]
 > This repository contains only the open-genie-server source itself. To run it you also need the **QAIRT SDK** from Qualcomm (a toolchain distributed under Qualcomm's proprietary license, containing `libGenie.so`) and a model compiled for a Hexagon NPU (a model directory containing `genie_config.json`). Neither the SDK nor any models are included in this repository — obtain them separately from [Qualcomm AI Hub](https://aihub.qualcomm.com/) or similar.
 
-See [MANUAL.md](./docs/MANUAL.md) for configuration and behaviour, [API.md](./docs/API.md) for the endpoint reference, and [Platform Notes](./docs/PLATFORM_NOTES.md) for what every measured number here assumes about the device it was measured on.
+See [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md) for configuration and behaviour, [API.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/API.md) for the endpoint reference, and [Platform Notes](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/PLATFORM_NOTES.md) for what every measured number here assumes about the device it was measured on.
 
 ## What this is for
 
 **A bench instrument for the Genie C API and for quantized model bundles — not a production inference server.** Everything else follows from that, in this order:
 
 1. **Reach as much of the Genie C API as the API allows.** Not just chat: SDK-side profiling counters, performance policies, prompt scoring through the custom-sampler hook, LoRA, prefix-cache snapshots, and the composable `GenieNode`/`GeniePipeline` path behind VLM slots are all reachable over HTTP, because the point is to exercise them.
-2. **Make standard benchmarks easy to point at a device.** `lm_eval` works against an unmodified install, generation and loglikelihood tasks alike, and [examples/bfcl](./examples/bfcl) drives the Berkeley Function Calling Leaderboard the same way. A benchmark that needs the server patched is a benchmark you will not run.
+2. **Make standard benchmarks easy to point at a device.** `lm_eval` works against an unmodified install, generation and loglikelihood tasks alike, and [examples/bfcl](https://github.com/TadayukiOkada/open-genie-server/tree/master/examples/bfcl) drives the Berkeley Function Calling Leaderboard the same way. A benchmark that needs the server patched is a benchmark you will not run.
 3. **Do not hide the SDK's or the model's problems by default.** A defect you cannot see is one you will ship. So the stock-library slot wedge is neither detected nor papered over; grammar's leaked terminal token is reported rather than stripped; a response names the model actually loaded instead of echoing the string the client sent; and the prefix cache fills only on an explicit warmup, so it cannot quietly improve a TTFT measurement. Workarounds exist, but they are switches you turn on knowing what they conceal — `TOOL_CALL_RECOVERY`, which reassembles a tool call whose marker the model mangled, is off until you ask for it.
 4. **Stay compatible with the OpenAI API, and with what other inference servers do — where that does not conflict with 3.** Where the two disagree, this server reports what happened. The `model` field above is the worked example: OpenAI and vLLM echo the request, and this server does not, because a benchmark that ran against a hot-swapped model should say so.
 
-**Backward compatibility is not one of these.** Nothing gets broken for the sake of it, and a change to an existing response shape or default is called out under Breaking in the [CHANGELOG](./docs/CHANGELOG.md). But this server is a view onto the Genie C API, and when that API moves, this follows — keeping an old shape alive to spare an existing caller would make the instrument lie about what the SDK now does. The same goes for our own defaults: a measurement showing that one of them hides something is reason enough to change it. If you need a surface that holds still, pin a version.
+**Backward compatibility is not one of these.** Nothing gets broken for the sake of it, and a change to an existing response shape or default is called out under Breaking in the [CHANGELOG](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/CHANGELOG.md). But this server is a view onto the Genie C API, and when that API moves, this follows — keeping an old shape alive to spare an existing caller would make the instrument lie about what the SDK now does. The same goes for our own defaults: a measurement showing that one of them hides something is reason enough to change it. If you need a surface that holds still, pin a version.
 
-**What it is not.** There is no authentication, no rate limiting and no multi-process scaling, `POST /v1/models/switch` will open any path the process can read, and one text slot serializes its requests behind a single `GenieDialog` handle. Run it on a bench network you control ([SECURITY.md](./SECURITY.md) says what that means, and what is worth reporting). If you need a production serving stack on Hexagon, this is the wrong starting point — but it will tell you, in detail, what your bundle and your SDK actually do.
+**What it is not.** There is no authentication, no rate limiting and no multi-process scaling, `POST /v1/models/switch` will open any path the process can read, and one text slot serializes its requests behind a single `GenieDialog` handle. Run it on a bench network you control ([SECURITY.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/SECURITY.md) says what that means, and what is worth reporting). If you need a production serving stack on Hexagon, this is the wrong starting point — but it will tell you, in detail, what your bundle and your SDK actually do.
 
 ## Features
 
@@ -35,9 +35,9 @@ See [MANUAL.md](./docs/MANUAL.md) for configuration and behaviour, [API.md](./do
 - `Genie_PerformancePolicy_t` switching (e.g. pin to `burst` for benchmarking)
 - Non-blocking status monitoring, including context occupancy (KV cache usage)
 - **SDK-side profiling** — `GENIE_PROFILE` exposes Genie's own TTFT / prefill / decode KPIs on `GET /v1/server/profile`, without touching the OpenAI response shapes
-- **Multi text-slot support** — `TEXT_SLOTS` lets you assign an independent `GenieDialog` handle (its own lock, optionally its own model) to each Hexagon NSP core you can use (cdsp0/cdsp1; see the [Glossary](./docs/MANUAL.md#glossary) if HTP/NSP/cDSP/NPU are unfamiliar). Requests to different slots do overlap, but the measured gain on our bench was **~1.3×, not 2×** (see [Multi Text Slots](./docs/MANUAL.md#multi-text-slots)). **How many cores you may use is licensed per SKU, not implied by the part number** — see [Platform Notes](./docs/PLATFORM_NOTES.md)
+- **Multi text-slot support** — `TEXT_SLOTS` lets you assign an independent `GenieDialog` handle (its own lock, optionally its own model) to each Hexagon NSP core you can use (cdsp0/cdsp1; see the [Glossary](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#glossary) if HTP/NSP/cDSP/NPU are unfamiliar). Requests to different slots do overlap, but the measured gain on our bench was **~1.3×, not 2×** (see [Multi Text Slots](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#multi-text-slots)). **How many cores you may use is licensed per SKU, not implied by the part number** — see [Platform Notes](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/PLATFORM_NOTES.md)
 - **Grammar-constrained decoding** — constrain output with JSON Schema/regex/EBNF (XGrammar backend, fixed per model/slot)
-- **VLM (multimodal) support** — image-input models such as Qwen3-VL that use the `GenieNode`/`GeniePipeline` composable pipeline API can be added via `VLM_SLOTS`, entirely in parallel with `TEXT_SLOTS` (see [examples/vlm](./examples/vlm))
+- **VLM (multimodal) support** — image-input models such as Qwen3-VL that use the `GenieNode`/`GeniePipeline` composable pipeline API can be added via `VLM_SLOTS`, entirely in parallel with `TEXT_SLOTS` (see [examples/vlm](https://github.com/TadayukiOkada/open-genie-server/tree/master/examples/vlm))
 - Offline test suite (`tests/`, pytest + a fake SDK) — the whole HTTP/engine/template stack runs without an NPU
 
 ## Requirements
@@ -57,7 +57,7 @@ as the first line above.
 | | in | why |
 |---|---|---|
 | `fastapi`, `uvicorn` | core | the server |
-| `tokenizers` | core | accurate token counts. Without it, counts come from `text.split()`, so a 55-token Japanese paragraph counts as 1 — and that feeds the context check and the default `max_tokens`, not just the reported usage. See [Token counting](./docs/MANUAL.md#token-counting) |
+| `tokenizers` | core | accurate token counts. Without it, counts come from `text.split()`, so a 55-token Japanese paragraph counts as 1 — and that feeds the context check and the default `max_tokens`, not just the reported usage. See [Token counting](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#token-counting) |
 | `numpy` | `[logprobs]`, `[vlm]` | **logprobs and prompt scoring**, and VLM. Without it those requests are rejected with HTTP 400 |
 | `pillow` | `[vlm]` | image input |
 | `pytest`, `httpx`, `requests`, `jsonschema` | `[test]` | the offline suite |
@@ -65,7 +65,7 @@ as the first line above.
 Installing the package also gives you a `genie-server` command; the
 repository-root `genie-server.py` launcher does the same thing and needs no
 install. On Android three of these publish no wheel — see
-[Running on Android](./docs/MANUAL.md#running-on-android).
+[Running on Android](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#running-on-android).
 
 > [!WARNING]
 > **Check which QAIRT version you are pointing at before deploying.** Which SDK
@@ -79,8 +79,8 @@ install. On Android three of these publish no wheel — see
 > bundle built for speculative decoding, every answer after the first reset
 > coming back fluent and wrong. **All three report success.**
 >
-> **[QAIRT Version Issues](./docs/QAIRT_VERSIONS.md)** has the per-version
-> matrix, [a check you can run against your own SDK](./docs/QAIRT_VERSIONS.md#checking-your-own-sdk),
+> **[QAIRT Version Issues](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md)** has the per-version
+> matrix, [a check you can run against your own SDK](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md#checking-your-own-sdk),
 > and how to choose a library. A version not listed there is one we have not
 > tested, not one we know to be clean.
 
@@ -108,9 +108,9 @@ install. On Android three of these publish no wheel — see
 
    `model_root` points at the directory containing `genie_config.json`. That is the only key a slot needs; `name` and `device_id` default.
 
-   A relative `model_root` resolves under `MODELS_BASE_DIR`, so the example above loads `/path/to/models/model-dir`. Absolute paths also work — see [Where model paths resolve](./docs/MANUAL.md#where-model-paths-resolve).
+   A relative `model_root` resolves under `MODELS_BASE_DIR`, so the example above loads `/path/to/models/model-dir`. Absolute paths also work — see [Where model paths resolve](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#where-model-paths-resolve).
 
-   On a SoC with multiple NSP cores, add an entry per core to keep a model resident on each (see [MANUAL.md](./docs/MANUAL.md#multi-text-slots) for details, including the ordering rule — a second slot does not always fit):
+   On a SoC with multiple NSP cores, add an entry per core to keep a model resident on each (see [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#multi-text-slots) for details, including the ordering rule — a second slot does not always fit):
 
    ```json
    {
@@ -145,7 +145,7 @@ install. On Android three of these publish no wheel — see
      -d '{"model":"genie-local","messages":[{"role":"user","content":"Hello"}]}'
    ```
 
-See [examples/grammar](./examples/grammar) for a grammar-constrained decoding config example, [examples/vlm](./examples/vlm) for VLM (image input) setup and testing steps, and [examples/lm_eval](./examples/lm_eval) for running `lm_eval` against a board (including how to compare the result with the unquantized model).
+See [examples/grammar](https://github.com/TadayukiOkada/open-genie-server/tree/master/examples/grammar) for a grammar-constrained decoding config example, [examples/vlm](https://github.com/TadayukiOkada/open-genie-server/tree/master/examples/vlm) for VLM (image input) setup and testing steps, and [examples/lm_eval](https://github.com/TadayukiOkada/open-genie-server/tree/master/examples/lm_eval) for running `lm_eval` against a board (including how to compare the result with the unquantized model).
 
 ## Using it with lm_eval
 
@@ -156,7 +156,7 @@ tokenizer_backend=huggingface,tokenizer=<hf_model>,max_tokens=512,num_concurrent
   --tasks mmlu_generative --apply_chat_template --batch_size 1
 ```
 
-See [API.md](./docs/API.md) for the endpoint reference and [MANUAL.md](./docs/MANUAL.md) for configuration.
+See [API.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/API.md) for the endpoint reference and [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md) for configuration.
 
 ## Directory layout
 
@@ -185,7 +185,7 @@ examples/bfcl/        — the Berkeley Function Calling Leaderboard
 ```
 
 The module-by-module breakdown of `src/genie_server/` is in
-[MANUAL.md § Architecture Overview](./docs/MANUAL.md#architecture-overview) rather than repeated
+[MANUAL.md § Architecture Overview](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#architecture-overview) rather than repeated
 here.
 
 Run the offline tests with:
@@ -201,20 +201,20 @@ without `numpy` eight logprobs tests do. The same suite runs on every push and
 pull request against Python 3.10 and 3.12
 (`.github/workflows/offline-tests.yml`).
 
-To exercise a real device end-to-end from the host PC (with a Markdown/JSON report and server-death detection), see [tests/integration/](./tests/integration/).
+To exercise a real device end-to-end from the host PC (with a Markdown/JSON report and server-death detection), see [tests/integration/](https://github.com/TadayukiOkada/open-genie-server/tree/master/tests/integration).
 
 ## Known limitations
 
-- **This server does not guard against the stock-library reset defects** described at the top of this page — it neither detects nor recovers from them. Avoiding them is a deployment choice: see [QAIRT Version Issues](./docs/QAIRT_VERSIONS.md).
-- **A bundle built for speculative decoding (`"dialog": {"type": "ssd-q1"}`) needs a patched library**, and cannot use LoRA without one. See [D5](./docs/QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) for why, and for the one-line change to the bundle that avoids it.
+- **This server does not guard against the stock-library reset defects** described at the top of this page — it neither detects nor recovers from them. Avoiding them is a deployment choice: see [QAIRT Version Issues](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md).
+- **A bundle built for speculative decoding (`"dialog": {"type": "ssd-q1"}`) needs a patched library**, and cannot use LoRA without one. See [D5](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) for why, and for the one-line change to the bundle that avoids it.
 - One text slot = one `GenieDialog` handle; requests to a slot are serialized by that slot's own lock (with `TEXT_SLOTS` unset there's only a single slot, so every request is serialized, same as before).
 - `n > 1` (multiple completions per request) is not supported; it is rejected with a `400`.
 - The Llama2/Mistral template folds the system prompt into `[INST]`, so it's not eligible for prefix KV caching.
 - `POST /v1/models/switch` frees the old model before loading the new one by default, so a failed load leaves that slot with no model until a later switch succeeds; every endpoint that touches it returns `503` in the meantime.
 - `"unload_first": false` avoids that by holding both models on the slot's HTP device while the new one loads — but **on the SA8255P board that overlap is not dependable**. Over 36 measured swaps the outcome did not follow from which models were involved: one pair succeeded 6/6 in one run and failed 8/8 in another, and a run of six flipped from failing to succeeding halfway through. What decides it is device state the host cannot observe. Use it only where the device has memory to spare and the swaps your deployment actually performs have been tested there, repeatedly and from a cold start.
-- VLM slots are single-turn only (no conversation history), and don't support LoRA, prefix KV cache, grammar constraints, or hot-swapping. See [MANUAL.md](./docs/MANUAL.md#vlm-multimodal-support) for details.
+- VLM slots are single-turn only (no conversation history), and don't support LoRA, prefix KV cache, grammar constraints, or hot-swapping. See [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#vlm-multimodal-support) for details.
 
-See [MANUAL.md's Limitations section](./docs/MANUAL.md#limitations) for the rest of the known limitations.
+See [MANUAL.md's Limitations section](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#limitations) for the rest of the known limitations.
 
 ## Acknowledgements
 
@@ -233,7 +233,7 @@ have been possible without it.
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](https://github.com/TadayukiOkada/open-genie-server/blob/master/LICENSE)
 
 This repository's license applies only to the open-genie-server source code itself. The Qualcomm QAIRT SDK, `libGenie.so`, and any Hexagon NPU models are not covered — they remain subject to Qualcomm's and each model's own distributor's license terms.
 
