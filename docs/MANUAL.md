@@ -579,6 +579,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `PROMPT_LOGPROBS` | optional | `false` | Enables prompt scoring (`echo`+`logprobs` teacher forcing, used by lm_eval loglikelihood tasks) at startup. Also toggleable at runtime via `POST /v1/server/prompt_logprobs` — see [Logprobs](#logprobs). |
 | `PROMPT_LOGPROBS_MAX_TOKENS` | optional | `4096` | Reject prompt-scoring requests longer than this many tokens (each request runs its whole prompt at decode speed). |
 | `TOOL_CALL_RECOVERY` | optional | `false` | Recover a tool call the model marked badly. Two repairs, in both dialects: a call whose opening marker was mangled or omitted (matched by the JSON's `name` against the tool names the request itself declared), and a call the model opened, filled in correctly, and never closed. `qwen3_4b_instruct_2507` w4a16 emits Cyrillic in place of the `<tool_call>` token on about half its calls and `qwen3_0_6b` omits the tags altogether, and in both cases the call body is correct — so with this off, the caller gets prose with `finish_reason: "stop"` while their code reads `message.tool_calls`. **Off by default anyway**: it conceals a defect in the bundle you are measuring, and it applies only to `/v1/chat/completions`, so the same model scores differently there than on `/v1/completions`, which has no recovery to apply. Turn it on when you want the application to work in spite of the bundle, and read the result as the application's rather than the model's. `qwen3_1_7b` marks its calls reliably and needs nothing. See [Function calling](API.md#function-calling-tools). |
+| `VLM_VISION_BUDGET_GUARD` | optional | `false` | Refuse a VLM request whose vision tokens cannot fit the text-generator's context, with a `400` naming how many encoder steps fit and why, instead of letting it reach the SDK. **Off by default**, for the same reason as `TOOL_CALL_RECOVERY`: it conceals a defect this server exists to expose. What it conceals is severe — on the composable-pipeline path an overrun does not fail cleanly (see [Limiting visual input](#limiting-visual-input)) — so an oversized request is logged at WARNING before being passed through. Turn it on for a deployment that has to survive a client sending too many frames, and read a run taken with it on as the application's behaviour, not the SDK's. |
 
 Ready-made samples (single-slot / dual-NSP / text+VLM, with SA8775P model paths) are in [examples/config/](../examples/config/). Single-slot configuration example:
 
@@ -1064,6 +1065,48 @@ Sending an OpenAI-style `content` array (including an `image_url` part) to `POST
 
 A single message can include multiple `image_url` parts (`vlm_specs.qwen3vl_build_prompt_segments` assembles them into an interleaved text/image segment list, including Qwen3-VL's `<|vision_start|>`/`<|vision_end|>` markers).
 
+### Video input
+
+A `video_url` part carries a sequence of frames the client already extracted, in the form vLLM uses for client-side preprocessing: base64 JPEGs joined by commas under a `video/jpeg` media type. The media type is the signal that these are frames, not a container — this server has no demuxer, so `data:video/mp4;base64,...` and friends are rejected rather than half-supported, and remote `http(s)` URLs are not fetched (same rule as images).
+
+```json
+{
+  "model": "vision",
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "text", "text": "What happens in this clip?"},
+      {"type": "video_url",
+       "video_url": {"url": "data:video/jpeg;base64,<frame1>,<frame2>,<frame3>,..."}}
+    ]}
+  ],
+  "media_io_kwargs": {"video": {"fps": 2.0}}
+}
+```
+
+**Why this is not the same as sending the frames as `image_url` parts.** The ViT consumes `temporal_patch_size` frames per execution — 2 for Qwen3-VL. A still image fills that dimension by repeating itself, so N images cost N encoder steps; a video packs consecutive frames in pairs, so N frames cost N/2. Since a step costs 256 tokens of the text-generator's context either way, the video form fits **twice as much footage** in the same context, and gives the encoder two genuinely different frames to compare, which is what lets it describe motion rather than list N separate scenes.
+
+`media_io_kwargs.video` is vLLM's key for the timeline metadata (OpenAI clients reach it with `extra_body={"media_io_kwargs": ...}`; it is a vLLM convention, not part of the OpenAI API). `fps` — a float, or a single-element list, which is how the Qwen examples write it — turns into a `<t seconds>` marker before each step, matching the format Qwen3-VL was trained on for video. `frames_indices` places those markers by each frame's real position in the source, for unevenly sampled frames. **Without an `fps` no markers are emitted at all**: the markers assert a real timeline to the model, and a made-up one is worse than none.
+
+An odd frame count repeats the final frame to fill the last step, the same padding a still image gets.
+
+### Limiting visual input
+
+`VLM_VISION_BUDGET_GUARD` checks vision tokens against the text-generator's `context.size` **before** the request reaches the NPU, and a request that does not fit comes back as a `400`, naming how many steps fit and why.
+
+**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49, Qwen3-VL 4B, context 4096, 256 vision tokens per step):
+
+| Steps | Vision tokens | Result |
+|---|---|---|
+| 15 | 3840 | answers normally |
+| 16 | 4096 | `Context Size was exceeded`, 0 tokens — **and the slot is then wedged**: every later request fails in `GenieNode_setData` on the image encoder until the process restarts. `GeniePipeline_reset` does not clear it. |
+| 17 | 4352 | the process dies outright (`free(): invalid next size`) |
+
+This is exactly the kind of thing this server refuses to paper over by default: a deployment that never sees the wedge cannot tell that the SDK has one. With the guard off an oversized request is still **logged at WARNING** before it goes through — saying what is about to happen is the opposite of hiding it — and `GenieNode.h`/`GeniePipeline.h` expose no way to ask how much room is left, so arithmetic on the host is the only guard available at all.
+
+Turn it on when the deployment has to survive a client sending too many frames, and read a run taken with it on as the application's behaviour rather than the SDK's.
+
+The budget is `context.size − prompt text tokens − VLM_SLOTS[].max_tokens`, divided by 256. Subtracting the **whole** generation budget rather than the measured prompt is deliberate: a request whose prompt fits can still cross the line while decoding, which is the case that wedges the slot. Lowering `max_tokens` therefore buys room for more frames, and vice versa. A slot whose config does not state a context size gets no check rather than a guessed one.
+
 ### Limiting generation length
 
 A VLM request's own `max_tokens` **cannot be honoured**: `GenieNode.h`/`GeniePipeline.h`
@@ -1171,7 +1214,11 @@ The consequences go beyond wrong `usage` numbers:
 - **The default `max_tokens` becomes almost the whole context.** It is computed as context size minus prompt tokens, so undercounting the prompt leaves a budget the prompt has already spent.
 - **Anything downstream that meters tokens is wrong**, including `lm_eval` accounting and any per-request cost or quota tracking a caller layers on top.
 
-**VLM slots count the same way text slots do.** The composable pipeline gives the host no tokenizer object, but the text-generator node's config names the same `tokenizer.json` the node itself tokenizes with, so the slot loads that file directly and `usage` is on the same basis as a text slot's — with the same `tokenizers`-not-installed fallback to whitespace. Two differences remain: **image tokens are not counted** (the image never becomes text on the host — the image-encoder node emits embeddings straight into the pipeline — so `prompt_tokens` covers the prompt text only), and VLM slots still do not run the context-overflow check; generation there is bounded by the slot's own `max_tokens` (see [VLM (Multimodal) Support](#vlm-multimodal-support)).
+**VLM slots count the same way text slots do, plus one derived half.** The composable pipeline gives the host no tokenizer object, but the text-generator node's config names the same `tokenizer.json` the node itself tokenizes with, so the slot loads that file directly and the text half of `usage` is on the same basis as a text slot's — with the same `tokenizers`-not-installed fallback to whitespace.
+
+The visual half cannot be tokenized at all: the image never becomes text on the host (the image-encoder node emits embeddings straight into the pipeline), and neither `GenieNode.h` nor `GeniePipeline.h` hands the count back. `prompt_tokens` therefore adds a **derived** figure — encoder steps x the spec's tokens per step (256 for the 512x512 Qwen3-VL export) — to the tokenized text. The derivation is confirmed by where the context actually runs out: the 4096-context bundle takes 15 steps and fails on the 16th, which is exactly 16 x 256.
+
+Two consequences worth knowing. The number is exact for the model's context arithmetic but is **not** something the SDK reported, so it will drift from the truth if a future export changes the merge or patch size without the spec following. And `prompt_tokens` is now dominated by the images: a 28-frame video reports ~3600 where the same request used to report 20.
 
 So `tokenizers` is optional only in the sense that the server starts without it. Install it unless you are certain every prompt is spaced Latin text. The server logs a warning at startup when it is missing, and again if the tokenizer file named by `genie_config.json` cannot be loaded — that second case falls back the same way even with the package installed, so check the startup log for `HF tokenizer loaded:` rather than assuming.
 
