@@ -44,11 +44,13 @@
   },
 
   "vlm": {
-    "_comment": "Needs a VLM_SLOTS entry on the server (see examples/config/env_config.vlm.sample.json). image_path empty = a built-in 64x64 red PNG is sent; set a real image path for a meaningful description check. 'model' routes to the VLM slot by its model directory name.",
+    "_comment": "Needs a VLM_SLOTS entry on the server (see examples/config/env_config.vlm.sample.json). image_path empty = a built-in 64x64 red PNG is sent; set a real image path for a meaningful description check. 'model' routes to the VLM slot by its model directory name. budget_guard says whether the server was started with VLM_VISION_BUDGET_GUARD on; V07 is skipped when it is false, because with the guard off an oversized request is meant to reach the SDK, and that wedges the slot for every test after it.",
     "enabled": true,
     "model": "qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p",
     "slot": "",
     "image_path": "",
-    "question": "Describe this image in one sentence."
+    "question": "Describe this image in one sentence.",
+    "video_question": "What happens in this clip?",
+    "budget_guard": false
   }
 }

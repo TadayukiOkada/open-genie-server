@@ -47,7 +47,7 @@ at startup.
 | L01-L03 | logprobs (chat + completions) and prompt scoring (lm_eval loglikelihood shape, incl. the disabled→400 gate) |
 | P01, P02 | performance policy: one round-trip, then all nine `Genie_PerformancePolicy_t` values plus rejection of an unknown name. Whether a policy changes anything is measured separately by `measure_perf_policy.py`, which reads the SDK's own KPIs and needs `GENIE_PROFILE=true` |
 | M01, M02 | model hot-swap (+restore), LoRA apply/release — **config-gated** |
-| V01-V05 | VLM: image chat, streaming SSE, stream-vs-sync parity, usage accounting, slot recovery after a disconnect (no abort API, so the generation finishes) — **config-gated** |
+| V01-V07 | VLM: image chat, streaming SSE, stream-vs-sync parity, usage accounting, slot recovery after a disconnect (no abort API, so the generation finishes), video input (frames packed two per encoder step, and the usage that proves it), and the vision budget guard's 400 — **config-gated**; V07 additionally needs the server started with `VLM_VISION_BUDGET_GUARD` on |
 | G01-G08 | grammar-constrained decoding: JSON Schema (sync/streaming/repeat), logprobs under masking, regex, EBNF, unsupported-backend rejection, restore — **config-gated**, see below |
 | Z01 | final server health |
 

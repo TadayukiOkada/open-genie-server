@@ -1462,3 +1462,364 @@ def test_unknown_target_platform_is_rejected(tmp_path):
         "TEXT_SLOTS": [{"model_root": "/m"}]}))
     with pytest.raises(ValueError, match="TARGET_PLATFORM"):
         load_config(str(p))
+
+
+# ------------------------------------------------- VLM video input
+
+def _b64_jpeg(color):
+    """A 4x4 JPEG as base64, small enough to inline in a test."""
+    import base64
+    import io
+    Image = pytest.importorskip("PIL.Image")
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), color).save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _video_url(n):
+    """vLLM's client-side frame-extraction form: comma-joined base64 JPEGs
+    under a video/jpeg media type."""
+    frames = [_b64_jpeg((10 * i, 20, 30)) for i in range(n)]
+    return "data:video/jpeg;base64," + ",".join(frames)
+
+
+def _messages_with_video(n, text="What happens?"):
+    return [{"role": "user", "content": [
+        {"type": "text", "text": text},
+        {"type": "video_url", "video_url": {"url": _video_url(n)}}]}]
+
+
+def test_video_url_routes_to_the_vlm_path():
+    """Routing keys off the part type, so a video-only message must not fall
+    through to the GenieDialog text path."""
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    assert vlm.is_vlm_request(_messages_with_video(2))
+    assert not vlm.is_vlm_request([{"role": "user", "content": "plain text"}])
+
+
+def test_video_url_frames_become_one_video_part():
+    """Every frame lands in the flat sources list; the part carries their
+    indices so the spec can pack them into steps."""
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    _, parts, sources = vlm.extract_multimodal_parts(_messages_with_video(6))
+    assert len(sources) == 6
+    assert parts == [("text", "What happens?"), ("video", [0, 1, 2, 3, 4, 5])]
+
+
+def test_frames_are_not_decoded_until_the_plan_is_known():
+    """Parsing yields undecoded payloads so that a request the budget guard
+    refuses never pays for turning its frames into bitmaps."""
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    _, _, sources = vlm.extract_multimodal_parts(_messages_with_video(3))
+    assert all(isinstance(b64, str) for b64, _ in sources)
+    images = vlm.decode_media_sources(sources)
+    assert len(images) == 3
+    assert all(img.size == (4, 4) for img in images)
+
+
+def test_an_undecodable_frame_is_a_client_error():
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    with pytest.raises(ValueError, match="video_url frame 1"):
+        vlm.decode_media_sources([(_b64_jpeg((1, 2, 3)), "video_url frame 0"),
+                                  ("not base64 jpeg", "video_url frame 1")])
+
+
+def test_video_container_media_types_are_refused_not_half_supported():
+    """No demuxer ships with this server, so data:video/mp4 has to be a clear
+    client error rather than a decode failure deeper in."""
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    msgs = [{"role": "user", "content": [
+        {"type": "video_url",
+         "video_url": {"url": "data:video/mp4;base64,AAAA"}}]}]
+    with pytest.raises(ValueError, match="video/jpeg"):
+        vlm.extract_multimodal_parts(msgs)
+
+
+def test_remote_video_urls_are_not_fetched():
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    msgs = [{"role": "user", "content": [
+        {"type": "video_url",
+         "video_url": {"url": "https://example.com/clip.mp4"}}]}]
+    with pytest.raises(ValueError, match="data:"):
+        vlm.extract_multimodal_parts(msgs)
+
+
+def test_video_meta_comes_from_media_io_kwargs():
+    """vLLM's key, which OpenAI clients reach via extra_body."""
+    from genie_server import vlm
+    body = {"media_io_kwargs": {"video": {"fps": 2.0, "frames_indices": [0, 4]}}}
+    assert vlm.extract_video_meta(body) == {"fps": 2.0, "frames_indices": [0, 4]}
+    assert vlm.extract_video_meta({}) == {}
+    assert vlm.extract_video_meta({"media_io_kwargs": {"image": {}}}) == {}
+
+
+# --- segment building (the packing that halves the vision-token cost)
+
+def _spec():
+    from genie_server import vlm_specs
+    return vlm_specs.get_spec("qwen3_vl")
+
+
+def test_a_still_image_still_duplicates_its_own_frame():
+    """Unchanged behaviour: one picture is one step, the ViT's temporal
+    dimension filled by repeating it."""
+    spec = _spec()
+    segs = spec.build_prompt_segments("", [("image", 0)], {}, spec)
+    steps = [v for k, v in segs if k == "step"]
+    assert steps == [(0, 0)]
+
+
+def test_video_frames_are_packed_two_per_step():
+    """The point of the video path: temporal_patch_size distinct frames per
+    encoder step, so 6 frames cost 3 steps rather than 6."""
+    spec = _spec()
+    segs = spec.build_prompt_segments("", [("video", [0, 1, 2, 3, 4, 5])], {}, spec)
+    steps = [v for k, v in segs if k == "step"]
+    assert steps == [(0, 1), (2, 3), (4, 5)]
+
+
+def test_an_odd_frame_count_repeats_the_last_frame():
+    spec = _spec()
+    segs = spec.build_prompt_segments("", [("video", [0, 1, 2])], {}, spec)
+    steps = [v for k, v in segs if k == "step"]
+    assert steps == [(0, 1), (2, 2)]
+
+
+def test_timestamps_appear_only_when_an_fps_was_supplied():
+    """The `<t seconds>` markers assert a real timeline to the model, so an
+    fps-less request gets none rather than a made-up one."""
+    spec = _spec()
+    parts = [("video", [0, 1, 2, 3])]
+
+    without = "".join(v for k, v in spec.build_prompt_segments("", parts, {}, spec)
+                      if k == "text")
+    assert "seconds" not in without
+
+    # 2 fps, 2 frames per step -> one step per second of wall clock, each
+    # dated at the midpoint of its own pair (0.25s and 1.25s, to one place).
+    with_fps = "".join(
+        v for k, v in spec.build_prompt_segments("", parts, {"fps": 2.0}, spec)
+        if k == "text")
+    assert "<0.2 seconds>" in with_fps
+    assert "<1.2 seconds>" in with_fps
+
+
+def test_fps_may_arrive_as_a_single_element_list():
+    """The Qwen/vLLM examples pass fps=[3.0]."""
+    spec = _spec()
+    text = "".join(
+        v for k, v in spec.build_prompt_segments(
+            "", [("video", [0, 1])], {"fps": [2.0]}, spec) if k == "text")
+    assert "<0.2 seconds>" in text
+
+
+def test_frames_indices_place_the_timestamps():
+    """Frames sampled unevenly out of a 30 fps source are timed by their real
+    position, not by their position in the list."""
+    spec = _spec()
+    text = "".join(
+        v for k, v in spec.build_prompt_segments(
+            "", [("video", [0, 1, 2, 3])],
+            {"fps": 30.0, "frames_indices": [0, 15, 30, 45]}, spec)
+        if k == "text")
+    # Frames 0 and 15 are 0.0s and 0.5s; the step covering them is 0.25s.
+    assert "<0.2 seconds>" in text
+    # Frames 30 and 45 are 1.0s and 1.5s -> 1.25s.
+    assert "<1.2 seconds>" in text
+
+
+def test_a_step_is_dated_at_the_midpoint_of_its_frames():
+    """Qwen3-VL dates the visual chunk, not its first frame: vLLM's
+    _calculate_timestamps averages the group's first and last frame times.
+    Taking the first would label every step half a sampling interval early,
+    and an unevenly sampled pair arbitrarily so."""
+    from genie_server.vlm_specs import _qwen3vl_step_time
+    assert _qwen3vl_step_time([0.0, 0.5, 1.0, 1.5], 0, 2) == 0.25
+    assert _qwen3vl_step_time([0.0, 0.5, 1.0, 1.5], 2, 2) == 1.25
+    # Uneven sampling: a pair spanning 0s to 10s is dated between them.
+    assert _qwen3vl_step_time([0.0, 10.0], 0, 2) == 5.0
+
+
+def test_the_odd_tail_is_dated_by_its_only_real_frame():
+    """The last step repeats the final frame to fill itself, so its midpoint
+    is that frame's own time — the same padding vLLM applies to the index
+    list before pairing."""
+    from genie_server.vlm_specs import _qwen3vl_step_time
+    assert _qwen3vl_step_time([0.0, 0.5, 1.0], 2, 2) == 1.0
+
+
+def test_frames_indices_that_do_not_match_the_frames_emit_no_markers():
+    """`fps` means the source rate when frames_indices is present and the
+    sampling rate when it is not, so a count that disagrees means the two
+    readings are out of step. Falling back would date a 30 fps clip as though
+    its frames were 33 ms apart; no marker is better than a wrong one."""
+    spec = _spec()
+    text = "".join(
+        v for k, v in spec.build_prompt_segments(
+            "", [("video", [0, 1, 2, 3])],
+            {"fps": 30.0, "frames_indices": [0, 15]}, spec)
+        if k == "text")
+    assert "seconds" not in text
+
+
+def test_unusable_frames_indices_emit_no_markers():
+    spec = _spec()
+    for indices in ("0,15", [None, 1], [0, "x"]):
+        text = "".join(
+            v for k, v in spec.build_prompt_segments(
+                "", [("video", [0, 1])],
+                {"fps": 30.0, "frames_indices": indices}, spec)
+            if k == "text")
+        assert "seconds" not in text, indices
+
+
+def test_a_step_payload_must_match_the_vits_temporal_size():
+    """build_prompt_segments packs temporal_patch_size frames per step and
+    the patchify below reads exactly two, so a spec whose ViT wanted a
+    different number has to say so rather than lose frames silently."""
+    pytest.importorskip("numpy")
+    spec = _spec()
+    with pytest.raises(ValueError, match="per execution"):
+        spec.preprocess_step([None, None, None], (0, 1, 2), spec)
+
+
+def test_vision_tokens_per_step_is_a_quarter_of_the_patch_rows():
+    """256, not the 1024 rows of pixel_values — the spatial merge folds 2x2
+    patches into one token before the LLM sees them."""
+    assert _spec().vision_tokens_per_step == 256
+
+
+# --- the budget guard
+
+class _BudgetSlot:
+    """Just the fields plan_segments reads."""
+    def __init__(self, context_size=4096, max_tokens=256):
+        self.spec = _spec()
+        self.context_size = context_size
+        self.max_tokens = max_tokens
+
+    def count_tokens(self, text):
+        return len(text.split())
+
+
+def test_a_video_that_fits_is_planned_without_complaint():
+    from genie_server import vlm
+    slot = _BudgetSlot()
+    segs = vlm.plan_segments(slot, "", [("video", list(range(20)))], {"fps": 2.0},
+                             guard=True)
+    assert sum(1 for k, _ in segs if k == "step") == 10
+
+
+def test_the_budget_guard_is_off_by_default():
+    """VLM_VISION_BUDGET_GUARD conceals a defect this server exists to expose,
+    so an oversized request goes to the SDK unchanged unless it is turned on —
+    the same rule TOOL_CALL_RECOVERY follows."""
+    from genie_server import vlm
+    slot = _BudgetSlot()
+    segs = vlm.plan_segments(slot, "", [("video", list(range(200)))], {"fps": 2.0})
+    assert sum(1 for k, _ in segs if k == "step") == 100
+
+
+def test_passing_an_oversized_request_through_is_logged(caplog):
+    """Off does not mean silent: saying what is about to happen is the
+    opposite of hiding it."""
+    from genie_server import vlm
+    with caplog.at_level("WARNING"):
+        vlm.plan_segments(_BudgetSlot(), "", [("video", list(range(200)))], {})
+    assert "VLM_VISION_BUDGET_GUARD" in caplog.text
+
+
+def test_too_many_frames_is_refused_before_anything_touches_the_npu():
+    """With the guard on: a prompt past the context wedges the slot for every
+    later request (and far enough past, kills the process), so the arithmetic
+    rejects it up front rather than let the SDK discover it."""
+    from genie_server import vlm
+    slot = _BudgetSlot()
+    with pytest.raises(ValueError, match="too much visual input"):
+        vlm.plan_segments(slot, "", [("video", list(range(200)))], {"fps": 2.0},
+                          guard=True)
+
+
+def test_the_generation_reserve_is_subtracted_from_the_budget():
+    """The slot's whole max_tokens is held back, not just the prompt
+    measured -- not because decoding across the line is dangerous (measured:
+    it stops cleanly at the context and the slot survives) but so the answer
+    is not truncated, and so the prefill margin the host cannot read from the
+    config is absorbed by something."""
+    from genie_server import vlm
+    parts = [("video", list(range(28)))]        # 14 steps = 3584 vision tokens
+    vlm.plan_segments(_BudgetSlot(max_tokens=256), "", parts, {}, guard=True)
+    with pytest.raises(ValueError, match="too much visual input"):
+        vlm.plan_segments(_BudgetSlot(max_tokens=1024), "", parts, {}, guard=True)
+
+
+def test_an_unknown_context_size_disables_the_check_rather_than_guessing():
+    from genie_server import vlm
+    slot = _BudgetSlot(context_size=0)
+    segs = vlm.plan_segments(slot, "", [("video", list(range(200)))], {},
+                             guard=True)
+    assert sum(1 for k, _ in segs if k == "step") == 100
+
+
+def test_the_guard_flag_defaults_to_off_in_the_config(tmp_path):
+    from genie_server.config import load_config
+    p = tmp_path / "env_config.json"
+    p.write_text(json.dumps({"QAIRT_SDK_ROOT": "/s",
+                             "TEXT_SLOTS": [{"model_root": "/m"}]}))
+    assert load_config(str(p)).vlm_vision_budget_guard is False
+    p.write_text(json.dumps({"QAIRT_SDK_ROOT": "/s",
+                             "VLM_VISION_BUDGET_GUARD": True,
+                             "TEXT_SLOTS": [{"model_root": "/m"}]}))
+    assert load_config(str(p)).vlm_vision_budget_guard is True
+
+
+def test_context_size_is_read_from_the_text_generator_config():
+    from genie_server.vlm import _context_size
+    assert _context_size(
+        {"text_generator": {"text-generator": {"context": {"size": 4096}}}}) == 4096
+    assert _context_size({"text_generator": {"text-generator": {}}}) == 0
+    assert _context_size({}) == 0
+
+
+# --- usage accounting
+
+def test_vision_tokens_are_counted_from_the_steps():
+    """Nothing reports the image's context cost back, so `usage` has to
+    derive it: steps x the spec's per-step token cost."""
+    from genie_server import vlm
+    spec = _spec()
+    segs = spec.build_prompt_segments("", [("video", list(range(10)))], {}, spec)
+    assert vlm.count_vision_tokens(spec, segs) == 5 * 256
+
+
+def test_a_still_image_costs_a_whole_step_of_context():
+    from genie_server import vlm
+    spec = _spec()
+    segs = spec.build_prompt_segments("", [("image", 0)], {}, spec)
+    assert vlm.count_vision_tokens(spec, segs) == 256
+
+
+def test_a_text_only_vlm_request_has_no_vision_tokens():
+    from genie_server import vlm
+    spec = _spec()
+    segs = spec.build_prompt_segments("", [("text", "hello")], {}, spec)
+    assert vlm.count_vision_tokens(spec, segs) == 0
+
+
+def test_video_costs_half_the_context_of_the_same_frames_as_images():
+    """The whole point of the video path, stated in tokens: N frames as
+    stills are N steps, as video they are N/2."""
+    from genie_server import vlm
+    spec = _spec()
+    frames = list(range(10))
+    as_images = spec.build_prompt_segments(
+        "", [("image", i) for i in frames], {}, spec)
+    as_video = spec.build_prompt_segments("", [("video", frames)], {}, spec)
+    assert vlm.count_vision_tokens(spec, as_images) == 2560
+    assert vlm.count_vision_tokens(spec, as_video) == 1280

@@ -57,16 +57,41 @@ class VLMSpec:
     normalize_mean: tuple
     normalize_std: tuple
 
-    # Prompt template function: (system_text, parts) -> list[("text", str) | ("image", int)]
-    # parts is exactly the ("text"|"image", value) list returned by
-    # _extract_image_parts(). The return value is the exact order to feed
-    # into the Accumulator (the final text/image interleave order).
+    # Prompt template function:
+    #   (system_text, parts, video_meta, spec) -> list[("text", str) | ("step", payload)]
+    # parts is exactly the ("text"|"image"|"video", value) list returned by
+    # vlm.extract_multimodal_parts(); video_meta is the dict from
+    # vlm.extract_video_meta(). The return value is the exact order to feed
+    # into the Accumulator (the final text/step interleave order).
+    #
+    # A "step" is one image-encoder execution, NOT one input image: the ViT
+    # consumes temporal_patch_size frames at a time. The payload is whatever
+    # this spec's own preprocess_step understands (for Qwen3-VL, a tuple of
+    # indices into the images list) — the generic code in vlm.py passes it
+    # straight through without interpreting it.
     build_prompt_segments: Callable = field(repr=False)
 
-    # Preprocessing function: (pil_image, spec) -> pixel_values ndarray.
-    # Takes spec as an argument (rather than a self-referential closure
-    # bound at dataclass construction time).
-    preprocess_image: Callable = field(repr=False)
+    # Preprocessing function: (images, payload, spec) -> pixel_values ndarray
+    # for one step. Takes the whole images list plus the payload its own
+    # build_prompt_segments emitted, so that packing several frames into one
+    # step stays entirely inside this module. Takes spec as an argument
+    # (rather than a self-referential closure bound at dataclass
+    # construction time).
+    preprocess_step: Callable = field(repr=False)
+
+    @property
+    def vision_tokens_per_step(self) -> int:
+        """How much context one step costs the text-generator.
+
+        The ViT emits one embedding per patch, and the spatial merge folds
+        each spatial_merge_size**2 block into a single token before the LLM
+        sees it. For the 512x512 / patch 16 / merge 2 export that is
+        (512/16)**2 / 2**2 = 256 — a quarter of the 1024 rows in
+        pixel_values, which is the easy number to mistake it for.
+        """
+        patches = ((self.image_height // self.patch_size)
+                   * (self.image_width // self.patch_size))
+        return patches // (self.spatial_merge_size ** 2)
 
 
 # ---------------------------------------------------------------- preprocessing (Qwen3-VL)
@@ -120,42 +145,145 @@ def _resize_to_spec(pil_image, spec: "VLMSpec") -> np.ndarray:
     return np.asarray(img, dtype=np.uint8)
 
 
-def qwen3vl_preprocess_image(pil_image, spec: "VLMSpec") -> np.ndarray:
-    """A single still image -> pixel_values (rows, cols) float32.
+def qwen3vl_preprocess_step(images: list, payload, spec: "VLMSpec") -> np.ndarray:
+    """One step's frames -> pixel_values (rows, cols) float32.
 
-    Since the ViT expects temporal_patch_size=2, the same frame is
-    duplicated to fill the temporal dimension (the standard way Qwen-family
-    processors handle a still image).
+    payload is the tuple of temporal_patch_size indices into `images` that
+    qwen3vl_build_prompt_segments emitted for this step. A still image
+    duplicates its own index, which is the standard way Qwen-family
+    processors fill the temporal dimension for a single picture; consecutive
+    video frames give the ViT two genuinely different frames, which is what
+    lets it see motion at all.
     """
-    frame = _resize_to_spec(pil_image, spec)
-    return _qwen3vl_patchify(frame, frame, spec)
+    if len(payload) != spec.temporal_patch_size:
+        raise ValueError(
+            f"step payload has {len(payload)} frames, but this spec's ViT "
+            f"takes {spec.temporal_patch_size} per execution")
+    frames = [_resize_to_spec(images[i], spec) for i in payload]
+    return _qwen3vl_patchify(frames[0], frames[1], spec)
 
 
-def qwen3vl_build_prompt_segments(system_text: str, parts: list) -> list:
-    """Converts OpenAI content parts (an ordered list of text/image tuples)
-    into Accumulator-feed-order segments, including the Qwen3-VL chat
+def _qwen3vl_frame_times(n_frames: int, video_meta: dict):
+    """Per-frame timestamps in seconds, or None when the request carried no
+    timeline to derive them from.
+
+    Reads what vLLM accepts in `media_io_kwargs.video` for client-side frame
+    extraction: `fps` (a float, or a single-element list — the Qwen examples
+    pass `[3.0]`) and optionally `frames_indices`, the position of each
+    supplied frame in the source video.
+
+    **`fps` means two different things, and which one depends on
+    `frames_indices`** — vLLM keeps them in separate fields and this one key
+    has to carry both:
+
+      with frames_indices     the SOURCE video's frame rate, because the
+                              indices are positions in that video and the
+                              time of one is idx / fps. This is vLLM's
+                              VideoMetadata["fps"], the number
+                              _calculate_timestamps divides by.
+      without frames_indices  the rate the frames were SAMPLED at, because
+                              evenly spaced frames are all there is to go on
+                              and frame k is then at k / fps. This is the
+                              `fps` of media_io_kwargs.video itself, which in
+                              vLLM asks a backend to sample at that rate.
+
+    Sending a source fps without indices would therefore date the whole clip
+    wrong (30 fps reads as frames 33 ms apart), so a `frames_indices` whose
+    length does not match the frames supplied returns None instead of
+    quietly falling back to the other meaning: the count disagreeing is the
+    one signal available that the two are out of step.
+
+    Returning None rather than inventing a default fps is the same rule: the
+    `<t seconds>` markers claim a real timeline to the model, so a wrong one
+    is worse than none.
+    """
+    fps = video_meta.get("fps")
+    if isinstance(fps, (list, tuple)):
+        fps = fps[0] if fps else None
+    try:
+        fps = float(fps)
+    except (TypeError, ValueError):
+        return None
+    if fps <= 0:
+        return None
+
+    indices = video_meta.get("frames_indices")
+    if indices is not None:
+        if not isinstance(indices, (list, tuple)) or len(indices) != n_frames:
+            return None
+        try:
+            return [float(i) / fps for i in indices]
+        except (TypeError, ValueError):
+            return None
+    return [k / fps for k in range(n_frames)]
+
+
+def _qwen3vl_step_time(times: list, start: int, per_step: int) -> float:
+    """The timestamp Qwen3-VL trained on for the step packing frames
+    [start, start + per_step).
+
+    The midpoint of the window, not its first frame: the ViT collapses the
+    whole group into one visual chunk, and the reference implementation dates
+    that chunk by averaging the group's first and last frame times (vLLM's
+    Qwen3VLProcessor._calculate_timestamps, which pads the index list with
+    its last entry before pairing). Clamping to the final frame reproduces
+    that padding — the same repeat the odd tail's pixels get — so a two-frame
+    step at 2 fps is 0.2s rather than 0.0s, and an unevenly sampled pair is
+    dated between its frames rather than at the earlier one.
+    """
+    end = min(start + per_step - 1, len(times) - 1)
+    return (times[start] + times[end]) / 2.0
+
+
+def qwen3vl_build_prompt_segments(system_text: str, parts: list,
+                                  video_meta: dict, spec: "VLMSpec") -> list:
+    """Converts OpenAI content parts (an ordered list of text/image/video
+    tuples) into Accumulator-feed-order segments, including the Qwen3-VL chat
     template.
 
-    Each returned element: ("text", str) | ("image", index)
+    Each returned element: ("text", str) | ("step", (frame_idx, ...))
     Text segments are complete fragments with <|vision_start|>/<|vision_end|>
-    already inserted around images (callers can pass them straight to the
+    already inserted around each step (callers can pass them straight to the
     text_encoder's setData).
+
+    A "video" part becomes ceil(frames / temporal_patch_size) steps, each
+    carrying two consecutive frames, prefixed with a `<t seconds>` marker
+    when the request supplied an fps to derive one from (the midpoint of the
+    frames in that step — see _qwen3vl_step_time). An odd frame count repeats
+    the final frame to fill the last step, the same padding a still image
+    gets.
     """
+    video_meta = video_meta or {}
+    per_step = spec.temporal_patch_size
+
     segments = []
     buf = "<|im_start|>system\n" + system_text + "<|im_end|>\n" if system_text else ""
     buf += "<|im_start|>user\n"
-    image_idx = 0
+
+    def emit_step(payload):
+        nonlocal buf
+        buf += "<|vision_start|>"
+        segments.append(("text", buf))
+        buf = ""
+        segments.append(("step", tuple(payload)))
+        buf = "<|vision_end|>"
 
     for kind, value in parts:
         if kind == "text":
             buf += value
         elif kind == "image":
-            buf += "<|vision_start|>"
-            segments.append(("text", buf))
-            buf = ""
-            segments.append(("image", image_idx))
-            image_idx += 1
-            buf = "<|vision_end|>"
+            emit_step([value] * per_step)
+        elif kind == "video":
+            frames = list(value)
+            times = _qwen3vl_frame_times(len(frames), video_meta)
+            for start in range(0, len(frames), per_step):
+                window = frames[start:start + per_step]
+                while len(window) < per_step:      # odd tail: repeat the last frame
+                    window.append(window[-1])
+                if times is not None:
+                    t = _qwen3vl_step_time(times, start, per_step)
+                    buf += f"<{t:.1f} seconds>"
+                emit_step(window)
         else:
             raise ValueError(f"unknown content part kind: {kind}")
 
@@ -204,7 +332,7 @@ QWEN3_VL_SPEC = VLMSpec(
     normalize_mean=(0.5, 0.5, 0.5),
     normalize_std=(0.5, 0.5, 0.5),
     build_prompt_segments=qwen3vl_build_prompt_segments,
-    preprocess_image=qwen3vl_preprocess_image,
+    preprocess_step=qwen3vl_preprocess_step,
 )
 
 VLM_SPECS = {

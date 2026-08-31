@@ -167,6 +167,28 @@ class ServerConfig:
     # bundle -- and read the score you took with it on as the application's,
     # not the model's.
     tool_call_recovery: bool = False
+    # Refuse a VLM request whose vision tokens cannot fit the text-generator's
+    # context, instead of letting it reach the SDK.
+    #
+    # OFF by default, for the same reason as TOOL_CALL_RECOVERY: it conceals a
+    # defect this server exists to expose. What it conceals is severe, though,
+    # and worth stating plainly -- on the composable-pipeline path an overrun
+    # does not fail cleanly. Measured on SA8255P (QAIRT 2.49, Qwen3-VL 4B,
+    # context 4096, 256 vision tokens per step), by prompt length: up to 3969
+    # answers; 3970..4096 returns 0 tokens but damages nothing; past 4096 it
+    # returns 0 tokens and then leaves the slot wedged for every later
+    # request until the process restarts (GeniePipeline_reset does not clear
+    # it); far past it the process dies outright ("free(): invalid next
+    # size"). The trigger is the prompt passing the context, not the image
+    # count -- 15 steps with a long question wedges exactly as 16 steps does.
+    # GenieNode.h/GeniePipeline.h expose no way to ask how much room is left,
+    # so arithmetic on the host is the only guard available.
+    #
+    # Leave it off to measure what the SDK actually does. Turn it on for a
+    # deployment that has to survive a client sending too many frames, and
+    # read a run taken with it on as the application's behaviour, not the
+    # SDK's.
+    vlm_vision_budget_guard: bool = False
     host: str = "0.0.0.0"
     port: int = 8080
     text_slots: tuple[SlotSpec, ...] = field(default_factory=tuple)
@@ -434,6 +456,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         genie_profile=bool(raw.get("GENIE_PROFILE", False)),
         prompt_logprobs_max_tokens=int(raw.get("PROMPT_LOGPROBS_MAX_TOKENS", 4096)),
         tool_call_recovery=bool(raw.get("TOOL_CALL_RECOVERY", False)),
+        vlm_vision_budget_guard=bool(raw.get("VLM_VISION_BUDGET_GUARD", False)),
         host=raw.get("HOST", "0.0.0.0"),
         port=int(raw.get("PORT", 8080)),
         text_slots=text_slots,

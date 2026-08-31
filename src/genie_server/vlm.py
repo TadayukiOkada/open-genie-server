@@ -134,6 +134,24 @@ def _load_pipeline_tokenizer(node_cfgs: dict):
     return None
 
 
+def _context_size(node_cfgs: dict) -> int:
+    """The text-generator's `context.size`, or 0 when the config does not say.
+
+    Same shape as a text bundle's genie_config.json, one level down:
+    {"text-generator": {"context": {"size": 4096, ...}, ...}}. Returning 0
+    rather than a default keeps plan_segments from enforcing a limit it made
+    up — a spec whose config omits the field gets no budget check.
+    """
+    cfg = node_cfgs.get("text_generator")
+    if not cfg:
+        return 0
+    inner = next(iter(cfg.values()), {})
+    try:
+        return int(inner.get("context", {}).get("size", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class VLMSlot:
     """One independent VLM pipeline: image-encoder + text-encoder +
     text-generator GenieNodes wired into a GeniePipeline, per a
@@ -178,6 +196,10 @@ class VLMSlot:
             built[node_key] = genie_node.Node(cfg)
         nodes = {k: built[k] for k in self.spec.node_config_files}
         self.tokenizer = _load_pipeline_tokenizer(node_cfgs)
+        # Baked into the context binaries at export time, so the config's
+        # number is the real ceiling — plan_segments budgets vision tokens
+        # against it. 0 disables that check rather than guessing.
+        self.context_size = _context_size(node_cfgs)
         self.image_encoder = nodes["image_encoder"]
         self.text_encoder = nodes["text_encoder"]
         self.text_generator = nodes["text_generator"]
@@ -201,9 +223,10 @@ class VLMSlot:
         Mirrors Slot.count_tokens so a VLM slot's usage numbers are on the
         same basis as a text slot's.
 
-        Image tokens are not included: the image path never becomes text on
-        the host (the image-encoder node emits embeddings straight into the
-        pipeline), so prompt_tokens counts the prompt text only."""
+        Text only: the image path never becomes text on the host (the
+        image-encoder node emits embeddings straight into the pipeline), so
+        there is nothing here to tokenize. The visual half of `usage` comes
+        from count_vision_tokens instead, and the caller adds the two."""
         if self.tokenizer is not None:
             return len(self.tokenizer.encode(text).ids)
         return len(text.split())
@@ -253,33 +276,88 @@ def create_vlm_slots(config: ServerConfig, genie_cdll) -> list[VLMSlot]:
 
 # ---------------------------------------------------------------- request parsing
 
+_MULTIMODAL_PART_TYPES = ("image_url", "video_url")
+
+
 def is_vlm_request(messages: list) -> bool:
     """True if any message's `content` is a parts array containing an
-    image_url part — the only signal used to route a chat request to a VLM
-    slot instead of the (unmodified) GenieDialog text path."""
+    image_url or video_url part — the only signal used to route a chat
+    request to a VLM slot instead of the (unmodified) GenieDialog text
+    path."""
     for m in messages:
         content = m.get("content")
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "image_url":
+                if (isinstance(part, dict)
+                        and part.get("type") in _MULTIMODAL_PART_TYPES):
                     return True
     return False
 
 
-def extract_image_parts(messages: list) -> tuple:
-    """Parses OpenAI-style multimodal `messages` into (system_text, parts,
-    images) for vlm_specs.VLMSpec.build_prompt_segments:
-      - system_text: the system message's content (string), or "".
-      - parts: ordered [("text", str) | ("image", index), ...] from the LAST
-        non-system message's content list (V1 is single-turn — only one user
-        turn with images is supported).
-      - images: ordered list of PIL.Image.Image, indexed by "image" parts.
-    Only `data:image/...;base64,...` URLs are supported (V1 does not fetch
-    remote http(s) URLs). Raises ValueError with a client-safe message."""
+def extract_video_meta(body: dict) -> dict:
+    """The request's video timeline metadata, or {}.
+
+    Follows vLLM's `media_io_kwargs.video` for client-side frame extraction
+    (`fps`, `frames_indices`, ...). OpenAI clients put it there by passing
+    `extra_body={"media_io_kwargs": {...}}`, which lands at the top level of
+    the request body.
+
+    This is a vLLM convention, not part of the OpenAI API, so a server that
+    does not know it simply ignores the key. That is why the `<t seconds>`
+    markers it feeds are best-effort: without an fps the spec emits none
+    rather than inventing a timeline."""
+    kwargs = body.get("media_io_kwargs")
+    if not isinstance(kwargs, dict):
+        return {}
+    video = kwargs.get("video")
+    return video if isinstance(video, dict) else {}
+
+
+def _decode_base64_image(b64data: str, what: str):
+    """One base64 payload (an image_url's, or one frame out of a video_url's
+    comma-joined list) -> a loaded PIL image."""
     import base64
     import io
     from PIL import Image
 
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(b64data)))
+        img.load()
+    except Exception as e:
+        raise ValueError(f"failed to decode {what} data: {e}") from e
+    return img
+
+
+def decode_media_sources(sources: list) -> list:
+    """The base64 payloads extract_multimodal_parts collected -> PIL images,
+    in the same order, so a part's indices keep pointing at the right frame.
+
+    Split out of the parsing deliberately: the whole plan (how many encoder
+    steps, and whether they fit the context) is known from the *counts*
+    alone, so a request the budget guard is going to refuse never pays for
+    decoding its frames. That matters at the sizes this path invites — a
+    500-frame request is 500 JPEG decodes and their bitmaps resident at once,
+    on a board whose memory is the reason the guard exists.
+    """
+    return [_decode_base64_image(b64, what) for b64, what in sources]
+
+
+def extract_multimodal_parts(messages: list) -> tuple:
+    """Parses OpenAI-style multimodal `messages` into (system_text, parts,
+    sources) for vlm_specs.VLMSpec.build_prompt_segments:
+      - system_text: the system message's content (string), or "".
+      - parts: ordered [("text", str) | ("image", index) |
+        ("video", [index, ...])] from the LAST non-system message's content
+        list (V1 is single-turn — only one user turn with media is
+        supported).
+      - sources: ordered list of (base64 payload, description) pairs, still
+        undecoded. Both an "image" part's index and a "video" part's index
+        list point into it — a video's frames are just images that the spec
+        knows to pack several-per-step. decode_media_sources turns them into
+        the PIL images start_vlm_generation feeds, once the request is known
+        to be one worth decoding.
+    Only `data:` (base64) URLs are supported (V1 does not fetch remote
+    http(s) URLs). Raises ValueError with a client-safe message."""
     system_text = ""
     user_messages = []
     for m in messages:
@@ -298,7 +376,7 @@ def extract_image_parts(messages: list) -> tuple:
     if not isinstance(content, list):
         raise ValueError("expected a multimodal 'content' array on the last message")
 
-    parts, images = [], []
+    parts, sources = [], []
     for part in content:
         ptype = part.get("type")
         if ptype == "text":
@@ -309,23 +387,160 @@ def extract_image_parts(messages: list) -> tuple:
                 raise ValueError(
                     "only data: (base64) image URLs are supported; remote "
                     "http(s) URLs are not fetched by this server")
-            try:
-                _, b64data = url.split(",", 1)
-                img = Image.open(io.BytesIO(base64.b64decode(b64data)))
-                img.load()
-            except Exception as e:
-                raise ValueError(f"failed to decode image_url data: {e}") from e
-            images.append(img)
-            parts.append(("image", len(images) - 1))
+            sources.append((url.split(",", 1)[1] if "," in url else "",
+                            "image_url"))
+            parts.append(("image", len(sources) - 1))
+        elif ptype == "video_url":
+            # vLLM's client-side frame-extraction form: the frames are already
+            # JPEGs, comma-joined inside one data URL, and the media type says
+            # so ("video/jpeg") to stop a server from re-decoding a container.
+            # A real container (video/mp4 and friends) would need a demuxer
+            # this server does not carry, so it is refused rather than
+            # half-supported.
+            url = (part.get("video_url") or {}).get("url", "")
+            if not url.startswith("data:"):
+                raise ValueError(
+                    "only data: (base64) video URLs are supported; remote "
+                    "http(s) URLs are not fetched by this server")
+            header = url.split(",", 1)[0]
+            if "video/jpeg" not in header:
+                raise ValueError(
+                    "video_url must carry pre-extracted frames as "
+                    "'data:video/jpeg;base64,<frame>,<frame>,...'; this "
+                    f"server does not decode video containers ({header!r})")
+            payload = url.split(",", 1)[1] if "," in url else ""
+            frames_b64 = [f for f in payload.split(",") if f]
+            if not frames_b64:
+                raise ValueError("video_url contained no frames")
+            frame_indices = []
+            for n, frame_b64 in enumerate(frames_b64):
+                sources.append((frame_b64, f"video_url frame {n}"))
+                frame_indices.append(len(sources) - 1)
+            parts.append(("video", frame_indices))
         else:
             raise ValueError(f"unsupported content part type: {ptype!r}")
 
-    return system_text, parts, images
+    return system_text, parts, sources
+
+
+# ---------------------------------------------------------------- planning
+
+# What to keep free for generation when a slot is uncapped (max_tokens=0).
+# Only a guess — an uncapped slot can still run into the context; the cap is
+# the only thing that actually bounds it.
+UNCAPPED_GENERATION_RESERVE = 256
+
+
+def count_vision_tokens(spec, segments: list) -> int:
+    """How much of the text-generator's context this request's visual input
+    occupies.
+
+    Derived, not reported: the image path never becomes text on the host (the
+    image-encoder emits embeddings straight into the pipeline) and neither
+    GenieNode.h nor GeniePipeline.h has a call that hands the count back, so
+    steps x the spec's per-step cost is the only way to know it.
+
+    The derivation is confirmed by where the context actually runs out: the
+    4096-context Qwen3-VL 4B bundle takes 15 steps and fails on the 16th,
+    which is exactly 16 x 256.
+    """
+    steps = sum(1 for kind, _ in segments if kind == "step")
+    return steps * spec.vision_tokens_per_step
+
+
+def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
+                  video_meta: dict, guard: bool = False) -> list:
+    """Builds the spec's text/step segment list, and — when `guard` is on —
+    refuses it up front if its vision tokens cannot fit the text-generator's
+    context.
+
+    **The guard is off by default** (VLM_VISION_BUDGET_GUARD), because it
+    conceals a defect this server exists to expose. What it conceals is worth
+    stating plainly. Measured on SA8255P / QAIRT 2.49, Qwen3-VL 4B, context
+    4096, 256 vision tokens per step, sweeping the prompt a token at a time:
+
+      prompt <= 3969        answers normally.
+      3970..4096            0 tokens and finish_reason "length". Nothing is
+                            damaged: the same slot answers the next request,
+                            and 3969/3970 can be alternated indefinitely.
+                            3969 is ctx - 127, the margin the AR128 prefill
+                            graph keeps; the node config does not state it,
+                            so the host cannot compute this line.
+      prompt > 4096         0 tokens, and then the slot is wedged: every
+                            later request, however small, fails in
+                            GenieNode_setData on the image encoder
+                            ("status=-1", WINDOW_ATTN_MASK) until the process
+                            is restarted. GeniePipeline_reset does not clear
+                            it. Reproduced two ways at 15 steps + long text
+                            (prompt 4142) and at 16 steps (prompt 4231), so
+                            the trigger is the prompt passing the context,
+                            not the step count.
+      17+ steps             the process dies outright ("free(): invalid next
+                            size"), the overrun being large enough.
+
+    **Decoding across the context does not wedge anything.** A prompt of 3940
+    with max_tokens 200 generates exactly 156 tokens, stops at 4096 on the
+    nose with finish_reason "length", and leaves the slot healthy. The reserve
+    below still subtracts the whole generation budget, but for a plainer
+    reason than safety: so the answer is not cut off mid-sentence, and so the
+    ~127-token prefill margin above is absorbed by something, since the host
+    has no way to read it.
+
+    GenieNode.h/GeniePipeline.h expose no way to ask how much room is left,
+    so arithmetic on the host is the only guard available at all.
+
+    With the guard off the request is passed through unchanged, but an
+    oversized one is logged at WARNING first. Saying what is about to happen
+    does not hide it — it is the opposite.
+    """
+    spec = vslot.spec
+    segments = spec.build_prompt_segments(system_text, parts, video_meta, spec)
+    steps = sum(1 for kind, _ in segments if kind == "step")
+    if not steps or not vslot.context_size:
+        return segments
+
+    per_step = spec.vision_tokens_per_step
+    # The template-inclusive text, which is what actually reaches the
+    # tokenizer — more than the raw prompt text `usage` counts as text.
+    text_tokens = vslot.count_tokens("".join(v for k, v in segments if k == "text"))
+    reserve = vslot.max_tokens or UNCAPPED_GENERATION_RESERVE
+    # The ceiling is the whole context, because that is where the wedge is:
+    # a prompt of 4096 still answers (with nothing), 4097 poisons the slot.
+    # The narrower line at ctx - 127, past which the answer is empty but the
+    # slot survives, is deliberately not the ceiling -- the node config does
+    # not state the AR length it comes from, so a server that subtracted a
+    # guessed one would refuse requests a differently exported bundle can
+    # serve. The reserve covers it in practice for any sane max_tokens; a
+    # slot configured below ~127 can still be handed a request that comes
+    # back empty, which is a wasted request rather than a broken slot.
+    budget = vslot.context_size - text_tokens - reserve
+    max_steps = max(budget // per_step, 0)
+
+    if steps > max_steps:
+        frames_per_step = spec.temporal_patch_size
+        detail = (
+            f"{steps} encoder steps ({steps * per_step} vision tokens) but "
+            f"only {max_steps} fit (context {vslot.context_size} - "
+            f"{text_tokens} prompt text - {reserve} reserved for generation, "
+            f"at {per_step} tokens per step)")
+        if not guard:
+            logger.warning(
+                "VLM request exceeds the context and VLM_VISION_BUDGET_GUARD "
+                "is off, so it is being sent as-is: %s. Expect the slot to "
+                "wedge, or the process to die. Set VLM_VISION_BUDGET_GUARD "
+                "to refuse it with a 400 instead.", detail)
+            return segments
+        raise ValueError(
+            f"too much visual input for this slot: {detail}. One still image "
+            f"is one step; a video is one step per {frames_per_step} frames. "
+            f"Send fewer frames, or lower VLM_SLOTS[].max_tokens to free up "
+            f"context.")
+    return segments
 
 
 # ---------------------------------------------------------------- generation
 
-def start_vlm_generation(lib, vslot: VLMSlot, system_text: str, parts: list,
+def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                          images: list, params, generation) -> None:
     """Kicks off one VLM pipeline execution on a worker thread, feeding
     generation.queue like the text engine does. There is no GenieNode/
@@ -356,12 +571,12 @@ def start_vlm_generation(lib, vslot: VLMSlot, system_text: str, parts: list,
 
                 vslot.pipeline.reset()
                 spec = vslot.spec
-                for kind, value in spec.build_prompt_segments(system_text, parts):
+                for kind, value in segments:
                     if kind == "text":
                         vslot.text_encoder.set_text(
                             spec.text_encoder_text_input_io, value)
-                    else:  # "image"
-                        pixel_values = spec.preprocess_image(images[value], spec)
+                    else:  # "step" — one image-encoder execution
+                        pixel_values = spec.preprocess_step(images, value, spec)
                         vslot.image_encoder.set_buffer(
                             spec.image_encoder_image_input_io, pixel_values)
                         for io_name, static_bytes in vslot.static_tensors.items():

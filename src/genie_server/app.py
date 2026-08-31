@@ -670,7 +670,7 @@ def create_app(state: ServerState) -> FastAPI:
 
     async def _vlm_chat(request: Request, body: dict, requested_model: str,
                         params: GenParams, stream: bool):
-        """Chat requests whose messages contain image parts — routed through
+        """Chat requests whose messages contain image or video parts — routed through
         the GenieNode/GeniePipeline path. Single-turn only; the request's
         max_tokens/stop plus prefix-cache/LoRA/tools do not apply (no SDK APIs
         for them). Generation length is bounded by the slot's static
@@ -686,22 +686,43 @@ def create_app(state: ServerState) -> FastAPI:
         vslot = manager.select_vlm_for_request(body, requested_model)
         if vslot is None:
             raise InvalidRequestError(
-                "This request has image content but no VLM_SLOTS are "
-                "configured on this server.", "model")
+                "This request has image or video content but no VLM_SLOTS "
+                "are configured on this server.", "model")
         model_name = vslot.active_model_id   # the model that answers, see above
         try:
-            system_text, parts, images = vlm.extract_image_parts(body["messages"])
+            system_text, parts, sources = vlm.extract_multimodal_parts(
+                body["messages"])
+            # All three raise ValueError for things the client can fix: a
+            # malformed part, an undecodable one, or — when
+            # VLM_VISION_BUDGET_GUARD is on — more visual input than the
+            # context holds. Those checks belong here, not in the worker
+            # thread, so they come back as a 400 rather than a 500. The guard
+            # is off by default: overrunning wedges the slot, but hiding what
+            # the SDK does is not this server's job (see plan_segments).
+            #
+            # Planning before decoding is deliberate: the step count comes
+            # from the parts alone, so a request the guard refuses never pays
+            # for turning its frames into bitmaps.
+            segments = vlm.plan_segments(vslot, system_text, parts,
+                                         vlm.extract_video_meta(body),
+                                         guard=cfg.vlm_vision_budget_guard)
+            images = vlm.decode_media_sources(sources)
         except ValueError as e:
             raise InvalidRequestError(str(e), "messages")
 
         request_id = f"chatcmpl-{uuid.uuid4()}"
         # Counted before the stream branch so both paths report the same
-        # prompt_tokens. Text parts only — the image's contribution is not
-        # something the VLM pipeline reports back.
+        # prompt_tokens. Two halves, because they are known two different
+        # ways: the request's own text through the tokenizer (chat-template
+        # markers excluded, as on the text path), plus the visual input
+        # derived from the step count — the pipeline never reports that one
+        # back, and leaving it out understated a 28-frame request's prompt by
+        # 3584 tokens while reporting the same 20 as a 10-frame one.
         prompt_text = system_text + "".join(p[1] for p in parts if p[0] == "text")
-        prompt_tokens = vslot.count_tokens(prompt_text)
+        prompt_tokens = (vslot.count_tokens(prompt_text)
+                         + vlm.count_vision_tokens(vslot.spec, segments))
         gen = Generation(request_id, vslot, state.lib)
-        vlm.start_vlm_generation(state.lib, vslot, system_text, parts, images,
+        vlm.start_vlm_generation(state.lib, vslot, segments, images,
                                  params, gen)
 
         if stream:
