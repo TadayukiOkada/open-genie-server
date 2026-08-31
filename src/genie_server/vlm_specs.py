@@ -155,6 +155,10 @@ def qwen3vl_preprocess_step(images: list, payload, spec: "VLMSpec") -> np.ndarra
     video frames give the ViT two genuinely different frames, which is what
     lets it see motion at all.
     """
+    if len(payload) != spec.temporal_patch_size:
+        raise ValueError(
+            f"step payload has {len(payload)} frames, but this spec's ViT "
+            f"takes {spec.temporal_patch_size} per execution")
     frames = [_resize_to_spec(images[i], spec) for i in payload]
     return _qwen3vl_patchify(frames[0], frames[1], spec)
 
@@ -163,13 +167,33 @@ def _qwen3vl_frame_times(n_frames: int, video_meta: dict):
     """Per-frame timestamps in seconds, or None when the request carried no
     timeline to derive them from.
 
-    Mirrors what vLLM accepts in `media_io_kwargs.video` for client-side
-    frame extraction: `fps` (a float, or a single-element list — the Qwen
-    examples pass `[3.0]`) and optionally `frames_indices`, the position of
-    each supplied frame in the original video. Without frames_indices the
-    frames are assumed to be evenly spaced at `fps`.
+    Reads what vLLM accepts in `media_io_kwargs.video` for client-side frame
+    extraction: `fps` (a float, or a single-element list — the Qwen examples
+    pass `[3.0]`) and optionally `frames_indices`, the position of each
+    supplied frame in the source video.
 
-    Returning None rather than inventing a default fps is deliberate: the
+    **`fps` means two different things, and which one depends on
+    `frames_indices`** — vLLM keeps them in separate fields and this one key
+    has to carry both:
+
+      with frames_indices     the SOURCE video's frame rate, because the
+                              indices are positions in that video and the
+                              time of one is idx / fps. This is vLLM's
+                              VideoMetadata["fps"], the number
+                              _calculate_timestamps divides by.
+      without frames_indices  the rate the frames were SAMPLED at, because
+                              evenly spaced frames are all there is to go on
+                              and frame k is then at k / fps. This is the
+                              `fps` of media_io_kwargs.video itself, which in
+                              vLLM asks a backend to sample at that rate.
+
+    Sending a source fps without indices would therefore date the whole clip
+    wrong (30 fps reads as frames 33 ms apart), so a `frames_indices` whose
+    length does not match the frames supplied returns None instead of
+    quietly falling back to the other meaning: the count disagreeing is the
+    one signal available that the two are out of step.
+
+    Returning None rather than inventing a default fps is the same rule: the
     `<t seconds>` markers claim a real timeline to the model, so a wrong one
     is worse than none.
     """
@@ -184,9 +208,31 @@ def _qwen3vl_frame_times(n_frames: int, video_meta: dict):
         return None
 
     indices = video_meta.get("frames_indices")
-    if isinstance(indices, (list, tuple)) and len(indices) >= n_frames:
-        return [float(indices[k]) / fps for k in range(n_frames)]
+    if indices is not None:
+        if not isinstance(indices, (list, tuple)) or len(indices) != n_frames:
+            return None
+        try:
+            return [float(i) / fps for i in indices]
+        except (TypeError, ValueError):
+            return None
     return [k / fps for k in range(n_frames)]
+
+
+def _qwen3vl_step_time(times: list, start: int, per_step: int) -> float:
+    """The timestamp Qwen3-VL trained on for the step packing frames
+    [start, start + per_step).
+
+    The midpoint of the window, not its first frame: the ViT collapses the
+    whole group into one visual chunk, and the reference implementation dates
+    that chunk by averaging the group's first and last frame times (vLLM's
+    Qwen3VLProcessor._calculate_timestamps, which pads the index list with
+    its last entry before pairing). Clamping to the final frame reproduces
+    that padding — the same repeat the odd tail's pixels get — so a two-frame
+    step at 2 fps is 0.2s rather than 0.0s, and an unevenly sampled pair is
+    dated between its frames rather than at the earlier one.
+    """
+    end = min(start + per_step - 1, len(times) - 1)
+    return (times[start] + times[end]) / 2.0
 
 
 def qwen3vl_build_prompt_segments(system_text: str, parts: list,
@@ -202,9 +248,10 @@ def qwen3vl_build_prompt_segments(system_text: str, parts: list,
 
     A "video" part becomes ceil(frames / temporal_patch_size) steps, each
     carrying two consecutive frames, prefixed with a `<t seconds>` marker
-    when the request supplied an fps to derive one from. An odd frame count
-    repeats the final frame to fill the last step, the same padding a still
-    image gets.
+    when the request supplied an fps to derive one from (the midpoint of the
+    frames in that step — see _qwen3vl_step_time). An odd frame count repeats
+    the final frame to fill the last step, the same padding a still image
+    gets.
     """
     video_meta = video_meta or {}
     per_step = spec.temporal_patch_size
@@ -234,7 +281,8 @@ def qwen3vl_build_prompt_segments(system_text: str, parts: list,
                 while len(window) < per_step:      # odd tail: repeat the last frame
                     window.append(window[-1])
                 if times is not None:
-                    buf += f"<{times[start]:.1f} seconds>"
+                    t = _qwen3vl_step_time(times, start, per_step)
+                    buf += f"<{t:.1f} seconds>"
                 emit_step(window)
         else:
             raise ValueError(f"unknown content part kind: {kind}")

@@ -757,6 +757,75 @@ def t_vlm_stream_usage(ctx):
     return f"stream={u} sync={sync}"
 
 
+def vlm_video_body(ctx, n_frames, **extra):
+    """The same request as vlm_body, with the image replaced by n_frames of
+    video in vLLM's client-side extraction form: base64 JPEGs comma-joined
+    under a video/jpeg media type."""
+    vlm = ctx.cfg.get("vlm", {})
+    if not vlm.get("enabled"):
+        raise SkipTest("vlm.enabled not configured")
+    image_path = vlm.get("image_path", "")
+    raw = Path(image_path).read_bytes() if image_path else base64.b64decode(RED_PNG_B64)
+    frame = base64.b64encode(raw).decode()
+    body = {
+        "model": vlm.get("model") or ctx.model,
+        "max_tokens": 96, "temperature": 0,
+        "media_io_kwargs": {"video": {"fps": 2.0}},
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": vlm.get(
+                "video_question", "What happens in this clip?")},
+            {"type": "video_url", "video_url": {
+                "url": "data:video/jpeg;base64," + ",".join([frame] * n_frames)}},
+        ]}]}
+    if vlm.get("slot"):
+        body["slot"] = vlm["slot"]
+    body.update(extra)
+    return body
+
+
+def t_vlm_video(ctx):
+    """A video part answers, and costs half the context the same frames would
+    as separate images: the ViT takes temporal_patch_size frames per step, so
+    6 frames are 3 steps at 256 tokens each rather than 6."""
+    six = ctx.post_json("/v1/chat/completions", vlm_video_body(ctx, 6))
+    content = six["choices"][0]["message"]["content"] or ""
+    if not content.strip():
+        raise CheckFailure("empty response to a video request")
+
+    two = ctx.post_json("/v1/chat/completions", vlm_video_body(ctx, 2))
+    delta = six["usage"]["prompt_tokens"] - two["usage"]["prompt_tokens"]
+    if delta != 2 * 256:
+        raise CheckFailure(
+            f"6 frames minus 2 frames should be 2 steps = 512 prompt tokens, "
+            f"got {delta} ({six['usage']} vs {two['usage']})")
+    return (f"6 frames = {six['usage']['prompt_tokens']} prompt tokens, "
+            f"response={content[:60]!r}")
+
+
+def t_vlm_video_budget(ctx):
+    """VLM_VISION_BUDGET_GUARD must refuse an oversized request as a 400
+    before it reaches the SDK, where it would wedge the slot (16 steps) or
+    kill the process (17+). Skipped unless the server has the guard on --
+    with it off the SDK's behaviour is the point, and provoking it here would
+    take the slot down for every test after this one."""
+    if not ctx.cfg.get("vlm", {}).get("budget_guard"):
+        raise SkipTest("vlm.budget_guard not configured (server-side "
+                       "VLM_VISION_BUDGET_GUARD is off by default)")
+    # 64 frames = 32 steps = 8192 vision tokens: past any context this
+    # bundle family is exported with.
+    r = ctx.call("POST", "/v1/chat/completions", body=vlm_video_body(ctx, 64))
+    if r.status_code != 400:
+        raise CheckFailure(f"oversized video -> HTTP {r.status_code}, want 400")
+    msg = r.json().get("error", {}).get("message", "")
+    if "visual input" not in msg:
+        raise CheckFailure(f"400 did not explain the budget: {msg!r}")
+
+    ok = ctx.post_json("/v1/chat/completions", vlm_video_body(ctx, 2))
+    if not (ok["choices"][0]["message"]["content"] or "").strip():
+        raise CheckFailure("slot did not answer after a refused request")
+    return f"refused with {msg[:80]!r}, slot still healthy"
+
+
 def t_vlm_disconnect(ctx):
     """GenieNode exposes no abort call, so hanging up cannot stop a VLM
     generation (F14). What must hold is that the slot comes back on its own."""
@@ -1104,6 +1173,8 @@ TESTS = [
     ("V03", "VLM stream matches sync",           t_vlm_stream_matches_sync),
     ("V04", "VLM stream usage accounting",       t_vlm_stream_usage),
     ("V05", "VLM slot recovers after disconnect", t_vlm_disconnect),
+    ("V06", "VLM video chat (frames packed per step)", t_vlm_video),
+    ("V07", "VLM vision budget guard refuses 400",  t_vlm_video_budget),
     ("G01", "grammar: JSON Schema",             t_grammar_json_schema),
     ("G02", "grammar: FSM reset between queries", t_grammar_repeat_reset),
     ("G03", "grammar: streaming SSE",           t_grammar_streaming),

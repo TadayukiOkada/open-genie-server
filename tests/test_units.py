@@ -1499,13 +1499,33 @@ def test_video_url_routes_to_the_vlm_path():
 
 
 def test_video_url_frames_become_one_video_part():
-    """Every frame lands in the flat images list; the part carries their
+    """Every frame lands in the flat sources list; the part carries their
     indices so the spec can pack them into steps."""
     pytest.importorskip("PIL")
     from genie_server import vlm
-    _, parts, images = vlm.extract_multimodal_parts(_messages_with_video(6))
-    assert len(images) == 6
+    _, parts, sources = vlm.extract_multimodal_parts(_messages_with_video(6))
+    assert len(sources) == 6
     assert parts == [("text", "What happens?"), ("video", [0, 1, 2, 3, 4, 5])]
+
+
+def test_frames_are_not_decoded_until_the_plan_is_known():
+    """Parsing yields undecoded payloads so that a request the budget guard
+    refuses never pays for turning its frames into bitmaps."""
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    _, _, sources = vlm.extract_multimodal_parts(_messages_with_video(3))
+    assert all(isinstance(b64, str) for b64, _ in sources)
+    images = vlm.decode_media_sources(sources)
+    assert len(images) == 3
+    assert all(img.size == (4, 4) for img in images)
+
+
+def test_an_undecodable_frame_is_a_client_error():
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    with pytest.raises(ValueError, match="video_url frame 1"):
+        vlm.decode_media_sources([(_b64_jpeg((1, 2, 3)), "video_url frame 0"),
+                                  ("not base64 jpeg", "video_url frame 1")])
 
 
 def test_video_container_media_types_are_refused_not_half_supported():
@@ -1581,12 +1601,13 @@ def test_timestamps_appear_only_when_an_fps_was_supplied():
                       if k == "text")
     assert "seconds" not in without
 
-    # 2 fps, 2 frames per step -> one step per second, matching wall clock.
+    # 2 fps, 2 frames per step -> one step per second of wall clock, each
+    # dated at the midpoint of its own pair (0.25s and 1.25s, to one place).
     with_fps = "".join(
         v for k, v in spec.build_prompt_segments("", parts, {"fps": 2.0}, spec)
         if k == "text")
-    assert "<0.0 seconds>" in with_fps
-    assert "<1.0 seconds>" in with_fps
+    assert "<0.2 seconds>" in with_fps
+    assert "<1.2 seconds>" in with_fps
 
 
 def test_fps_may_arrive_as_a_single_element_list():
@@ -1595,7 +1616,7 @@ def test_fps_may_arrive_as_a_single_element_list():
     text = "".join(
         v for k, v in spec.build_prompt_segments(
             "", [("video", [0, 1])], {"fps": [2.0]}, spec) if k == "text")
-    assert "<0.0 seconds>" in text
+    assert "<0.2 seconds>" in text
 
 
 def test_frames_indices_place_the_timestamps():
@@ -1607,8 +1628,65 @@ def test_frames_indices_place_the_timestamps():
             "", [("video", [0, 1, 2, 3])],
             {"fps": 30.0, "frames_indices": [0, 15, 30, 45]}, spec)
         if k == "text")
-    assert "<0.0 seconds>" in text
-    assert "<1.0 seconds>" in text        # frame index 30 at 30 fps
+    # Frames 0 and 15 are 0.0s and 0.5s; the step covering them is 0.25s.
+    assert "<0.2 seconds>" in text
+    # Frames 30 and 45 are 1.0s and 1.5s -> 1.25s.
+    assert "<1.2 seconds>" in text
+
+
+def test_a_step_is_dated_at_the_midpoint_of_its_frames():
+    """Qwen3-VL dates the visual chunk, not its first frame: vLLM's
+    _calculate_timestamps averages the group's first and last frame times.
+    Taking the first would label every step half a sampling interval early,
+    and an unevenly sampled pair arbitrarily so."""
+    from genie_server.vlm_specs import _qwen3vl_step_time
+    assert _qwen3vl_step_time([0.0, 0.5, 1.0, 1.5], 0, 2) == 0.25
+    assert _qwen3vl_step_time([0.0, 0.5, 1.0, 1.5], 2, 2) == 1.25
+    # Uneven sampling: a pair spanning 0s to 10s is dated between them.
+    assert _qwen3vl_step_time([0.0, 10.0], 0, 2) == 5.0
+
+
+def test_the_odd_tail_is_dated_by_its_only_real_frame():
+    """The last step repeats the final frame to fill itself, so its midpoint
+    is that frame's own time — the same padding vLLM applies to the index
+    list before pairing."""
+    from genie_server.vlm_specs import _qwen3vl_step_time
+    assert _qwen3vl_step_time([0.0, 0.5, 1.0], 2, 2) == 1.0
+
+
+def test_frames_indices_that_do_not_match_the_frames_emit_no_markers():
+    """`fps` means the source rate when frames_indices is present and the
+    sampling rate when it is not, so a count that disagrees means the two
+    readings are out of step. Falling back would date a 30 fps clip as though
+    its frames were 33 ms apart; no marker is better than a wrong one."""
+    spec = _spec()
+    text = "".join(
+        v for k, v in spec.build_prompt_segments(
+            "", [("video", [0, 1, 2, 3])],
+            {"fps": 30.0, "frames_indices": [0, 15]}, spec)
+        if k == "text")
+    assert "seconds" not in text
+
+
+def test_unusable_frames_indices_emit_no_markers():
+    spec = _spec()
+    for indices in ("0,15", [None, 1], [0, "x"]):
+        text = "".join(
+            v for k, v in spec.build_prompt_segments(
+                "", [("video", [0, 1])],
+                {"fps": 30.0, "frames_indices": indices}, spec)
+            if k == "text")
+        assert "seconds" not in text, indices
+
+
+def test_a_step_payload_must_match_the_vits_temporal_size():
+    """build_prompt_segments packs temporal_patch_size frames per step and
+    the patchify below reads exactly two, so a spec whose ViT wanted a
+    different number has to say so rather than lose frames silently."""
+    pytest.importorskip("numpy")
+    spec = _spec()
+    with pytest.raises(ValueError, match="per execution"):
+        spec.preprocess_step([None, None, None], (0, 1, 2), spec)
 
 
 def test_vision_tokens_per_step_is_a_quarter_of_the_patch_rows():

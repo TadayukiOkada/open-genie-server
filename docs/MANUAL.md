@@ -1085,7 +1085,18 @@ A `video_url` part carries a sequence of frames the client already extracted, in
 
 **Why this is not the same as sending the frames as `image_url` parts.** The ViT consumes `temporal_patch_size` frames per execution — 2 for Qwen3-VL. A still image fills that dimension by repeating itself, so N images cost N encoder steps; a video packs consecutive frames in pairs, so N frames cost N/2. Since a step costs 256 tokens of the text-generator's context either way, the video form fits **twice as much footage** in the same context, and gives the encoder two genuinely different frames to compare, which is what lets it describe motion rather than list N separate scenes.
 
-`media_io_kwargs.video` is vLLM's key for the timeline metadata (OpenAI clients reach it with `extra_body={"media_io_kwargs": ...}`; it is a vLLM convention, not part of the OpenAI API). `fps` — a float, or a single-element list, which is how the Qwen examples write it — turns into a `<t seconds>` marker before each step, matching the format Qwen3-VL was trained on for video. `frames_indices` places those markers by each frame's real position in the source, for unevenly sampled frames. **Without an `fps` no markers are emitted at all**: the markers assert a real timeline to the model, and a made-up one is worse than none.
+`media_io_kwargs.video` is vLLM's key for the timeline metadata (OpenAI clients reach it with `extra_body={"media_io_kwargs": ...}`; it is a vLLM convention, not part of the OpenAI API). `fps` — a float, or a single-element list, which is how the Qwen examples write it — turns into a `<t seconds>` marker before each step, matching the format Qwen3-VL was trained on for video. `frames_indices`, the position of each supplied frame in the source video, places those markers for unevenly sampled frames. **Without an `fps` no markers are emitted at all**: the markers assert a real timeline to the model, and a made-up one is worse than none.
+
+**Which rate `fps` means depends on `frames_indices`**, because vLLM keeps the two in separate fields and this one key has to carry both:
+
+| | `fps` is | why |
+|---|---|---|
+| with `frames_indices` | the **source video's** frame rate | the indices are positions in that video, so a frame's time is `index / fps` — vLLM's `VideoMetadata["fps"]` |
+| without | the rate the frames were **sampled** at | evenly spaced frames are all there is to go on, so frame *k* is at `k / fps` — the `fps` of `media_io_kwargs.video` itself |
+
+A source rate sent without indices would date the whole clip wrong (30 fps reads as frames 33 ms apart), so **a `frames_indices` whose length does not match the frames supplied emits no markers** rather than quietly falling back to the other reading — the count disagreeing is the one signal available that the two are out of step.
+
+Each marker dates the **step**, not its first frame: the ViT collapses the pair into a single visual chunk, and the reference implementation (vLLM's `Qwen3VLProcessor._calculate_timestamps`) times that chunk by averaging the group's first and last frame. Two frames at 2 fps are therefore `<0.2 seconds>`, not `<0.0 seconds>`, and the repeated frame of an odd tail leaves that step dated by its one real frame.
 
 An odd frame count repeats the final frame to fill the last step, the same padding a still image gets.
 

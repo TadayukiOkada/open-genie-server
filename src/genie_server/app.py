@@ -690,17 +690,23 @@ def create_app(state: ServerState) -> FastAPI:
                 "are configured on this server.", "model")
         model_name = vslot.active_model_id   # the model that answers, see above
         try:
-            system_text, parts, images = vlm.extract_multimodal_parts(body["messages"])
-            # Both raise ValueError for things the client can fix: an
-            # undecodable part, or — when VLM_VISION_BUDGET_GUARD is on —
-            # more visual input than the context holds. That check belongs
-            # here, not in the worker thread, so it comes back as a 400 rather
-            # than a 500. It is off by default: overrunning wedges the slot,
-            # but hiding what the SDK does is not this server's job (see
-            # plan_segments).
+            system_text, parts, sources = vlm.extract_multimodal_parts(
+                body["messages"])
+            # All three raise ValueError for things the client can fix: a
+            # malformed part, an undecodable one, or — when
+            # VLM_VISION_BUDGET_GUARD is on — more visual input than the
+            # context holds. Those checks belong here, not in the worker
+            # thread, so they come back as a 400 rather than a 500. The guard
+            # is off by default: overrunning wedges the slot, but hiding what
+            # the SDK does is not this server's job (see plan_segments).
+            #
+            # Planning before decoding is deliberate: the step count comes
+            # from the parts alone, so a request the guard refuses never pays
+            # for turning its frames into bitmaps.
             segments = vlm.plan_segments(vslot, system_text, parts,
                                          vlm.extract_video_meta(body),
                                          guard=cfg.vlm_vision_budget_guard)
+            images = vlm.decode_media_sources(sources)
         except ValueError as e:
             raise InvalidRequestError(str(e), "messages")
 

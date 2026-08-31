@@ -313,14 +313,14 @@ def extract_video_meta(body: dict) -> dict:
     return video if isinstance(video, dict) else {}
 
 
-def _decode_data_url(url: str, what: str):
-    """One `data:<media type>;base64,<payload>` URL -> a loaded PIL image."""
+def _decode_base64_image(b64data: str, what: str):
+    """One base64 payload (an image_url's, or one frame out of a video_url's
+    comma-joined list) -> a loaded PIL image."""
     import base64
     import io
     from PIL import Image
 
     try:
-        _, b64data = url.split(",", 1)
         img = Image.open(io.BytesIO(base64.b64decode(b64data)))
         img.load()
     except Exception as e:
@@ -328,17 +328,34 @@ def _decode_data_url(url: str, what: str):
     return img
 
 
+def decode_media_sources(sources: list) -> list:
+    """The base64 payloads extract_multimodal_parts collected -> PIL images,
+    in the same order, so a part's indices keep pointing at the right frame.
+
+    Split out of the parsing deliberately: the whole plan (how many encoder
+    steps, and whether they fit the context) is known from the *counts*
+    alone, so a request the budget guard is going to refuse never pays for
+    decoding its frames. That matters at the sizes this path invites — a
+    500-frame request is 500 JPEG decodes and their bitmaps resident at once,
+    on a board whose memory is the reason the guard exists.
+    """
+    return [_decode_base64_image(b64, what) for b64, what in sources]
+
+
 def extract_multimodal_parts(messages: list) -> tuple:
     """Parses OpenAI-style multimodal `messages` into (system_text, parts,
-    images) for vlm_specs.VLMSpec.build_prompt_segments:
+    sources) for vlm_specs.VLMSpec.build_prompt_segments:
       - system_text: the system message's content (string), or "".
       - parts: ordered [("text", str) | ("image", index) |
         ("video", [index, ...])] from the LAST non-system message's content
         list (V1 is single-turn — only one user turn with media is
         supported).
-      - images: ordered list of PIL.Image.Image. Both an "image" part's index
-        and a "video" part's index list point into it — a video's frames are
-        just images that the spec knows to pack several-per-step.
+      - sources: ordered list of (base64 payload, description) pairs, still
+        undecoded. Both an "image" part's index and a "video" part's index
+        list point into it — a video's frames are just images that the spec
+        knows to pack several-per-step. decode_media_sources turns them into
+        the PIL images start_vlm_generation feeds, once the request is known
+        to be one worth decoding.
     Only `data:` (base64) URLs are supported (V1 does not fetch remote
     http(s) URLs). Raises ValueError with a client-safe message."""
     system_text = ""
@@ -359,7 +376,7 @@ def extract_multimodal_parts(messages: list) -> tuple:
     if not isinstance(content, list):
         raise ValueError("expected a multimodal 'content' array on the last message")
 
-    parts, images = [], []
+    parts, sources = [], []
     for part in content:
         ptype = part.get("type")
         if ptype == "text":
@@ -370,8 +387,9 @@ def extract_multimodal_parts(messages: list) -> tuple:
                 raise ValueError(
                     "only data: (base64) image URLs are supported; remote "
                     "http(s) URLs are not fetched by this server")
-            images.append(_decode_data_url(url, "image_url"))
-            parts.append(("image", len(images) - 1))
+            sources.append((url.split(",", 1)[1] if "," in url else "",
+                            "image_url"))
+            parts.append(("image", len(sources) - 1))
         elif ptype == "video_url":
             # vLLM's client-side frame-extraction form: the frames are already
             # JPEGs, comma-joined inside one data URL, and the media type says
@@ -396,15 +414,13 @@ def extract_multimodal_parts(messages: list) -> tuple:
                 raise ValueError("video_url contained no frames")
             frame_indices = []
             for n, frame_b64 in enumerate(frames_b64):
-                images.append(_decode_data_url(
-                    "data:image/jpeg;base64," + frame_b64,
-                    f"video_url frame {n}"))
-                frame_indices.append(len(images) - 1)
+                sources.append((frame_b64, f"video_url frame {n}"))
+                frame_indices.append(len(sources) - 1)
             parts.append(("video", frame_indices))
         else:
             raise ValueError(f"unsupported content part type: {ptype!r}")
 
-    return system_text, parts, images
+    return system_text, parts, sources
 
 
 # ---------------------------------------------------------------- planning
@@ -471,6 +487,14 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
     # tokenizer — more than the raw prompt text `usage` counts as text.
     text_tokens = vslot.count_tokens("".join(v for k, v in segments if k == "text"))
     reserve = vslot.max_tokens or UNCAPPED_GENERATION_RESERVE
+    # Against the whole context, not context - AR length. On the text path
+    # the usable budget is ctx - arN (one request past it wedges the dialog
+    # for good), and whether the same subtraction applies here is not
+    # settled: the measured boundary cannot tell the two apart, because 16
+    # steps is 4096 vision tokens on its own and so overruns either way. The
+    # generation reserve happens to cover an AR length at the sizes measured;
+    # a slot configured with a small max_tokens is the case that would show
+    # the difference.
     budget = vslot.context_size - text_tokens - reserve
     max_steps = max(budget // per_step, 0)
 

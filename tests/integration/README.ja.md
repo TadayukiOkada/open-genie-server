@@ -40,7 +40,7 @@ python3 run_integration_tests.py --only C01,L03  # 一部だけ実行
 | L01-L03 | logprobs(chat + completions)とプロンプトスコアリング(lm_eval loglikelihood形状。無効時→400のゲート確認込み) |
 | P01, P02 | パフォーマンスポリシー: 1往復と、`Genie_PerformancePolicy_t` 全9値の往復 + 未知の名前が拒否されること。ポリシーが実際に効くかは `measure_perf_policy.py` が別途計測(SDK自身のKPIを読むため `GENIE_PROFILE=true` が必要) |
 | M01, M02 | モデルホットスワップ(+復元)、LoRA適用/解放 — **config設定時のみ** |
-| V01-V05 | VLM: 画像チャット、ストリーミングSSE、ストリーム↔同期の一致、usage集計、切断後のスロット復帰(abort APIが無いので生成自体は完走する) — **config設定時のみ** |
+| V01-V07 | VLM: 画像チャット、ストリーミングSSE、ストリーム↔同期の一致、usage集計、切断後のスロット復帰(abort APIが無いので生成自体は完走する)、動画入力(2フレームずつ1エンコーダステップに詰まること、およびそれを裏付けるusage)、視覚入力の予算ガードの400 — **config設定時のみ**。V07はさらにサーバを`VLM_VISION_BUDGET_GUARD`をONにして起動している必要がある |
 | G01-G08 | Grammar制約デコーディング: JSON Schema(同期/ストリーミング/連続実行)、マスク下のlogprobs、正規表現、EBNF、非対応バックエンドの拒否、復元 — **config設定時のみ**、下記参照 |
 | Z01 | 実行後のサーバ生存確認 |
 
