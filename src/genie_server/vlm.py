@@ -456,21 +456,38 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
 
     **The guard is off by default** (VLM_VISION_BUDGET_GUARD), because it
     conceals a defect this server exists to expose. What it conceals is worth
-    stating plainly, though: on this path an overrun does not fail cleanly.
-    Measured on SA8255P / QAIRT 2.49, Qwen3-VL 4B, context 4096, 256 vision
-    tokens per step:
+    stating plainly. Measured on SA8255P / QAIRT 2.49, Qwen3-VL 4B, context
+    4096, 256 vision tokens per step, sweeping the prompt a token at a time:
 
-      15 steps  ->  answers normally
-      16 steps  ->  "Context Size was exceeded", 0 tokens, and the slot is
-                    then wedged: every later request, however small, fails in
-                    GenieNode_setData on the image encoder until the process
-                    is restarted. GeniePipeline_reset does not clear it.
-      17 steps  ->  the process dies outright ("free(): invalid next size").
+      prompt <= 3969        answers normally.
+      3970..4096            0 tokens and finish_reason "length". Nothing is
+                            damaged: the same slot answers the next request,
+                            and 3969/3970 can be alternated indefinitely.
+                            3969 is ctx - 127, the margin the AR128 prefill
+                            graph keeps; the node config does not state it,
+                            so the host cannot compute this line.
+      prompt > 4096         0 tokens, and then the slot is wedged: every
+                            later request, however small, fails in
+                            GenieNode_setData on the image encoder
+                            ("status=-1", WINDOW_ATTN_MASK) until the process
+                            is restarted. GeniePipeline_reset does not clear
+                            it. Reproduced two ways at 15 steps + long text
+                            (prompt 4142) and at 16 steps (prompt 4231), so
+                            the trigger is the prompt passing the context,
+                            not the step count.
+      17+ steps             the process dies outright ("free(): invalid next
+                            size"), the overrun being large enough.
+
+    **Decoding across the context does not wedge anything.** A prompt of 3940
+    with max_tokens 200 generates exactly 156 tokens, stops at 4096 on the
+    nose with finish_reason "length", and leaves the slot healthy. The reserve
+    below still subtracts the whole generation budget, but for a plainer
+    reason than safety: so the answer is not cut off mid-sentence, and so the
+    ~127-token prefill margin above is absorbed by something, since the host
+    has no way to read it.
 
     GenieNode.h/GeniePipeline.h expose no way to ask how much room is left,
-    so arithmetic on the host is the only guard available, and it has to be
-    conservative: the reserve subtracts the whole generation budget, because
-    a request that fits its prompt can still cross the line while decoding.
+    so arithmetic on the host is the only guard available at all.
 
     With the guard off the request is passed through unchanged, but an
     oversized one is logged at WARNING first. Saying what is about to happen
@@ -487,14 +504,15 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
     # tokenizer — more than the raw prompt text `usage` counts as text.
     text_tokens = vslot.count_tokens("".join(v for k, v in segments if k == "text"))
     reserve = vslot.max_tokens or UNCAPPED_GENERATION_RESERVE
-    # Against the whole context, not context - AR length. On the text path
-    # the usable budget is ctx - arN (one request past it wedges the dialog
-    # for good), and whether the same subtraction applies here is not
-    # settled: the measured boundary cannot tell the two apart, because 16
-    # steps is 4096 vision tokens on its own and so overruns either way. The
-    # generation reserve happens to cover an AR length at the sizes measured;
-    # a slot configured with a small max_tokens is the case that would show
-    # the difference.
+    # The ceiling is the whole context, because that is where the wedge is:
+    # a prompt of 4096 still answers (with nothing), 4097 poisons the slot.
+    # The narrower line at ctx - 127, past which the answer is empty but the
+    # slot survives, is deliberately not the ceiling -- the node config does
+    # not state the AR length it comes from, so a server that subtracted a
+    # guessed one would refuse requests a differently exported bundle can
+    # serve. The reserve covers it in practice for any sane max_tokens; a
+    # slot configured below ~127 can still be handed a request that comes
+    # back empty, which is a wasted request rather than a broken slot.
     budget = vslot.context_size - text_tokens - reserve
     max_steps = max(budget // per_step, 0)
 

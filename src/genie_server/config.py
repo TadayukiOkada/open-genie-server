@@ -174,13 +174,15 @@ class ServerConfig:
     # defect this server exists to expose. What it conceals is severe, though,
     # and worth stating plainly -- on the composable-pipeline path an overrun
     # does not fail cleanly. Measured on SA8255P (QAIRT 2.49, Qwen3-VL 4B,
-    # context 4096, 256 vision tokens per step): 16 steps report
-    # "Context Size was exceeded" with 0 tokens and then leave the slot
-    # wedged for every later request until the process restarts
-    # (GeniePipeline_reset does not clear it), and 17 steps kill the process
-    # outright ("free(): invalid next size"). GenieNode.h/GeniePipeline.h
-    # expose no way to ask how much room is left, so arithmetic on the host is
-    # the only guard available.
+    # context 4096, 256 vision tokens per step), by prompt length: up to 3969
+    # answers; 3970..4096 returns 0 tokens but damages nothing; past 4096 it
+    # returns 0 tokens and then leaves the slot wedged for every later
+    # request until the process restarts (GeniePipeline_reset does not clear
+    # it); far past it the process dies outright ("free(): invalid next
+    # size"). The trigger is the prompt passing the context, not the image
+    # count -- 15 steps with a long question wedges exactly as 16 steps does.
+    # GenieNode.h/GeniePipeline.h expose no way to ask how much room is left,
+    # so arithmetic on the host is the only guard available.
     #
     # Leave it off to measure what the SDK actually does. Turn it on for a
     # deployment that has to survive a client sending too many frames, and

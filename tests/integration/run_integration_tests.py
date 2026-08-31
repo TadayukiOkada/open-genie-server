@@ -804,8 +804,9 @@ def t_vlm_video(ctx):
 
 def t_vlm_video_budget(ctx):
     """VLM_VISION_BUDGET_GUARD must refuse an oversized request as a 400
-    before it reaches the SDK, where it would wedge the slot (16 steps) or
-    kill the process (17+). Skipped unless the server has the guard on --
+    before it reaches the SDK, where a prompt past the context wedges the
+    slot for good (and, far enough past, kills the process). Skipped unless
+    the server has the guard on --
     with it off the SDK's behaviour is the point, and provoking it here would
     take the slot down for every test after this one."""
     if not ctx.cfg.get("vlm", {}).get("budget_guard"):

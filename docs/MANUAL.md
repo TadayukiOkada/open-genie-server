@@ -579,7 +579,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `PROMPT_LOGPROBS` | optional | `false` | Enables prompt scoring (`echo`+`logprobs` teacher forcing, used by lm_eval loglikelihood tasks) at startup. Also toggleable at runtime via `POST /v1/server/prompt_logprobs` — see [Logprobs](#logprobs). |
 | `PROMPT_LOGPROBS_MAX_TOKENS` | optional | `4096` | Reject prompt-scoring requests longer than this many tokens (each request runs its whole prompt at decode speed). |
 | `TOOL_CALL_RECOVERY` | optional | `false` | Recover a tool call the model marked badly. Two repairs, in both dialects: a call whose opening marker was mangled or omitted (matched by the JSON's `name` against the tool names the request itself declared), and a call the model opened, filled in correctly, and never closed. `qwen3_4b_instruct_2507` w4a16 emits Cyrillic in place of the `<tool_call>` token on about half its calls and `qwen3_0_6b` omits the tags altogether, and in both cases the call body is correct — so with this off, the caller gets prose with `finish_reason: "stop"` while their code reads `message.tool_calls`. **Off by default anyway**: it conceals a defect in the bundle you are measuring, and it applies only to `/v1/chat/completions`, so the same model scores differently there than on `/v1/completions`, which has no recovery to apply. Turn it on when you want the application to work in spite of the bundle, and read the result as the application's rather than the model's. `qwen3_1_7b` marks its calls reliably and needs nothing. See [Function calling](API.md#function-calling-tools). |
-| `VLM_VISION_BUDGET_GUARD` | optional | `false` | Refuse a VLM request whose vision tokens cannot fit the text-generator's context, with a `400` naming how many encoder steps fit and why, instead of letting it reach the SDK. **Off by default**, for the same reason as `TOOL_CALL_RECOVERY`: it conceals a defect this server exists to expose. What it conceals is severe — on the composable-pipeline path an overrun does not fail cleanly (see [Limiting visual input](#limiting-visual-input)) — so an oversized request is logged at WARNING before being passed through. Turn it on for a deployment that has to survive a client sending too many frames, and read a run taken with it on as the application's behaviour, not the SDK's. |
+| `VLM_VISION_BUDGET_GUARD` | optional | `false` | Refuse a VLM request whose vision tokens cannot fit the text-generator's context, with a `400` naming how many encoder steps fit and why, instead of letting it reach the SDK. **Off by default**, for the same reason as `TOOL_CALL_RECOVERY`: it conceals a defect this server exists to expose. What it conceals is severe — a prompt past the context leaves the slot wedged until the process restarts (see [Limiting visual input](#limiting-visual-input)) — so an oversized request is logged at WARNING before being passed through. Turn it on for a deployment that has to survive a client sending too many frames, and read a run taken with it on as the application's behaviour, not the SDK's. |
 
 Ready-made samples (single-slot / dual-NSP / text+VLM, with SA8775P model paths) are in [examples/config/](../examples/config/). Single-slot configuration example:
 
@@ -1104,19 +1104,24 @@ An odd frame count repeats the final frame to fill the last step, the same paddi
 
 `VLM_VISION_BUDGET_GUARD` checks vision tokens against the text-generator's `context.size` **before** the request reaches the NPU, and a request that does not fit comes back as a `400`, naming how many steps fit and why.
 
-**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49, Qwen3-VL 4B, context 4096, 256 vision tokens per step):
+**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49, Qwen3-VL 4B, context 4096, 256 vision tokens per step), sweeping the prompt one token at a time by padding the question:
 
-| Steps | Vision tokens | Result |
-|---|---|---|
-| 15 | 3840 | answers normally |
-| 16 | 4096 | `Context Size was exceeded`, 0 tokens — **and the slot is then wedged**: every later request fails in `GenieNode_setData` on the image encoder until the process restarts. `GeniePipeline_reset` does not clear it. |
-| 17 | 4352 | the process dies outright (`free(): invalid next size`) |
+| Prompt tokens (vision + text) | Result |
+|---|---|
+| ≤ 3969 | answers normally |
+| 3970 – 4096 | 0 tokens, `finish_reason: "length"`. **Nothing is damaged** — the same slot answers the next request, and 3969/3970 can be alternated indefinitely |
+| > 4096 | 0 tokens, **and the slot is then wedged**: every later request, however small, fails in `GenieNode_setData` on the image encoder (`status=-1`, `WINDOW_ATTN_MASK`) until the process restarts. `GeniePipeline_reset` does not clear it |
+| far past 4096 (17+ steps) | the process dies outright (`free(): invalid next size`) |
+
+Two things in that table are worth reading twice. **The trigger is the prompt passing the context, not the number of images** — 15 steps with a long enough question (prompt 4142) wedges the slot exactly as 16 steps (prompt 4231) does. And **the useful ceiling is 127 tokens below the context**: 3969 is `context.size − 127`, the margin the AR128 prefill graph keeps for itself. The node config does not state the AR length, so the server cannot compute that line; it guards the wedge line instead, which it can.
+
+**Decoding across the context does not wedge anything.** A prompt of 3940 with `max_tokens` 200 generates exactly 156 tokens, stops at 4096 on the nose with `finish_reason: "length"`, and leaves the slot healthy.
 
 This is exactly the kind of thing this server refuses to paper over by default: a deployment that never sees the wedge cannot tell that the SDK has one. With the guard off an oversized request is still **logged at WARNING** before it goes through — saying what is about to happen is the opposite of hiding it — and `GenieNode.h`/`GeniePipeline.h` expose no way to ask how much room is left, so arithmetic on the host is the only guard available at all.
 
 Turn it on when the deployment has to survive a client sending too many frames, and read a run taken with it on as the application's behaviour rather than the SDK's.
 
-The budget is `context.size − prompt text tokens − VLM_SLOTS[].max_tokens`, divided by 256. Subtracting the **whole** generation budget rather than the measured prompt is deliberate: a request whose prompt fits can still cross the line while decoding, which is the case that wedges the slot. Lowering `max_tokens` therefore buys room for more frames, and vice versa. A slot whose config does not state a context size gets no check rather than a guessed one.
+The budget is `context.size − prompt text tokens − VLM_SLOTS[].max_tokens`, divided by 256. Subtracting the **whole** generation budget rather than the measured prompt is not about the wedge — decoding across the line is graceful, as above — it is so the answer is not cut off mid-sentence, and so that the 127-token prefill margin the host cannot read is absorbed by something. Lowering `max_tokens` therefore buys room for more frames, and vice versa; a slot configured below about 127 can still be handed a request that comes back empty, which costs a request rather than the slot. A slot whose config does not state a context size gets no check rather than a guessed one.
 
 ### Limiting generation length
 

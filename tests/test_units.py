@@ -1736,8 +1736,8 @@ def test_passing_an_oversized_request_through_is_logged(caplog):
 
 
 def test_too_many_frames_is_refused_before_anything_touches_the_npu():
-    """With the guard on: overrunning the context wedges the slot for every
-    later request (and one step further kills the process), so the arithmetic
+    """With the guard on: a prompt past the context wedges the slot for every
+    later request (and far enough past, kills the process), so the arithmetic
     rejects it up front rather than let the SDK discover it."""
     from genie_server import vlm
     slot = _BudgetSlot()
@@ -1747,8 +1747,11 @@ def test_too_many_frames_is_refused_before_anything_touches_the_npu():
 
 
 def test_the_generation_reserve_is_subtracted_from_the_budget():
-    """A prompt that fits can still cross the line while decoding, so the
-    slot's whole max_tokens is held back, not just the prompt measured."""
+    """The slot's whole max_tokens is held back, not just the prompt
+    measured -- not because decoding across the line is dangerous (measured:
+    it stops cleanly at the context and the slot survives) but so the answer
+    is not truncated, and so the prefill margin the host cannot read from the
+    config is absorbed by something."""
     from genie_server import vlm
     parts = [("video", list(range(28)))]        # 14 steps = 3584 vision tokens
     vlm.plan_segments(_BudgetSlot(max_tokens=256), "", parts, {}, guard=True)
