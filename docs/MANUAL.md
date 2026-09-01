@@ -117,7 +117,7 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 > [QAIRT Version Issues](./QAIRT_VERSIONS.md).** Read that page before you pick
 > an SDK build or decide how to export a model. In short:
 >
-> - A **stock 2.49.x library wedges a slot** when `prompt_tokens + max_tokens`
+> - A **stock 2.49.x or 2.50.x library wedges a slot** when `prompt_tokens + max_tokens`
 >   crosses `context_length − AR_N`. The request that does it returns 200 and
 >   looks fine; every request after it on that slot fails until the model is
 >   reloaded. **This server does not guard against it.**
@@ -127,8 +127,12 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 >   There is no build that has both.
 > - **2.49.1.260821 is newer than 2.49.40.260810** despite the smaller number,
 >   and fixes none of the above.
+> - **2.50.0.260828 fixes none of it either**, though it is a drop-in swap —
+>   byte-identical public headers, the same 118 exports, this server's
+>   integration suite all green on a stock library.
 
-**Verified against:** QAIRT **2.49.40.260810** and **2.49.1.260821**,
+**Verified against:** QAIRT **2.49.40.260810**, **2.49.1.260821** and
+**2.50.0.260828**,
 `aarch64-oe-linux-gcc11.2`, on an SA8255P board, with Qwen3 w4a16 context
 binaries (`qwen3_0_6b`, `qwen3_4b_instruct_2507`); and **2.48.40.260702**,
 `aarch64-android`, on the Android guest of the same board
@@ -930,7 +934,7 @@ The **stock** `libGenie.so` under `lib/aarch64-oe-linux-gcc11.2/` has XGrammar s
 
 ### Verified behaviour, and one known defect
 
-On a stock 2.49.40.260810 library (SA8255P, `qwen3_0_6b` w4a16) all three kinds constrain the output correctly, including under `stream: true` and alongside `logprobs`.
+On a stock 2.49.40.260810 library (SA8255P, `qwen3_0_6b` w4a16) all three kinds constrain the output correctly, including under `stream: true` and alongside `logprobs`. A stock 2.50.0.260828 behaves identically, terminal token included.
 
 One SDK defect affects all of them: **the response ends with the model's end-of-sequence token as literal text** (`<|im_end|>` for a ChatML model). The constrained part itself is correct — the JSON object is complete and schema-valid, the regex match is exact — but that trailing marker means a JSON-Schema-constrained response does not parse with `json.loads()`, and a regex-constrained one does not match its own pattern. **The server does not strip it**, so a client using this feature has to remove the trailing special-token string itself. Reported to Qualcomm with a reproducer and a proposed fix.
 
@@ -1104,7 +1108,7 @@ An odd frame count repeats the final frame to fill the last step, the same paddi
 
 `VLM_VISION_BUDGET_GUARD` checks vision tokens against the text-generator's `context.size` **before** the request reaches the NPU, and a request that does not fit comes back as a `400`, naming how many steps fit and why.
 
-**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49, Qwen3-VL 4B, context 4096, 256 vision tokens per step), sweeping the prompt one token at a time by padding the question:
+**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49.40.260810, Qwen3-VL 4B, context 4096, 256 vision tokens per step), sweeping the prompt one token at a time by padding the question. **A stock 2.50.0.260828 reproduces both the wedge and the process death unchanged**, checked with a standalone reproducer that uses nothing but `GenieNode.h` and `GeniePipeline.h`:
 
 | Prompt tokens (vision + text) | Result |
 |---|---|
@@ -1505,7 +1509,7 @@ Recommended steps for getting reproducible benchmark numbers:
 | LoRA still applied after switching models | On a successful `/v1/models/switch`, that slot's `active_lora_adapter` is automatically reset to `""`, but if the SDK's internal state disagrees, check the real value with `/v1/lora/current?model=...`. |
 | Prefix warmup returns `422` | If the target slot's model template is llama2/mistral, the system prompt gets folded into `[INST]` and can't be split/cached — this is by design. |
 | `device_id` was set but the NSP isn't pinned | Check the startup log for a `device_id=... requested but ... has no dialog.engine.backend.extensions file to patch — NSP pinning skipped` warning. Pinning is impossible if the model's `genie_config.json` doesn't reference an HTP backend extension config file. |
-| A slot suddenly fails every request with `GenieDialog_query failed [...]: -1` / `batch dispatch failed` in the logs | The slot is wedged: a stock QAIRT 2.49.40.260810 `libGenie.so` and a model exported at several context lengths. The request that caused it succeeded and returned normally; the failures start with the one after. `GenieDialog_reset()` does not recover it. **Recovery**: reload that slot with `POST /v1/models/switch {"slot": "<name>", "model_dir": "<same model>"}`. **Prevention and the full explanation**: [QAIRT Version Issues](./QAIRT_VERSIONS.md#d1--a-stock-library-wedges-a-slot). |
+| A slot suddenly fails every request with `GenieDialog_query failed [...]: -1` / `batch dispatch failed` in the logs | The slot is wedged: a stock QAIRT 2.49.x or 2.50.x `libGenie.so` and a model exported at several context lengths. The request that caused it succeeded and returned normally; the failures start with the one after. `GenieDialog_reset()` does not recover it. **Recovery**: reload that slot with `POST /v1/models/switch {"slot": "<name>", "model_dir": "<same model>"}`. **Prevention and the full explanation**: [QAIRT Version Issues](./QAIRT_VERSIONS.md#d1--a-stock-library-wedges-a-slot). |
 
 ## Limitations
 
@@ -1518,6 +1522,6 @@ Recommended steps for getting reproducible benchmark numbers:
 - Never start with `--workers` greater than 1 (it breaks each slot's global NPU handle state).
 - `POST /v1/models/switch` frees the old model before loading the new one by default, so a slot can end up with no model loaded at all if the new load fails; every endpoint that touches that slot then returns `503` until a later switch succeeds. `"unload_first": false` keeps the old model as a fallback by holding both on the slot's HTP device at once, but **that overlap is not dependable on the SA8255P board** — over 36 measured swaps the outcome did not follow from which models were involved (the same pair went 6/6 in one run and 0/8 in another), so it is only worth using where the device has memory to spare and your own swaps have been tested there. See the endpoint's own docs.
 - If two slots share the same `active_model_id` (model directory name), automatic routing by the `model` field prefers whichever slot appears later in the `slots` array. Pass an explicit `"slot": "<name>"` in the request body to `/v1/completions`/`/v1/chat/completions` to target one directly (it overrides `model`-based routing), or use the other APIs that address slots directly by name (`/v1/models/switch`'s `slot`, `/v1/server/idle`'s `?slot=`).
-- **On a stock 2.49.x library, a bundle whose `dialog.type` is `ssd-q1` (speculative decoding) needs a patched one**, because this server resets before every query and a stock 2.49 does not survive that on such a dialog. LoRA is unusable there for the same reason. This is a 2.49 regression rather than a limitation of speculative-decoding bundles — 2.48.40.260702 runs them correctly, and a later SDK may too. [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) has the symptom, the cause, the one-minute check against your own SDK's sources, and what to change if you cannot patch.
+- **On a stock 2.49.x or 2.50.x library, a bundle whose `dialog.type` is `ssd-q1` (speculative decoding) needs a patched one**, because this server resets before every query and neither stock build survives that on such a dialog. LoRA is unusable there for the same reason. This is a 2.49 regression rather than a limitation of speculative-decoding bundles — 2.48.40.260702 runs them correctly, and a later SDK may too, though 2.50.0.260828 does not. [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) has the symptom, the cause, the one-minute check against your own SDK's sources, and what to change if you cannot patch.
 - Grammar constraints ([see the relevant section](#grammar-constrained-decoding)) are fixed per model/slot and don't support per-request switching like `response_format` (the Genie SDK's public API has no runtime way to change it).
 - VLM ([see the relevant section](#vlm-multimodal-support)) only supports single-shot requests (no conversation history). A request's own `max_tokens`/`stop` are ignored — generation is bounded by `VLM_SLOTS[].max_tokens` for the whole slot instead — and a client disconnect does not stop the run: there is no `GenieNode`/`GeniePipeline` abort call, so the slot stays busy until the answer finishes and the next request waits. Streaming does work, and returns the same text as the non-streaming call. LoRA, the prefix KV cache, grammar constraints, and `/v1/models/switch` are unsupported on VLM slots.
