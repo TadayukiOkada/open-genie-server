@@ -412,8 +412,18 @@ A much bigger release than 2.49.1, and it still carries all five defects above.
 2.49.40.260810's, and the shipped `libGenie.so` exports the identical 118
 `Genie*` symbols. Pointing the server at it needs nothing but
 `QAIRT_SDK_ROOT` and the matching Hexagon skel directory on
-`ADSP_LIBRARY_PATH`; this project's hardware integration suite is all green on a
-**stock** 2.50.0 exactly as it is on a patched 2.49.40.
+`ADSP_LIBRARY_PATH`; nothing in this server needs recompiling or reconfiguring.
+
+> [!CAUTION]
+> **A green test run on a stock library is not evidence that D1 and D2 are
+> absent.** This project's integration suite passed in full against a **stock**
+> 2.50.0 — but it was run on a single-context-length `[8192]` / AR-128 bundle,
+> whose budget is 8064 tokens, and no test in it comes near that. The
+> reproducers, run on the same board in the same session against a multi-context
+> bundle, wedged the slot exactly as they do on 2.49.40. The suite's earlier
+> "three failures on stock, all green once patched" result was measured on a
+> multi-context bundle, where the budget is 384 and ordinary requests cross it.
+> **What a suite catches here depends on the bundle, not on the library.**
 
 **What it does fix, for this server: the node creation order.** Building a
 `GenieNode` pipeline on 2.49.x, creating the image encoder before the text

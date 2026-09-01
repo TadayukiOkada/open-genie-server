@@ -128,8 +128,10 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 > - **2.49.1.260821 is newer than 2.49.40.260810** despite the smaller number,
 >   and fixes none of the above.
 > - **2.50.0.260828 fixes none of it either**, though it is a drop-in swap —
->   byte-identical public headers, the same 118 exports, this server's
->   integration suite all green on a stock library.
+>   byte-identical public headers and the same 118 exports. Note that this
+>   server's integration suite passes on a **stock** 2.50.0: it runs on a
+>   single-context bundle whose budget nothing in it approaches, so a green
+>   suite says nothing about the wedge.
 
 **Verified against:** QAIRT **2.49.40.260810**, **2.49.1.260821** and
 **2.50.0.260828**,
