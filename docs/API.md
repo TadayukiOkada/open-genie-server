@@ -295,7 +295,7 @@ curl -X POST $base_url/v1/prefix/warmup \
 > Two things are worth knowing before you reach for LoRA. A bundle may ship an
 > adapter that is effectively the identity, so selecting it looks like nothing
 > happened because nothing did — compare against the released state rather than
-> against another adapter. And on a stock **2.49.x** library, **LoRA cannot be
+> against another adapter. And on a stock **2.49.x or 2.50.x** library, **LoRA cannot be
 > used at all on a bundle whose `dialog.type` is `ssd-q1`** — the SDK requires
 > a reset after switching adapters, and that reset is what corrupts such a
 > dialog there. A patched library, or 2.48.40.260702, has neither problem:

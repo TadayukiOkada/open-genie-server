@@ -182,6 +182,9 @@ class VLMSlot:
         # it works on both 2.48 and 2.49. Reproduced with the stock
         # genie-app on the SDK's own genie-app-script.txt, so this is a
         # backend-level constraint, not something this server introduces.
+        # 2.50.0.260828 does not need this -- genie-app runs that same script
+        # in its own order there -- but which layer fixed it was not
+        # established, and every 2.49.x still needs it, so it stays.
         # Pipeline add/connect order still follows the spec.
         node_keys = sorted(self.spec.node_config_files,
                            key=lambda k: k != "text_generator")

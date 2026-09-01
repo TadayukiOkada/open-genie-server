@@ -69,10 +69,10 @@ install. On Android three of these publish no wheel — see
 
 > [!WARNING]
 > **Check which QAIRT version you are pointing at before deploying.** Which SDK
-> defects you inherit depends on that version, and **every 2.49.x we have tested
-> carries three of them in one place: what `GenieDialog_reset()` fails to put
-> back.** A server resets between requests to keep them independent, so that is
-> the path under every request you serve.
+> defects you inherit depends on that version, and **every 2.49.x and 2.50.x we
+> have tested carries three of them in one place: what `GenieDialog_reset()`
+> fails to put back.** A server resets between requests to keep them independent,
+> so that is the path under every request you serve.
 >
 > You would see one oversized request wedging a slot for good; a long request
 > failing on an empty context because the one before it was shorter; or, on a
@@ -206,7 +206,7 @@ To exercise a real device end-to-end from the host PC (with a Markdown/JSON repo
 ## Known limitations
 
 - **This server does not guard against the stock-library reset defects** described at the top of this page — it neither detects nor recovers from them. Avoiding them is a deployment choice: see [QAIRT Version Issues](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md).
-- **On a 2.49.x library, a bundle built for speculative decoding (`"dialog": {"type": "ssd-q1"}`) needs a patched one**, and cannot use LoRA without it. This is a 2.49 regression, not a property of such bundles: 2.48.40.260702 runs them correctly. See [D5](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) for why, and for the one-line change to the bundle that avoids it.
+- **On a 2.49.x or 2.50.x library, a bundle built for speculative decoding (`"dialog": {"type": "ssd-q1"}`) needs a patched one**, and cannot use LoRA without it. This is a 2.49 regression, not a property of such bundles: 2.48.40.260702 runs them correctly. See [D5](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) for why, and for the one-line change to the bundle that avoids it.
 - One text slot = one `GenieDialog` handle; requests to a slot are serialized by that slot's own lock (with `TEXT_SLOTS` unset there's only a single slot, so every request is serialized, same as before).
 - `n > 1` (multiple completions per request) is not supported; it is rejected with a `400`.
 - The Llama2/Mistral template folds the system prompt into `[INST]`, so it's not eligible for prefix KV caching.

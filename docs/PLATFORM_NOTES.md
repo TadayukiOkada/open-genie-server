@@ -26,7 +26,7 @@ properties of the SoC, and how to find out what yours does instead.
 | Storage | 29.4 G filesystem holding the models |
 | Hexagon NSP cores in use | **2** — `/dsp/image/dsp/cdsp0` and `cdsp1`, addressed as `device_id` 0 and 1 |
 | Subsystem restart (SSR) | **Not available.** `/sys/class/remoteproc` is empty inside the guest, so a wedged cDSP is recovered by power-cycling the board, not by restarting the subsystem |
-| QAIRT | 2.49.40.260810 and 2.49.1.260821, `aarch64-oe-linux-gcc11.2` |
+| QAIRT | 2.49.40.260810, 2.49.1.260821 and 2.50.0.260828, `aarch64-oe-linux-gcc11.2` |
 | Model bundles | Qwen3 w4a16 context binaries (0.6B, 1.7B, 4B, VL-4B), Gemma-4 E2B |
 
 The Android guest on the same board is a second data point: **6.0 GiB** of RAM,

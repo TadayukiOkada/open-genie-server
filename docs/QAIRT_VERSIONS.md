@@ -17,17 +17,18 @@ model, read this page first.
 - [Checking your own SDK](#checking-your-own-sdk)
 - [Choosing a library](#choosing-a-library)
 - [What 2.49.1 changed](#what-2491-changed)
+- [What 2.50.0 changed](#what-2500-changed)
 - [What we have and have not tested](#what-we-have-and-have-not-tested)
 
 ## At a glance
 
-| | 2.48.40.260702 | 2.49.40.260810 | 2.49.1.260821 |
-|---|---|---|---|
-| **D1** slot wedge — KV occupancy is never rewound | not reproduced | **present** (measured) | **present** (source-identical) |
-| **D2** reset does not rewind the KV position allocator | not reproduced | **present** (measured) | **present** (source-identical) |
-| **D3** a rebuilt library has no grammar backend | **present** | **present** | **present** (measured) |
-| **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested |
-| **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) |
+| | 2.48.40.260702 | 2.49.40.260810 | 2.49.1.260821 | 2.50.0.260828 |
+|---|---|---|---|---|
+| **D1** slot wedge — KV occupancy is never rewound | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) |
+| **D2** reset does not rewind the KV position allocator | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) |
+| **D3** a rebuilt library has no grammar backend | **present** | **present** | **present** (measured) | **present** (source-identical) |
+| **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested | **present** (measured) |
+| **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) | **present** (measured) |
 
 > [!WARNING]
 > **`2.49.1.260821` is newer than `2.49.40.260810`, despite the smaller number.**
@@ -35,9 +36,16 @@ model, read this page first.
 > (10 Aug). Sorting these version strings will mislead you.
 
 **Nothing on this list is fixed by any SDK we have tested** — which is 2.48
-through 2.49.1, and says nothing about what comes after. D1, D2 and D5 are the
+through 2.50.0, and says nothing about what comes after. D1, D2 and D5 are the
 reason this project rebuilds `libGenie.so`; D3 is the cost of doing so. Each
 section below says how to check a build we have not seen.
+
+> [!NOTE]
+> **2.50.0.260828 is a large release that leaves all five in place.** Its Genie
+> sources differ from 2.49.40.260810 in 78 files, and its public C API headers
+> are byte-identical — so it is a drop-in swap that changes none of this. It
+> does fix one thing this server used to work around; see
+> [What 2.50.0 changed](#what-2500-changed).
 
 ## How to read the evidence column
 
@@ -54,7 +62,10 @@ section below says how to check a build we have not seen.
   builds' `SelfSpecDecDialog::reset()` are byte-identical, and 2.49's
   `completeInit()` is what grew the slot calls that `reset()` does not
   mirror. This is a source argument, not a hardware run: we have not re-run
-  the D1/D2 reproducers on 2.49.1.
+  the D1/D2 reproducers on 2.49.1. **2.50.0.260828 is not on this footing**:
+  D1, D2, D4 and D5 were re-run on hardware there. Only its D3 rests on
+  sources — `qualla/grammar.hpp` is identical and that build still ships no
+  file defining the backend it declares.
 - **not reproduced** — the reproducer was run and did not trigger. This is
   weaker than "absent": it means that sequence is safe on that build, not that
   no sequence is.
@@ -226,7 +237,8 @@ ends with the model's end-of-sequence token as literal text** (`<|im_end|>` for
 a ChatML model). The server does not strip it. See
 [MANUAL § Grammar-Constrained Decoding](./MANUAL.md#grammar-constrained-decoding).
 
-Measured on 2.49.40.260810. Not tested on the other builds.
+Measured on 2.49.40.260810 and 2.50.0.260828 — the same five of the eight
+grammar checks fail the same way on both. Not tested on the other builds.
 
 ## D5 — reset corrupts a speculative-decoding dialog
 
@@ -272,7 +284,9 @@ you lose the speculative speed-up, not the model.
 on 2.49.40.260810, and present in 2.49.1.260821 whose `ssd-q1.cpp` is
 byte-identical. **2.48.40.260702 cannot have it** — the slot calls this is about
 arrived with 2.49's scheduler, so there the constructor and `reset()` already do
-the same thing as each other. **A later SDK may well fix it**, and the check
+the same thing as each other. **2.50.0.260828 does not fix it** — its
+`ssd-q1.cpp` is byte-identical to 2.49.40.260810's, and the reproducer still
+triggers there. **A later SDK may**, and the check
 takes a minute on the sources the SDK ships: open
 `examples/Genie/Genie/src/qualla/dialogs/ssd-q1.cpp` and compare
 `SelfSpecDecDialog::reset()` against `SelfSpecDecDialog::completeInit()`. If
@@ -390,16 +404,85 @@ measurements for it. Note one risk if you try: the new prefill-chunk clamp sizes
 the chunk to `capacity - (window - 1)`, so a bundle whose SWA buffer is exactly
 its window size collapses to one token per prefill fire.
 
+## What 2.50.0 changed
+
+A much bigger release than 2.49.1, and it still carries all five defects above.
+
+**It is a drop-in swap.** The public C API headers are byte-identical to
+2.49.40.260810's, and the shipped `libGenie.so` exports the identical 118
+`Genie*` symbols. Pointing the server at it needs nothing but
+`QAIRT_SDK_ROOT` and the matching Hexagon skel directory on
+`ADSP_LIBRARY_PATH`; nothing in this server needs recompiling or reconfiguring.
+
+> [!CAUTION]
+> **A green test run on a stock library is not evidence that D1 and D2 are
+> absent.** This project's integration suite passed in full against a **stock**
+> 2.50.0 — but it was run on a single-context-length `[8192]` / AR-128 bundle,
+> whose budget is 8064 tokens, and no test in it comes near that. The
+> reproducers, run on the same board in the same session against a multi-context
+> bundle, wedged the slot exactly as they do on 2.49.40. The suite's earlier
+> "three failures on stock, all green once patched" result was measured on a
+> multi-context bundle, where the budget is 384 and ordinary requests cross it.
+> **What a suite catches here depends on the bundle, not on the library.**
+
+**What it does fix, for this server: the node creation order.** Building a
+`GenieNode` pipeline on 2.49.x, creating the image encoder before the text
+generator left the text generator unable to allocate its weight-shared
+context — `Could not create context from binary for context index = N : err
+1002` — and the server works around it by creating the text-generator node
+first. On 2.50.0 the SDK's own `genie-app`, running a bundle's own script in the
+bundle's own order, completes instead of dying there. Measured on the same board
+minutes apart with the same free memory: 2.49.40 segfaults after the allocation
+failure, 2.50.0 finishes twice.
+
+> [!NOTE]
+> **We have not established which layer fixed that.** The test swapped the whole
+> 2.50.0 tree — library, QNN backend and Hexagon skels together — and the release
+> notes' Genie section does not mention it. **The workaround stays in**: it is
+> free, and it is still needed on every 2.49.x.
+
+**What it does not fix.** D1, D2, D4 and D5 were re-run against a stock 2.50.0
+and reproduce with the same verdicts, and in D1/D2's case the same wording, as a
+stock 2.49.40 run back to back as a control. The sources agree: the reset
+ordering in `qualla/dialog.cpp`, `KVManager::clearSlotPositions()`,
+`SelfSpecDecDialog::reset()` and the terminal-token branch in
+`qualla/dialogs/basic.cpp` are all unchanged.
+
+**Other changes worth knowing about**, none of which we have measured:
+
+- **DirectIO** — an opt-in path that loads a large model's weights straight into
+  DMA buffers (`qualla/engines/qnn-api/UDmaBufAllocator.cpp`, new in this build).
+- **Multi-tensor per-layer embeddings** — per-layer embedding tables can now be
+  split across several tensors (`qualla/embeddings/EmbeddingTable.cpp`, new).
+- **Engine-layer fixes** listed in the SDK's release notes: sliding-window cache
+  with wide prefill chunks, batch-dimension interpretation, graph ordering with
+  ten or more context splits, and encoder-output padding accuracy.
+- **The sampler config is no longer translated.** 2.49.x passed a dialog's
+  `sampler` block through a whitelist that also supplied defaults — `type:
+  "basic"` when absent, and `role: "primary"` always. 2.50.0 hands the block to
+  the engine as written. Our bundles are unaffected (the integration suite,
+  including greedy determinism, is all green), but **do not rely on the library
+  filling those in** if you hand-write a sampler block.
+
+**If you rebuild the library** for D1/D2/D5, the three changes described under
+[Choosing a library](#option-1--run-a-fixed-libgenieso-recommended-unless-you-need-grammar)
+apply to 2.50.0's sources unchanged. One extra step: the shipped OE makefile is
+byte-identical to 2.49.40's, so it still misses several source directories, and
+it has **no entry at all for the new `src/qualla/embeddings/`** — add one, or
+`EmbeddingTable.cpp` will not be linked in. We have not built 2.50.0.
+
 ## What we have and have not tested
 
 **Tested:** SA8255P board, `aarch64-oe-linux-gcc11.2`, Qwen3 w4a16 bundles
 (`qwen3_0_6b`, `qwen3_1_7b`, `qwen3_4b_instruct_2507`, `qwen3_vl_4b_instruct`)
-and one Gemma-family bundle, on 2.49.40.260810 (extensively) and 2.49.1.260821
-(integration suite, generation probes, a benchmark subset).
+and one Gemma-family bundle, on 2.49.40.260810 (extensively), 2.49.1.260821
+(integration suite, generation probes, a benchmark subset) and 2.50.0.260828
+(the D1/D2/D4/D5 reproducers with a stock 2.49.40 run as a control, the
+integration suite, and the grammar checks).
 
 **Not tested:** every other SoC, ABI and model family. The D1/D2 reproducers on
-2.49.1. D4 on anything but 2.49.40.260810. Any SDK older than 2.48.40.260702 or
-newer than 2.49.1.260821.
+2.49.1. D4 on 2.48.40.260702 or 2.49.1.260821. A rebuilt 2.50.0 library. Any SDK
+older than 2.48.40.260702 or newer than 2.50.0.260828.
 
 **Treat an untested SDK build as suspect** and run
 [the check](#checking-your-own-sdk) against it.
