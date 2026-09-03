@@ -13,6 +13,7 @@ How the server is put together, how to configure it, and what it does in practic
 4. [Multi Text Slots](#multi-text-slots)
     - → [**Platform Notes**](./PLATFORM_NOTES.md) — **how many NSP cores you may use is licensed per SKU. Read this before assuming a second slot exists**
     - [Loading two models at once](#loading-two-models-at-once) — **read this before configuring a second slot**
+    - [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing) — **read this before configuring a third**
 5. [Configuration (env_config.json)](#configuration-env_configjson)
 6. [Starting the Server](#starting-the-server)
 7. [Running on Android](#running-on-android) — what a non-OE-Linux target changes
@@ -204,6 +205,8 @@ see [Choosing a library](./QAIRT_VERSIONS.md#choosing-a-library).
 
 On a target with more than one *usable* Hexagon NSP core, setting `TEXT_SLOTS` in `env_config.json` keeps an independent model resident on each NSP core, so requests to different slots are processed concurrently instead of queueing behind one lock.
 
+A slot is a dialog, not a core. Two slots may name the same `device_id`, and both load and answer independently — but only the cores give you concurrency, so slots past the core count queue rather than overlap. See [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing) before adding a third.
+
 > [!IMPORTANT]
 > **Two cores is not a property of the SoC's part number.** How many you may
 > use is gated by your SKU's licence, so an otherwise identical board may
@@ -348,7 +351,7 @@ Read together these give four statements that hold across every run:
    threshold lay somewhere between 0.6B and 1.7B; only three model sizes were
    tried, so it was not pinned down further. **The threshold is not a property
    of the model alone — see the next table.**
-4. **The second model must go on the other NSP.** The one same-device
+4. **The second model must go on the other NSP — on these bundles.** The one same-device
    configuration in the table failed, and because it also loaded the *same*
    model twice — the generated HTP extension config carries
    `"context": {"weight_sharing_enabled": true}` — a weight-sharing conflict
@@ -361,7 +364,10 @@ Read together these give four statements that hold across every run:
    this is a per-core limit, not weight sharing. What sets that limit is still
    unknown — 0.6B + 0.6B and 0.6B + 1.7B fail alike on one core, which is
    consistent with the first model alone reaching it, and there was no smaller
-   bundle to narrow it with.
+   bundle to narrow it with. **A per-core limit is not "one model per core":**
+   a 0.6B exported at a single context length of 1024 puts four on one core, so
+   how many fit moves with the export exactly as the threshold in statement 3
+   does — see [How many slots of one small model fit](#how-many-slots-of-one-small-model-fit-and-what-each-costs).
 
 **A single-context-length export raises the threshold.** The 1.7B and the 4B
 were later re-exported at one context length (`context_lengths: [4096]`, and
@@ -477,6 +483,74 @@ That also means it is not something you can read off a bundle's size.
 See [Slot creation order](#slot-creation-order-slot_load_order) and
 [`examples/config/env_config.text-vlm.sample.json`](../examples/config/env_config.text-vlm.sample.json).
 
+#### How many slots of one small model fit, and what each costs
+
+The tables above pair *different* models. Sweeping *one* small model across
+slot counts isolates the load-order rule from everything else, because the
+model and the per-slot cost are then held equal and only the arrangement
+varies. Fourteen startup configurations of a `qwen3_0_6b` bundle exported at a
+single context length of 1024, `(cdsp0 count) + (cdsp1 count)`, one restart
+each:
+
+| Slots | Core that loads first | Total | Ready | Result |
+|---|---|---|---|---|
+| 4+0 | cdsp0 | 4 | 4 | OK |
+| 5+0, 6+0 | cdsp0 | 5, 6 | 4 | `err 1002` |
+| 0+4 | cdsp1 | 4 | 4 | OK |
+| 0+5 | cdsp1 | 5 | 4 | `err 1002` |
+| 4+1 | cdsp0 | 5 | 5 | OK |
+| 1+5, 2+4, 3+3, 4+2 | cdsp0 | 6 | 6 | OK |
+| 4+3, 4+4 | cdsp0 | 7, 8 | 6 | `err 1002` |
+| **5+1** | **cdsp0** | 6 | **4** | **`err 1002`** |
+| **5+1** | **cdsp1** | 6 | **6** | **OK** |
+
+Every row follows one rule: **at most six slots in total, and at most four on
+whichever core creates a context first.**
+
+The last two rows are the same configuration — five slots on cdsp0, one on
+cdsp1 — differing only in which entry comes first in `TEXT_SLOTS`. Put the
+cdsp0 entries first and the fifth one fails; put the cdsp1 entry first and
+cdsp0 takes all five. So the four-slot cap is not a property of a core. It
+follows whichever core is loaded first, which is the same rule the two-model
+tables show, with the model held constant so only order can explain it.
+
+Note that 4+0 works here while the two-model table above has two 0.6B on one
+core failing. Those were multi-context-length bundles; this one is single-CL at
+1024. The threshold moves with the export, as that section says — do not carry
+a row across bundles.
+
+**What a slot costs is measurable, before it fails.** The allocations are
+DMA-BUF, so they are absent from RSS but they *are* mapped: the `/dmabuf:` lines
+in `/proc/<server pid>/maps`. Sum their `Size` — not their `Rss`, which totals a
+few tens of kB because the CPU never touches them:
+
+```sh
+pid=$(pgrep -f genie-server)
+awk '/dmabuf/ {split($1,a,"-"); t += strtonum("0x" a[2]) - strtonum("0x" a[1])}
+     END {print t/1048576 " MB"}' /proc/$pid/maps
+```
+
+For the bundle above that is **924 MB per slot**, in six mappings — and the
+`Allocated total size` the libGenie log prints (98,173,440 bytes here) is only
+*one* of those six. Do not read that log line as what a model costs.
+
+Every size class scales strictly with the slot count (3 slots 2,773 MB, 4 slots
+3,698 MB, 6 slots 5,548 MB), so nothing is shared between slots, weights
+included. Two slots on the same model directory cost exactly twice one.
+
+This measures demand, not the budget. It still cannot predict `err 1002` — the
+limit the allocation runs into remains invisible, and load order changes the
+answer at a fixed byte total. But it does tell you what a candidate model will
+ask for before you try the combination.
+
+> Unlike every other table in this section, **these rows were not taken from a
+> power cycle** — the bench's power fixture was unavailable. Read the *rule* as
+> solid and the *numbers* (four and six) as possibly depressed: 5+1 and its
+> reverse are an immediate A/B at a fixed slot count, and the six-slot ceiling
+> held on both the earliest and the latest runs of the sweep across twenty
+> restarts including eight failures, which is not how an accumulating leak
+> behaves.
+
 #### What is not established
 
 - **There is no formula.** None of parameter count, on-disk size, total size,
@@ -501,6 +575,12 @@ See [Slot creation order](#slot-creation-order-slot_load_order) and
   were re-exported with a newer toolchain and no equivalent A/B exists.
 - **Whether the exact numbers transfer to another SoC, another memory size, or
   another QAIRT version is unknown.** They were measured on one board.
+- **Whether the caps count slots or bytes.** The sweep above used one bundle
+  size, so "four slots on the first core" and "six in total" cannot be
+  distinguished from the byte totals they correspond to. Sweeping a second
+  bundle size would separate them.
+- **Whether the core that loads second stops at five.** The six-slot total cap
+  binds first, so it cannot be pushed further.
 
 #### Practical guidance
 
@@ -517,18 +597,57 @@ See [Slot creation order](#slot-creation-order-slot_load_order) and
   [`env_config.text-vlm.sample.json`](../examples/config/env_config.text-vlm.sample.json).
 - **Judge co-residency on the first startup after a power cycle.** A failed
   startup leaves the device dirty and biases everything you try afterwards.
-- **Give each slot a different `device_id`** on a dual-NSP part.
+- **Give each slot a different `device_id`** on a dual-NSP part — it is what
+  makes two slots overlap at all, and on the bundles in the table above it is
+  what makes the second one load. It is not an absolute rule about loading:
+  small enough slots do co-reside on one core, they just do not run
+  concurrently there.
 - **Expect to determine the limit empirically.** Try the combination; if the
   server starts and both slots report `ready`, it works. There is no way to
   check in advance.
 - **`err 1002` at startup is not a wedged DSP.** It is a clean failure — the
   process exits and nothing is left holding resources. Reordering the slots and
   restarting is safe and is the first thing to try.
-- **Measuring the cost of a model:** load it alone and read `MemAvailable` and
-  `/proc/buddyinfo`. Do **not** use `MemFree` deltas — model files land in the
-  page cache and swamp the signal (a 0.6B can appear to cost more than a 1.7B).
-  Neither metric captures the DSP-side allocation that actually fails, so both
-  are indicative only.
+- **Measuring the cost of a model:** sum the `Size` of the `/dmabuf:` mappings in
+  `/proc/<server pid>/maps` — see [How many slots of one small model
+  fit](#how-many-slots-of-one-small-model-fit-and-what-each-costs) for the
+  one-liner. That is the allocation itself, per slot, and it scales exactly with
+  the slot count. Do **not** use RSS (the pages are never touched by the CPU),
+  `MemFree` deltas (model files land in the page cache and swamp the signal — a
+  0.6B can appear to cost more than a 1.7B), or the `Allocated total size` the
+  libGenie log prints (it is one mapping out of several). `MemAvailable` and
+  `/proc/buddyinfo` still show what a large model does to the host, but they do
+  not isolate one slot.
+
+### More slots than cores buys nothing
+
+Nothing stops two slots from naming the same `device_id`, and with a small
+enough context they both load: four `qwen3_0_6b` at `"size": 1024`, two per
+core, each allocating 98,173,440 bytes across 3 buffers, all four answering
+with independent KV. What they do not do is overlap. Same total work, varying
+only how many run at once (SA8255P, QAIRT 2.49, 16 identical chat requests per
+row, `max_tokens: 64`):
+
+| at a time | slots | wall clock | median latency | vs. serial |
+|---|---|---|---|---|
+| 1 | one | 17.65 s | 1.10 s | — |
+| 2 | **both on cdsp0** | 16.63 s | **2.07 s** | **1.06×** |
+| 2 | one per core | 13.16 s | 1.64 s | 1.34× |
+| 4 | all four, two per core | 12.56 s | 3.11 s | **1.41×** |
+
+Two slots on one core is the striking row: latency doubles exactly, wall clock
+barely moves, and the 1.06× left over is host-side overlap (HTTP, tokenizing),
+not the NPU. **A core does not interleave two dialogs at all** — a different
+mechanism from the bandwidth contention above, and the one that sets the
+ceiling: the ~1.3× a second *core* buys is the whole of what concurrency is
+worth here, and a fourth slot adds 0.07× on top of that second core's 0.34×.
+
+**So size `TEXT_SLOTS` by what you need resident, not by throughput.** Four
+slots are worth having to hold four independent conversations, models, or LoRA
+variants at once, and to keep a slow request off another caller's slot. They
+will not make the same work finish sooner.
+`tests/integration/measure_slot_scaling.py` reproduces this table; it skips any
+row your slot layout cannot show.
 
 ### Pinning a device (`slots.pin_htp_device`)
 
@@ -569,7 +688,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `QAIRT_SDK_ROOT` | effectively required | `""` | Root path of the QAIRT SDK. Also used for `QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH`. |
 | `HEXAGON_VERSION` | optional | `"v73"` | Hexagon version used in `ADSP_LIBRARY_PATH` (e.g. `hexagon-v73`). |
 | `TARGET_PLATFORM` | optional | `"auto"` | `"linux-oe"`, `"android"`, or `"auto"` to detect. Selects the QAIRT ABI directory (`aarch64-oe-linux-gcc11.2` vs `aarch64-android`) and the `ADSP_LIBRARY_PATH` layout — see [Running on Android](#running-on-android). Only set it explicitly if the SDK you are pointing at is laid out for a different target than the one you are running on. |
-| `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
+| `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit — and that two slots sharing a `device_id` is allowed but does not run them concurrently. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
 | `POLL` | optional | (unset) | Default for every slot's `poll`: `true`/`false` overrides `dialog.engine.backend.QnnHtp.poll` in each model bundle, unset leaves each bundle as it is. **`false` is usually what you want** — polling costs ~260% CPU on SA8255P for latency indistinguishable from blocking (see [`QnnHtp.poll`](#qnnhtppoll-costs-260-cpu-and-buys-nothing-here)). A per-slot `poll` wins over this. Text slots only; VLM slots are unaffected. |
 | `SLOT_LOAD_ORDER` | optional | `"vlm-first"` | Which slot kind is created first when both `TEXT_SLOTS` and `VLM_SLOTS` are set: `"vlm-first"` or `"text-first"`. See [Slot creation order](#slot-creation-order-slot_load_order) and [Loading Two Models at Once](#loading-two-models-at-once). Any other value is rejected at startup. |
 | `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens"}, ...]`. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
@@ -1516,7 +1635,7 @@ Recommended steps for getting reproducible benchmark numbers:
 ## Limitations
 
 - **This server does not guard against the stock-library slot wedge**, and does not detect or recover from it — a wedged slot keeps failing until something reloads its model. Preventing it is a deployment choice, not a server setting: see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
-- One slot = one `GenieDialog` handle processed serially. The number of concurrent inferences is capped at the number of slots (just 1 in a single-slot configuration).
+- One slot = one `GenieDialog` handle processed serially. The number of concurrent inferences is capped at the number of slots (just 1 in a single-slot configuration), and the number that actually overlap is capped by the NSP cores underneath them — see [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing).
 - `n > 1` (multiple completions per request) is not supported.
 - `logprobs` require `numpy` + the model tokenizer, and are non-streaming only. Prompt scoring (`echo`+`logprobs`, lm_eval loglikelihood) runs the whole prompt at decode speed and is therefore off by default (see [Logprobs](#logprobs)).
 - Runtime `presence_penalty`/`frequency_penalty` are accepted but ignored: the SDK's runtime sampler-update path (`GenieSampler_applyConfig`) only applies `seed`/`temp`/`top-k`/`top-p`.
