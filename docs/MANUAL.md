@@ -543,13 +543,16 @@ limit the allocation runs into remains invisible, and load order changes the
 answer at a fixed byte total. But it does tell you what a candidate model will
 ask for before you try the combination.
 
-> Unlike every other table in this section, **these rows were not taken from a
-> power cycle** — the bench's power fixture was unavailable. Read the *rule* as
-> solid and the *numbers* (four and six) as possibly depressed: 5+1 and its
-> reverse are an immediate A/B at a fixed slot count, and the six-slot ceiling
-> held on both the earliest and the latest runs of the sweep across twenty
-> restarts including eight failures, which is not how an accumulating leak
-> behaves.
+> The sweep itself was run without power cycling between configurations, but six
+> of these rows were then re-measured **one power cycle per configuration**, the
+> protocol the rest of this section uses — 4+0, 5+0, 4+2, 4+3 and both
+> orderings of 5+1. Verdict, ready count and dmabuf total all matched, so the
+> counts are not depressed by accumulated state, and the load-order reversal
+> holds when each half is its own first startup after its own power cycle.
+>
+> Incidentally that is evidence for the guidance below that an `err 1002`
+> startup failure leaves nothing held: a sweep containing eight failures and a
+> run with a power cycle before every configuration agree to the megabyte.
 
 #### What is not established
 
