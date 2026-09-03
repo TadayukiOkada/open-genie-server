@@ -1,5 +1,86 @@
 # Changelog
 
+## 1.1.0 — video as frames, and a prompt count that includes them
+
+A VLM request could already carry several images, but each one spent a whole
+encoder step: the preprocessor fills Qwen3-VL's temporal dimension by
+duplicating the same frame, so footage sent that way paid twice the context
+for the same seconds and no step ever held two different frames for the
+encoder to see motion in. This release adds the shape that does, and makes the
+cost of it visible in `usage`.
+
+Docs and one comment aside, everything here is on the VLM path. The text-only
+`Slot`/`GenieDialog` endpoints are untouched.
+
+### Added
+
+- **`video_url` content parts.** Frames the client already extracted, in the
+  form vLLM uses for client-side preprocessing: base64 JPEGs joined by commas
+  under a `video/jpeg` media type. Consecutive frames are packed
+  `temporal_patch_size` at a time into one encoder step, so the same footage
+  enters in half the vision tokens and the encoder sees real frame pairs.
+  `media_io_kwargs.video` (top level of the body, `extra_body` from an OpenAI
+  client) carries the `fps`/`frames_indices` behind the `<t seconds>` markers.
+  A container media type (`video/mp4` and friends) is refused rather than
+  half-supported — no demuxer ships here — and remote URLs are not fetched,
+  as for images. See [API.md](API.md#post-v1chatcompletions).
+- **`VLM_VISION_BUDGET_GUARD`** (default `false`): refuse, as a `400`, a
+  request whose vision tokens cannot fit the text generator's context instead
+  of letting it reach the SDK. **Off by default for the same reason as
+  `TOOL_CALL_RECOVERY`** — it conceals a defect this server exists to expose —
+  but what it conceals is severe: past the context the slot wedges for every
+  later request until the process restarts, and far past it the process dies.
+  Read a run taken with the guard on as the application's behaviour, not the
+  SDK's.
+
+### Changed
+
+- **`usage.prompt_tokens` counts visual input on the VLM path.** It previously
+  reported tokenized text only, which left out the part that actually fills
+  the context: a 10-frame and a 28-frame request both came back as 20 while
+  occupying 1280 and 3584 of 4096. Nothing hands this number back — images
+  never become text on the host, and neither `GenieNode.h` nor
+  `GeniePipeline.h` has a call for it — so it is derived from the step count
+  (256 per step for `qwen3_vl`), which is confirmed by where the context
+  actually runs out.
+- **Frames are decoded only after the plan is accepted.** The step count comes
+  from the parts alone, so a 500-frame request no longer pays 500 JPEG decodes
+  and their bitmaps before being refused. The ordering matters precisely
+  because the guard exists for that board's memory.
+
+### Breaking, if you wrote your own `VLMSpec`
+
+The two preprocessing hooks changed shape, because packing frames crosses the
+boundary they used to sit on. `build_prompt_segments` now takes the spec and
+the video metadata and returns `("step", payload)` rather than
+`("image", index)`; `preprocess_image` is now `preprocess_step`, taking the
+whole images list and one step's payload. `vlm.py` therefore never needs to
+know how many frames a step holds. A step payload that disagrees with the
+ViT's temporal size raises `ValueError`, so a future spec cannot drop frames
+quietly.
+
+`qwen3_vl` is still the only registered spec, and no endpoint or config key
+changed with it — which is why this is a minor release. See **Backward
+compatibility is not a goal** under 1.0.0.
+
+### Documentation
+
+- **QAIRT 2.50.0.260828** was put through the same reproducers as every build
+  before it, with a stock 2.49.40.260810 run back to back as a control. D1
+  through D5 are exactly where they were; the matrix gains a column and the
+  version-scoped claims now say that 2.50.x behaves the same.
+  [QAIRT_VERSIONS.md](QAIRT_VERSIONS.md). One thing this server works around
+  *is* fixed there — creating the image-encoder node before the text generator
+  no longer starves the text generator's context — and the workaround stays
+  in, because it costs nothing, every 2.49.x still needs it, and which layer
+  fixed it was never established.
+- The `ssd-q1` limitation below is a 2.49/2.50 regression, not a property of
+  such bundles: 2.48.40.260702 has neither that nor the LoRA consequence.
+- Corrections that postdate 1.0.0's tag: the gemma4 tool-call dialect and its
+  buffered streaming, `loaded` in `/v1/server/status`, the two GETs that
+  accept only one of `?slot=`/`?model=`, and a retraction — a stock library
+  *refuses* an unsupported grammar rather than silently ignoring it.
+
 ## 1.0.0 — first public release
 
 open-genie-server exposes the Qualcomm Genie C API (`libGenie.so`) as an
