@@ -480,6 +480,74 @@ That also means it is not something you can read off a bundle's size.
 See [Slot creation order](#slot-creation-order-slot_load_order) and
 [`examples/config/env_config.text-vlm.sample.json`](../examples/config/env_config.text-vlm.sample.json).
 
+#### How many slots of one small model fit, and what each costs
+
+The tables above pair *different* models. Sweeping *one* small model across
+slot counts isolates the load-order rule from everything else, because the
+model and the per-slot cost are then held equal and only the arrangement
+varies. Fourteen startup configurations of a `qwen3_0_6b` bundle exported at a
+single context length of 1024, `(cdsp0 count) + (cdsp1 count)`, one restart
+each:
+
+| Slots | Core that loads first | Total | Ready | Result |
+|---|---|---|---|---|
+| 4+0 | cdsp0 | 4 | 4 | OK |
+| 5+0, 6+0 | cdsp0 | 5, 6 | 4 | `err 1002` |
+| 0+4 | cdsp1 | 4 | 4 | OK |
+| 0+5 | cdsp1 | 5 | 4 | `err 1002` |
+| 4+1 | cdsp0 | 5 | 5 | OK |
+| 1+5, 2+4, 3+3, 4+2 | cdsp0 | 6 | 6 | OK |
+| 4+3, 4+4 | cdsp0 | 7, 8 | 6 | `err 1002` |
+| **5+1** | **cdsp0** | 6 | **4** | **`err 1002`** |
+| **5+1** | **cdsp1** | 6 | **6** | **OK** |
+
+Every row follows one rule: **at most six slots in total, and at most four on
+whichever core creates a context first.**
+
+The last two rows are the same configuration — five slots on cdsp0, one on
+cdsp1 — differing only in which entry comes first in `TEXT_SLOTS`. Put the
+cdsp0 entries first and the fifth one fails; put the cdsp1 entry first and
+cdsp0 takes all five. So the four-slot cap is not a property of a core. It
+follows whichever core is loaded first, which is the same rule the two-model
+tables show, with the model held constant so only order can explain it.
+
+Note that 4+0 works here while the two-model table above has two 0.6B on one
+core failing. Those were multi-context-length bundles; this one is single-CL at
+1024. The threshold moves with the export, as that section says — do not carry
+a row across bundles.
+
+**What a slot costs is measurable, before it fails.** The allocations are
+DMA-BUF, so they are absent from RSS but they *are* mapped: the `/dmabuf:` lines
+in `/proc/<server pid>/maps`. Sum their `Size` — not their `Rss`, which totals a
+few tens of kB because the CPU never touches them:
+
+```sh
+pid=$(pgrep -f genie-server)
+awk '/dmabuf/ {split($1,a,"-"); t += strtonum("0x" a[2]) - strtonum("0x" a[1])}
+     END {print t/1048576 " MB"}' /proc/$pid/maps
+```
+
+For the bundle above that is **924 MB per slot**, in six mappings — and the
+`Allocated total size` the libGenie log prints (98,173,440 bytes here) is only
+*one* of those six. Do not read that log line as what a model costs.
+
+Every size class scales strictly with the slot count (3 slots 2,773 MB, 4 slots
+3,698 MB, 6 slots 5,548 MB), so nothing is shared between slots, weights
+included. Two slots on the same model directory cost exactly twice one.
+
+This measures demand, not the budget. It still cannot predict `err 1002` — the
+limit the allocation runs into remains invisible, and load order changes the
+answer at a fixed byte total. But it does tell you what a candidate model will
+ask for before you try the combination.
+
+> Unlike every other table in this section, **these rows were not taken from a
+> power cycle** — the bench's power fixture was unavailable. Read the *rule* as
+> solid and the *numbers* (four and six) as possibly depressed: 5+1 and its
+> reverse are an immediate A/B at a fixed slot count, and the six-slot ceiling
+> held on both the earliest and the latest runs of the sweep across twenty
+> restarts including eight failures, which is not how an accumulating leak
+> behaves.
+
 #### What is not established
 
 - **There is no formula.** None of parameter count, on-disk size, total size,
@@ -504,6 +572,12 @@ See [Slot creation order](#slot-creation-order-slot_load_order) and
   were re-exported with a newer toolchain and no equivalent A/B exists.
 - **Whether the exact numbers transfer to another SoC, another memory size, or
   another QAIRT version is unknown.** They were measured on one board.
+- **Whether the caps count slots or bytes.** The sweep above used one bundle
+  size, so "four slots on the first core" and "six in total" cannot be
+  distinguished from the byte totals they correspond to. Sweeping a second
+  bundle size would separate them.
+- **Whether the core that loads second stops at five.** The six-slot total cap
+  binds first, so it cannot be pushed further.
 
 #### Practical guidance
 
@@ -527,11 +601,16 @@ See [Slot creation order](#slot-creation-order-slot_load_order) and
 - **`err 1002` at startup is not a wedged DSP.** It is a clean failure — the
   process exits and nothing is left holding resources. Reordering the slots and
   restarting is safe and is the first thing to try.
-- **Measuring the cost of a model:** load it alone and read `MemAvailable` and
-  `/proc/buddyinfo`. Do **not** use `MemFree` deltas — model files land in the
-  page cache and swamp the signal (a 0.6B can appear to cost more than a 1.7B).
-  Neither metric captures the DSP-side allocation that actually fails, so both
-  are indicative only.
+- **Measuring the cost of a model:** sum the `Size` of the `/dmabuf:` mappings in
+  `/proc/<server pid>/maps` — see [How many slots of one small model
+  fit](#how-many-slots-of-one-small-model-fit-and-what-each-costs) for the
+  one-liner. That is the allocation itself, per slot, and it scales exactly with
+  the slot count. Do **not** use RSS (the pages are never touched by the CPU),
+  `MemFree` deltas (model files land in the page cache and swamp the signal — a
+  0.6B can appear to cost more than a 1.7B), or the `Allocated total size` the
+  libGenie log prints (it is one mapping out of several). `MemAvailable` and
+  `/proc/buddyinfo` still show what a large model does to the host, but they do
+  not isolate one slot.
 
 ### More slots than cores buys nothing
 
