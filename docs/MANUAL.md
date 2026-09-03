@@ -13,6 +13,7 @@ How the server is put together, how to configure it, and what it does in practic
 4. [Multi Text Slots](#multi-text-slots)
     - → [**Platform Notes**](./PLATFORM_NOTES.md) — **how many NSP cores you may use is licensed per SKU. Read this before assuming a second slot exists**
     - [Loading two models at once](#loading-two-models-at-once) — **read this before configuring a second slot**
+    - [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing) — **read this before configuring a third**
 5. [Configuration (env_config.json)](#configuration-env_configjson)
 6. [Starting the Server](#starting-the-server)
 7. [Running on Android](#running-on-android) — what a non-OE-Linux target changes
@@ -203,6 +204,8 @@ see [Choosing a library](./QAIRT_VERSIONS.md#choosing-a-library).
 ## Multi Text Slots
 
 On a target with more than one *usable* Hexagon NSP core, setting `TEXT_SLOTS` in `env_config.json` keeps an independent model resident on each NSP core, so requests to different slots are processed concurrently instead of queueing behind one lock.
+
+A slot is a dialog, not a core. Two slots may name the same `device_id`, and both load and answer independently — but only the cores give you concurrency, so slots past the core count queue rather than overlap. See [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing) before adding a third.
 
 > [!IMPORTANT]
 > **Two cores is not a property of the SoC's part number.** How many you may
@@ -530,6 +533,36 @@ See [Slot creation order](#slot-creation-order-slot_load_order) and
   Neither metric captures the DSP-side allocation that actually fails, so both
   are indicative only.
 
+### More slots than cores buys nothing
+
+Nothing stops two slots from naming the same `device_id`, and with a small
+enough context they both load: four `qwen3_0_6b` at `"size": 1024`, two per
+core, each allocating 98,173,440 bytes across 3 buffers, all four answering
+with independent KV. What they do not do is overlap. Same total work, varying
+only how many run at once (SA8255P, QAIRT 2.49, 16 identical chat requests per
+row, `max_tokens: 64`):
+
+| at a time | slots | wall clock | median latency | vs. serial |
+|---|---|---|---|---|
+| 1 | one | 17.65 s | 1.10 s | — |
+| 2 | **both on cdsp0** | 16.63 s | **2.07 s** | **1.06×** |
+| 2 | one per core | 13.16 s | 1.64 s | 1.34× |
+| 4 | all four, two per core | 12.56 s | 3.11 s | **1.41×** |
+
+Two slots on one core is the striking row: latency doubles exactly, wall clock
+barely moves, and the 1.06× left over is host-side overlap (HTTP, tokenizing),
+not the NPU. **A core does not interleave two dialogs at all** — a different
+mechanism from the bandwidth contention above, and the one that sets the
+ceiling: the ~1.3× a second *core* buys is the whole of what concurrency is
+worth here, and a fourth slot adds 0.07× on top of that second core's 0.34×.
+
+**So size `TEXT_SLOTS` by what you need resident, not by throughput.** Four
+slots are worth having to hold four independent conversations, models, or LoRA
+variants at once, and to keep a slow request off another caller's slot. They
+will not make the same work finish sooner.
+`tests/integration/measure_slot_scaling.py` reproduces this table; it skips any
+row your slot layout cannot show.
+
 ### Pinning a device (`slots.pin_htp_device`)
 
 Each model's `genie_config.json` points at an HTP backend extension config file via `dialog.engine.backend.extensions` (e.g. `htp_backend_ext_config.json`, following QNN's `"devices":[{"device_id":N,...}]` schema). **Without touching the model itself**, this file is copied per slot, its `device_id` overridden, and the copy saved as `PREFIX_CACHE_DIR/.htp_ext_cache/<slot-name>_<original-filename>` — the startup Genie config is then rewritten to reference that copy. As a result:
@@ -569,7 +602,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `QAIRT_SDK_ROOT` | effectively required | `""` | Root path of the QAIRT SDK. Also used for `QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH`. |
 | `HEXAGON_VERSION` | optional | `"v73"` | Hexagon version used in `ADSP_LIBRARY_PATH` (e.g. `hexagon-v73`). |
 | `TARGET_PLATFORM` | optional | `"auto"` | `"linux-oe"`, `"android"`, or `"auto"` to detect. Selects the QAIRT ABI directory (`aarch64-oe-linux-gcc11.2` vs `aarch64-android`) and the `ADSP_LIBRARY_PATH` layout — see [Running on Android](#running-on-android). Only set it explicitly if the SDK you are pointing at is laid out for a different target than the one you are running on. |
-| `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
+| `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit — and that two slots sharing a `device_id` is allowed but does not run them concurrently. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
 | `POLL` | optional | (unset) | Default for every slot's `poll`: `true`/`false` overrides `dialog.engine.backend.QnnHtp.poll` in each model bundle, unset leaves each bundle as it is. **`false` is usually what you want** — polling costs ~260% CPU on SA8255P for latency indistinguishable from blocking (see [`QnnHtp.poll`](#qnnhtppoll-costs-260-cpu-and-buys-nothing-here)). A per-slot `poll` wins over this. Text slots only; VLM slots are unaffected. |
 | `SLOT_LOAD_ORDER` | optional | `"vlm-first"` | Which slot kind is created first when both `TEXT_SLOTS` and `VLM_SLOTS` are set: `"vlm-first"` or `"text-first"`. See [Slot creation order](#slot-creation-order-slot_load_order) and [Loading Two Models at Once](#loading-two-models-at-once). Any other value is rejected at startup. |
 | `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens"}, ...]`. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
@@ -1516,7 +1549,7 @@ Recommended steps for getting reproducible benchmark numbers:
 ## Limitations
 
 - **This server does not guard against the stock-library slot wedge**, and does not detect or recover from it — a wedged slot keeps failing until something reloads its model. Preventing it is a deployment choice, not a server setting: see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
-- One slot = one `GenieDialog` handle processed serially. The number of concurrent inferences is capped at the number of slots (just 1 in a single-slot configuration).
+- One slot = one `GenieDialog` handle processed serially. The number of concurrent inferences is capped at the number of slots (just 1 in a single-slot configuration), and the number that actually overlap is capped by the NSP cores underneath them — see [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing).
 - `n > 1` (multiple completions per request) is not supported.
 - `logprobs` require `numpy` + the model tokenizer, and are non-streaming only. Prompt scoring (`echo`+`logprobs`, lm_eval loglikelihood) runs the whole prompt at decode speed and is therefore off by default (see [Logprobs](#logprobs)).
 - Runtime `presence_penalty`/`frequency_penalty` are accepted but ignored: the SDK's runtime sampler-update path (`GenieSampler_applyConfig`) only applies `seed`/`temp`/`top-k`/`top-p`.

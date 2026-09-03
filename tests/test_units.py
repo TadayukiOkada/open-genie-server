@@ -1097,6 +1097,51 @@ def test_measurement_slots_put_unpinned_slots_last():
         == ["chat", "free"]
 
 
+def _slot_names_module():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "integration" / "slot_names.py"
+    spec = importlib.util.spec_from_file_location("slot_names", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_scaling_slots_returns_every_slot_not_just_the_minimum():
+    """order_slots takes a minimum, not a count: a scaling measurement uses
+    however many slots are configured."""
+    mod = _slot_names_module()
+    assert mod.order_slots(
+        _status(("chat1", 0, True), ("chat2", 1, True), ("chat0", 0, True)),
+        at_least=2) == [("chat1", 0), ("chat0", 0), ("chat2", 1)]
+
+
+def test_scaling_pairs_split_by_device_id():
+    """The same-core pair must share a device_id and the cross-core pair must
+    not — that difference is the whole measurement."""
+    mod = _slot_names_module()
+    slots = [("a", 0), ("b", 0), ("c", 1)]
+    assert mod.same_core_pair(slots) == ["a", "b"]
+    assert mod.cross_core_pair(slots) == ["a", "c"]
+
+
+def test_scaling_pairs_are_none_when_the_layout_cannot_show_the_contrast():
+    """One slot per core has no same-core pair; one core has no cross-core
+    pair. Returning None lets the script skip that phase instead of measuring
+    something it cannot name."""
+    mod = _slot_names_module()
+    assert mod.same_core_pair([("a", 0), ("b", 1)]) is None
+    assert mod.cross_core_pair([("a", 0), ("b", 0)]) is None
+
+
+def test_scaling_pairs_never_assume_where_an_unpinned_slot_landed():
+    """device_id null means the server cannot read the core back, so two of
+    them are not a same-core pair however they are configured."""
+    mod = _slot_names_module()
+    assert mod.same_core_pair([("a", None), ("b", None)]) is None
+    assert mod.cross_core_pair([("a", None), ("b", 1)]) is None
+
+
 def test_measurement_slot_error_names_what_it_found():
     with pytest.raises(SystemExit, match="0 loaded text slot"):
         _order_slot_names({"slots": []}, want=1)
