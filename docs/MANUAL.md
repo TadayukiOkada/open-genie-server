@@ -351,7 +351,7 @@ Read together these give four statements that hold across every run:
    threshold lay somewhere between 0.6B and 1.7B; only three model sizes were
    tried, so it was not pinned down further. **The threshold is not a property
    of the model alone — see the next table.**
-4. **The second model must go on the other NSP.** The one same-device
+4. **The second model must go on the other NSP — on these bundles.** The one same-device
    configuration in the table failed, and because it also loaded the *same*
    model twice — the generated HTP extension config carries
    `"context": {"weight_sharing_enabled": true}` — a weight-sharing conflict
@@ -364,7 +364,10 @@ Read together these give four statements that hold across every run:
    this is a per-core limit, not weight sharing. What sets that limit is still
    unknown — 0.6B + 0.6B and 0.6B + 1.7B fail alike on one core, which is
    consistent with the first model alone reaching it, and there was no smaller
-   bundle to narrow it with.
+   bundle to narrow it with. **A per-core limit is not "one model per core":**
+   a 0.6B exported at a single context length of 1024 puts four on one core, so
+   how many fit moves with the export exactly as the threshold in statement 3
+   does — see [How many slots of one small model fit](#how-many-slots-of-one-small-model-fit-and-what-each-costs).
 
 **A single-context-length export raises the threshold.** The 1.7B and the 4B
 were later re-exported at one context length (`context_lengths: [4096]`, and
@@ -594,7 +597,11 @@ ask for before you try the combination.
   [`env_config.text-vlm.sample.json`](../examples/config/env_config.text-vlm.sample.json).
 - **Judge co-residency on the first startup after a power cycle.** A failed
   startup leaves the device dirty and biases everything you try afterwards.
-- **Give each slot a different `device_id`** on a dual-NSP part.
+- **Give each slot a different `device_id`** on a dual-NSP part — it is what
+  makes two slots overlap at all, and on the bundles in the table above it is
+  what makes the second one load. It is not an absolute rule about loading:
+  small enough slots do co-reside on one core, they just do not run
+  concurrently there.
 - **Expect to determine the limit empirically.** Try the combination; if the
   server starts and both slots report `ready`, it works. There is no way to
   check in advance.
