@@ -651,6 +651,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `HOST` / `PORT` | 任意 | `"0.0.0.0"` / `8080` | 待受アドレス/ポート。CLIの`--host`/`--port`が優先。 |
 | `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は解決後の `TARGET_PLATFORM` に応じた `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。 |
 | `GENIE_PROFILE` | 任意 | `false` | 各テキストスロットに `GenieProfile` をバインドし、SDK自身が計測したTTFT/プレフィル/デコードのKPIを `GET /v1/server/profile` で取得できるようにする([プロファイリング](#プロファイリングsdk側のkpi)参照)。変更には再起動が必要。 |
+| `GENIE_LOG_LEVEL` | 任意 | `""`(無効) | libGenie 自身のログを `"error"` / `"warn"` / `"info"` / `"verbose"` で有効化します。`GenieLog` を1つ作り、本サーバが作る全ての dialog / node / pipeline のコンフィグにバインドします。**無効は「静か」ではなく「無音」です**: SDK 内の `__INFO`/`__ERROR` はロガーがバインドされているかで完全に止まるため、未設定だと SDK 自身の診断は1行も見えません(ロード失敗の理由すら見えません)。`"error"` は安価で、`"info"` にするとエンジンの構成判断(そのバンドルがどの推論経路に乗るか等)も出ます。行を書くのは SDK 自身で、Linux では本プロセスの stdout(`Genie:  <ms> [ LEVEL ] ...`)、Android では logcat に出ます — Python の logging を通らないので、サーバ自身のログ書式にはなりません。コンフィグにバインドするため、変更には再起動が必要です。 |
 | `PROMPT_LOGPROBS` | 任意 | `false` | プロンプトスコアリング(`echo`+`logprobs`のteacher forcing、lm_evalのloglikelihoodタスクが使用)を起動時から有効化。実行時は`POST /v1/server/prompt_logprobs`でも切り替え可([Logprobs](#logprobs)参照)。 |
 | `PROMPT_LOGPROBS_MAX_TOKENS` | 任意 | `4096` | このトークン数を超えるプロンプトのスコアリング要求を拒否(各リクエストはプロンプト全体をデコード速度で処理するため)。 |
 | `TOOL_CALL_RECOVERY` | 任意 | `false` | マーカーの出し方が不正なツール呼び出しを回収します。**両方言に効き、修復は2種類**: 開きマーカーが化けた・欠落した呼び出し(JSON の `name` がそのリクエストで宣言されたツール名と一致するかで判定)と、モデルが開いて中身も正しく埋めたのに閉じなかった呼び出しです。`qwen3_4b_instruct_2507` の w4a16 は `<tool_call>` トークンの代わりにキリル文字を出し(呼び出しの約半数)、`qwen3_0_6b` はタグ自体を出しません。いずれも呼び出しの中身は正しいので、OFF のままだとクライアントのコードが `message.tool_calls` を読んでいるのに `finish_reason: "stop"` のプレーンテキストが返ります。**それでも既定は OFF です**: これは計測対象のバンドルの欠陥を隠すものであり、しかも `/v1/chat/completions` にしか効かないため、同じモデルが `/v1/completions`(回収の余地が無い)と違うスコアを出してしまうからです。バンドルの欠陥にかかわらずアプリを動かしたいときに ON にし、**得られた結果はモデルのものではなくアプリのものとして読んでください**。`qwen3_1_7b` はマーカーを確実に出すので何も要りません。[Function calling](API.ja.md#function-calling-tools) を参照。 |
@@ -1629,6 +1630,7 @@ APIを残してあるのは、コストが無く、答えがターゲットご�
 | prefix warmupが `422` | 対象スロットのモデルのテンプレートがllama2/mistralの場合、systemプロンプトは`[INST]`に融合されるため分割・キャッシュ不可(仕様)。 |
 | `device_id`を指定したのにNSPが固定されていない | 起動ログに `device_id=... requested but ... has no dialog.engine.backend.extensions file to patch — NSP pinning skipped` の警告が出ていないか確認。モデルの`genie_config.json`にHTPバックエンド拡張設定ファイルへの参照が無いと固定できません。 |
 | あるスロットが突然、全リクエストで `GenieDialog_query failed [...]: -1` / `batch dispatch failed` を返すようになる | スロットに楔が入っています。素のQAIRT 2.49.x / 2.50.x の `libGenie.so` と、複数のコンテキスト長でエクスポートされたモデルの組み合わせです。原因となったリクエスト自身は成功して正常に返っており、失敗し始めるのはその次からです。`GenieDialog_reset()` では復旧しません。**復旧方法**: そのスロットを `POST /v1/models/switch {"slot": "<名前>", "model_dir": "<同じモデル>"}` で再ロードします。**回避方法と詳しい説明**: [QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md#d1--素のライブラリはスロットを壊す)を参照。 |
+| SDK が何をしているのかログに何も出ない | libGenie は、ハンドルの生成元コンフィグにロガーがバインドされていない限り何も出しません。内部の `__INFO`/`__ERROR` が完全に無効化されるため、SDK 内部で起きた失敗が、API の返すステータスコード以外に痕跡を残さないことがあります。env_config.json に `"GENIE_LOG_LEVEL": "error"`(エンジンの構成判断まで見たいなら `"info"`)を設定して再起動してください。行はサーバプロセスの stdout に `Genie:  <ms> [ LEVEL ] ...` として出ます(Python の logging ではなく SDK 自身が書きます)。 |
 
 ## 制約事項
 

@@ -562,11 +562,12 @@ class _OrderRecorder:
     def __init__(self, lib):
         self.lib = lib
         self.events: list[str] = []
+        self.log_handle = None
 
     def load_all(self):
         self.events.append("text")
 
-    def create_vlm_slots(self, config, cdll):
+    def create_vlm_slots(self, config, cdll, log_handle=None):
         self.events.append("vlm")
         return ()
 
@@ -1868,3 +1869,93 @@ def test_video_costs_half_the_context_of_the_same_frames_as_images():
     as_video = spec.build_prompt_segments("", [("video", frames)], {}, spec)
     assert vlm.count_vision_tokens(spec, as_images) == 2560
     assert vlm.count_vision_tokens(spec, as_video) == 1280
+
+
+# --------------------------------------------------- Genie SDK logging
+
+def _log_cfg(tmp_path, level, key="GENIE_LOG_LEVEL"):
+    from genie_server.config import load_config
+
+    path = tmp_path / "env_config.json"
+    body = {"QAIRT_SDK_ROOT": "/opt/qairt",
+            "TEXT_SLOTS": [{"model_root": str(tmp_path)}]}
+    if level is not None:
+        body[key] = level
+    path.write_text(json.dumps(body))
+    return load_config(str(path))
+
+
+def test_genie_logging_is_off_unless_asked_for(tmp_path):
+    """The default costs nothing and, more to the point, produces nothing:
+    libGenie's own __INFO/__ERROR are no-ops while no logger is bound."""
+    assert _log_cfg(tmp_path, None).genie_log_level == ""
+
+
+def test_genie_log_level_is_normalized(tmp_path):
+    assert _log_cfg(tmp_path, "  INFO ").genie_log_level == "info"
+
+
+def test_a_misspelled_genie_log_level_fails_at_startup(tmp_path):
+    """Rather than at GenieLog_create time, after the SDK is loaded."""
+    with pytest.raises(ValueError, match="GENIE_LOG_LEVEL"):
+        _log_cfg(tmp_path, "debug")
+
+
+def _manager_with_log_level(tmp_path, level):
+    from fake_genie import FakeGenieLib
+    from genie_server.config import ServerConfig, SlotSpec
+    from genie_server.slots import SlotManager
+
+    model_dir = _minimal_bundle(tmp_path, "qwen3_0_6b")
+    cfg = ServerConfig(
+        sdk_root="/nonexistent",
+        prefix_cache_dir=str(tmp_path / "prefix_cache"),
+        genie_log_level=level,
+        text_slots=(SlotSpec(name="chat", device_id=None,
+                             model_root=model_dir),))
+    manager = SlotManager(cfg, FakeGenieLib())
+    manager.load_all()
+    return manager
+
+
+def test_no_logger_is_created_when_logging_is_off(tmp_path):
+    manager = _manager_with_log_level(tmp_path, "")
+    assert manager.log_handle is None
+    assert manager.lib.created_loggers == []
+    assert manager.lib.bound_loggers == [None]
+
+
+def test_every_dialog_gets_the_one_logger(tmp_path):
+    """One handle for the process, bound to each dialog config — binding is
+    what makes _env->logger() non-null inside libGenie, so a dialog created
+    without it stays silent even though logging is 'on'."""
+    manager = _manager_with_log_level(tmp_path, "info")
+    assert manager.lib.created_loggers == ["info"]
+    assert manager.log_handle is not None
+    assert manager.lib.bound_loggers == [manager.log_handle]
+
+
+def test_a_hot_swapped_model_keeps_the_logger(tmp_path):
+    """The binding lives on the dialog config, so a model switch has to
+    re-apply it or the slot goes quiet after the first swap."""
+    manager = _manager_with_log_level(tmp_path, "error")
+    slot = manager.slots[0]
+    manager.switch_model(slot, slot.model_root, unload_first=True)
+    assert manager.lib.bound_loggers == [manager.log_handle, manager.log_handle]
+
+
+def test_the_logger_is_freed_after_the_dialogs(tmp_path):
+    """The SDK counts the handle's uses against what it is bound to, the same
+    way it does for a profiler — freeing it first fails."""
+    manager = _manager_with_log_level(tmp_path, "verbose")
+    handle = manager.log_handle
+    manager.free_all()
+    assert manager.lib.freed and manager.lib.freed_loggers == [handle.value]
+    assert manager.log_handle is None
+
+
+def test_an_unknown_level_never_reaches_genielog_create():
+    from fake_genie import FakeGenieLib
+
+    with pytest.raises(ValueError, match="log level"):
+        FakeGenieLib().create_logger("trace")

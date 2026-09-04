@@ -55,6 +55,9 @@ class FakeGenieLib:
         self.validator_flag_resets = 0
         self.bound_profiles: list = []
         self.freed_profiles: list = []
+        self.bound_loggers: list = []    # one entry per create_dialog call
+        self.created_loggers: list = []  # levels passed to create_logger
+        self.freed_loggers: list = []
 
     @property
     def cdll(self):
@@ -62,13 +65,30 @@ class FakeGenieLib:
 
     # ------------------------------------------------------------ lifecycle
 
-    def create_dialog(self, config_json: bytes, profile=None) -> FakeHandle:
+    def create_dialog(self, config_json: bytes, profile=None,
+                      log_handle=None) -> FakeHandle:
         if self.fail_create:
             raise RuntimeError("GenieDialog_create failed: -1")
         h = FakeHandle(self._next_handle)
         self._next_handle += 1
         self.bound_profiles.append(profile)
+        self.bound_loggers.append(log_handle)
         return h
+
+    # ------------------------------------------------------------ logging
+
+    def create_logger(self, level: str) -> FakeHandle:
+        from genie_server.capi import LOG_LEVELS
+        if level not in LOG_LEVELS:
+            raise ValueError(f"Unknown Genie log level {level!r}")
+        self.created_loggers.append(level)
+        h = FakeHandle(2000 + self._next_handle)
+        self._next_handle += 1
+        return h
+
+    def free_logger(self, log_handle) -> None:
+        if log_handle is not None and log_handle.value:
+            self.freed_loggers.append(log_handle.value)
 
     # ------------------------------------------------------------ profiling
 

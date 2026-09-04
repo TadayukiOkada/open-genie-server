@@ -284,6 +284,18 @@ class SlotManager:
     def __init__(self, config: ServerConfig, lib):
         self.config = config
         self.lib = lib
+        # One GenieLog for the whole process, bound to every dialog config
+        # this manager creates (and to the VLM nodes, via bootstrap). Without
+        # it libGenie logs nothing at all — see ServerConfig.genie_log_level.
+        # Created here rather than per slot because the level is global and
+        # the SDK reference-counts the handle against its bindings.
+        self.log_handle = (lib.create_logger(config.genie_log_level)
+                           if config.genie_log_level else None)
+        if self.log_handle is not None:
+            logger.info(
+                f"Genie SDK logging enabled at level '{config.genie_log_level}' — "
+                "the SDK writes its own lines to this process's stdout "
+                "(\"Genie: <ms> [ LEVEL ] ...\"), not through Python logging.")
         self.slots: list[Slot] = []
         self.vlm_slots: list = []  # populated by vlm.create_vlm_slots()
         self._by_name: dict[str, Slot] = {}
@@ -305,7 +317,7 @@ class SlotManager:
         config_json, dcfg = load_dialog_config(
             model_dir, device_id, slot_name, self._htp_ext_cache_dir, poll,
             config_file)
-        handle = self.lib.create_dialog(config_json, profile)
+        handle = self.lib.create_dialog(config_json, profile, self.log_handle)
         sampler_cfg = dcfg.get("sampler", {}) or {}
         template = templates.detect_template(
             self.config.chat_template_override or model_dir.name)
@@ -355,6 +367,11 @@ class SlotManager:
     def free_all(self) -> None:
         for s in self.slots:
             self.lib.free_dialog(s.handle)
+        # After the dialogs. GenieLog_free will not refuse while bound (see
+        # GenieLib.free_logger), which is exactly why the order has to be
+        # kept here rather than left to the SDK to enforce.
+        self.lib.free_logger(self.log_handle)
+        self.log_handle = None
 
     # ------------------------------------------------------------ routing
 

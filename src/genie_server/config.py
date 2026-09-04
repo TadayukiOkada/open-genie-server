@@ -150,6 +150,22 @@ class ServerConfig:
     # decode KPIs, read back via GET /v1/server/profile). Costs a model
     # reload to change, since the profiler binds to the dialog config.
     genie_profile: bool = False
+    # Genie's own logging: "" (off, the default) or a level name from
+    # capi.LOG_LEVELS ("error" | "warn" | "info" | "verbose").
+    #
+    # Off means OFF, not quiet: every __INFO/__ERROR inside libGenie expands
+    # to _LOG(_env->logger(), ...) and does nothing at all while no logger is
+    # bound, so with this unset the server never sees the SDK's own
+    # diagnostics -- including the errors behind a failed load or a wedged
+    # dialog. Turn it on ("error" is cheap, "info" is what shows engine setup
+    # decisions such as which inference path a bundle takes) when
+    # investigating anything that happens inside the SDK.
+    #
+    # The SDK writes the lines itself, to this process's stdout, formatted
+    # "Genie:  <ms> [ LEVEL ] <text>" -- they do not pass through Python's
+    # logging module. Like the profiler, this binds to the dialog config, so
+    # changing it needs a restart (or a model reload per slot).
+    genie_log_level: str = ""
     # Reject prompt-scoring requests longer than this many tokens.
     prompt_logprobs_max_tokens: int = 4096
     # Recover a tool call whose <tool_call> marker the model mangled or
@@ -427,6 +443,23 @@ def _parse_slot_load_order(raw: dict) -> str:
     return order
 
 
+def _parse_genie_log_level(raw: dict) -> str:
+    """GENIE_LOG_LEVEL: "" (off) or a name from capi.LOG_LEVELS. Validated
+    here rather than at GenieLog_create time so a typo fails at startup
+    instead of after the SDK is already loaded."""
+    # Local import: capi owns the SDK's level names, but importing it at
+    # module scope would pull ctypes into config before apply_process_env
+    # runs. The module itself opens nothing (GenieLib.load does), so this is
+    # safe where a top-level import would blur bootstrap's ordering rule.
+    from .capi import LOG_LEVELS
+    level = str(raw.get("GENIE_LOG_LEVEL", "")).strip().lower()
+    if level and level not in LOG_LEVELS:
+        raise ValueError(
+            f"GENIE_LOG_LEVEL must be \"\" (off) or one of "
+            f"{sorted(LOG_LEVELS)}, got {level!r}")
+    return level
+
+
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
     """Loads and validates env_config.json. Raises FileNotFoundError /
     json.JSONDecodeError / KeyError on a broken config file."""
@@ -454,6 +487,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         genie_lib_path=raw.get("GENIE_LIB_PATH", ""),
         prompt_logprobs=bool(raw.get("PROMPT_LOGPROBS", False)),
         genie_profile=bool(raw.get("GENIE_PROFILE", False)),
+        genie_log_level=_parse_genie_log_level(raw),
         prompt_logprobs_max_tokens=int(raw.get("PROMPT_LOGPROBS_MAX_TOKENS", 4096)),
         tool_call_recovery=bool(raw.get("TOOL_CALL_RECOVERY", False)),
         vlm_vision_budget_guard=bool(raw.get("VLM_VISION_BUDGET_GUARD", False)),
