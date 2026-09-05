@@ -41,9 +41,11 @@ def build_state(config_path: str = "env_config.json") -> ServerState:
         # process-global positional-encoding validator flags, which would
         # otherwise reject every VLM text-generator node config.
         lib.reset_dialog_validator_flags()
-        manager.vlm_slots = vlm.create_vlm_slots(config, lib.cdll)
+        manager.vlm_slots = vlm.create_vlm_slots(config, lib.cdll,
+                                                 manager.log_handle)
     else:
-        manager.vlm_slots = vlm.create_vlm_slots(config, lib.cdll)
+        manager.vlm_slots = vlm.create_vlm_slots(config, lib.cdll,
+                                                 manager.log_handle)
         manager.load_all()
 
     return ServerState(

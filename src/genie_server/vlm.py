@@ -159,7 +159,8 @@ class VLMSlot:
     the same way a text Slot is."""
 
     def __init__(self, name: str, device_id: int | None, model_root: Path,
-                 spec_name: str, htp_ext_cache_dir: Path, max_tokens: int = 0):
+                 spec_name: str, htp_ext_cache_dir: Path, max_tokens: int = 0,
+                 log_handle=None):
         self.name = name
         self.device_id = device_id
         self.model_root = model_root
@@ -196,7 +197,7 @@ class VLMSlot:
             cfg = _load_vlm_node_config(cfg_path, device_id, name, node_key,
                                         htp_ext_cache_dir, max_tokens)
             node_cfgs[node_key] = cfg
-            built[node_key] = genie_node.Node(cfg)
+            built[node_key] = genie_node.Node(cfg, log_handle=log_handle)
         nodes = {k: built[k] for k in self.spec.node_config_files}
         self.tokenizer = _load_pipeline_tokenizer(node_cfgs)
         # Baked into the context binaries at export time, so the config's
@@ -207,7 +208,7 @@ class VLMSlot:
         self.text_encoder = nodes["text_encoder"]
         self.text_generator = nodes["text_generator"]
 
-        self.pipeline = genie_node.Pipeline()
+        self.pipeline = genie_node.Pipeline(log_handle=log_handle)
         for node in nodes.values():
             self.pipeline.add(node)
         for producer_key, io, consumer_key, io2 in self.spec.connections:
@@ -235,7 +236,8 @@ class VLMSlot:
         return len(text.split())
 
 
-def create_vlm_slots(config: ServerConfig, genie_cdll) -> list[VLMSlot]:
+def create_vlm_slots(config: ServerConfig, genie_cdll,
+                     log_handle=None) -> list[VLMSlot]:
     """Builds every configured VLM slot. Raises on failure (startup-fatal).
     Reuses the already-loaded libGenie CDLL for GenieNode_*/GeniePipeline_*
     symbols instead of loading the shared library a second time.
@@ -267,7 +269,7 @@ def create_vlm_slots(config: ServerConfig, genie_cdll) -> list[VLMSlot]:
         vslot = VLMSlot(name=spec.name, device_id=spec.device_id,
                         model_root=spec.model_root, spec_name=spec.spec,
                         htp_ext_cache_dir=htp_ext_cache_dir,
-                        max_tokens=spec.max_tokens)
+                        max_tokens=spec.max_tokens, log_handle=log_handle)
         out.append(vslot)
         logger.info(
             f"VLM slot '{vslot.name}' ready: model={vslot.active_model_id} "

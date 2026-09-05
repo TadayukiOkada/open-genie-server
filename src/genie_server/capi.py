@@ -45,6 +45,19 @@ WARNING_CONTEXT_EXCEEDED = 4
 # after exactly one token. The SDK's own default is UINT32_MAX.
 MAX_NUM_TOKENS_UNLIMITED = 0xFFFFFFFF
 
+# GenieLog_Level_t (GenieLog.h). A logger must be created and bound to a
+# dialog config for libGenie to emit anything at all: every __INFO/__ERROR in
+# the SDK expands to _LOG(_env->logger(), ...), which is a no-op while the
+# logger is null. Without this the server sees none of the SDK's own
+# diagnostics -- not even its errors.
+LOG_LEVELS = {
+    "error":   1,
+    "warn":    2,
+    "info":    3,
+    "verbose": 4,
+}
+LOG_LEVEL_NAMES = {v: k for k, v in LOG_LEVELS.items()}
+
 # Genie_PerformancePolicy_t
 PERFORMANCE_POLICIES = {
     "burst":                      10,
@@ -141,6 +154,11 @@ class DialogHandle(ctypes.c_void_p):
     pass
 
 
+class LogHandle(ctypes.c_void_p):
+    """GenieLog_Handle_t — the sink every SDK log message goes through."""
+
+
+
 class GenieValue(ctypes.Union):
     """Mirrors the Genie_Value_t union (GenieCommon.h)."""
     _fields_ = [
@@ -228,6 +246,19 @@ class GenieLib:
         bind(lib.GenieDialogConfig_bindProfiler,
              [DialogConfigHandle, ProfileHandle], ctypes.c_int)
 
+        # Logging. GenieLog_create's callback parameter is a
+        # GenieLog_Callback_t taking a va_list, which ctypes cannot construct
+        # or consume portably, so we always pass NULL and take the SDK's own
+        # sink: printf to stdout on Linux, logcat on Android (Logger.cpp
+        # picks it when the callback is null). Messages arrive as
+        # "Genie:  <ms> [ LEVEL ] <text>".
+        bind(lib.GenieLog_create,
+             [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+              ctypes.POINTER(LogHandle)], ctypes.c_int)
+        bind(lib.GenieLog_free, [LogHandle], ctypes.c_int)
+        bind(lib.GenieDialogConfig_bindLogger,
+             [DialogConfigHandle, LogHandle], ctypes.c_int)
+
         # Prefix caching (KV-cache snapshots)
         bind(lib.GenieDialog_save, [DialogHandle, ctypes.c_char_p], ctypes.c_int)
         bind(lib.GenieDialog_restore, [DialogHandle, ctypes.c_char_p], ctypes.c_int)
@@ -271,17 +302,24 @@ class GenieLib:
     # ------------------------------------------------------------ lifecycle
 
     def create_dialog(self, config_json: bytes,
-                      profile: ProfileHandle | None = None) -> DialogHandle:
+                      profile: ProfileHandle | None = None,
+                      log_handle: "LogHandle | None" = None) -> DialogHandle:
         """GenieDialogConfig_createFromJson + GenieDialog_create. Raises
         RuntimeError on failure; never exits the process.
 
         A profile handle can only be attached to the *config*, before the
         dialog exists (GenieDialog.h:216) — which is why enabling profiling
-        needs a model reload rather than a runtime toggle."""
+        needs a model reload rather than a runtime toggle. The logger binds
+        the same way and has the same consequence."""
         cfg = DialogConfigHandle()
         ret = self._lib.GenieDialogConfig_createFromJson(config_json, ctypes.byref(cfg))
         if ret != STATUS_SUCCESS or not cfg.value:
             raise RuntimeError(f"GenieDialogConfig_createFromJson failed: {ret}")
+        if log_handle is not None:
+            ret = self._lib.GenieDialogConfig_bindLogger(cfg, log_handle)
+            if ret != STATUS_SUCCESS:
+                self._lib.GenieDialogConfig_free(cfg)
+                raise RuntimeError(f"GenieDialogConfig_bindLogger failed: {ret}")
         if profile is not None:
             ret = self._lib.GenieDialogConfig_bindProfiler(cfg, profile)
             if ret != STATUS_SUCCESS:
@@ -293,6 +331,36 @@ class GenieLib:
         if ret != STATUS_SUCCESS or not handle.value:
             raise RuntimeError(f"GenieDialog_create failed: {ret}")
         return handle
+
+    def create_logger(self, level: str) -> LogHandle:
+        """GenieLog_create at `level` ("error" | "warn" | "info" | "verbose"),
+        using the SDK's own sink (see the binding note: the callback form
+        takes a va_list, which ctypes cannot handle portably).
+
+        The handle must be bound to a dialog config BEFORE the dialog is
+        created — binding is what makes _env->logger() non-null inside
+        libGenie, and everything the SDK logs is gated on that pointer.
+        Nothing routes through Python's logging module: the SDK writes the
+        lines itself, to this process's stdout."""
+        code = LOG_LEVELS.get(level)
+        if code is None:
+            raise ValueError(
+                f"Unknown Genie log level {level!r}; expected one of "
+                f"{sorted(LOG_LEVELS)}")
+        handle = LogHandle()
+        ret = self._lib.GenieLog_create(None, None, code, ctypes.byref(handle))
+        if ret != STATUS_SUCCESS or not handle.value:
+            raise RuntimeError(f"GenieLog_create({level}) failed: {ret}")
+        return handle
+
+    def free_logger(self, log_handle: LogHandle | None) -> None:
+        """Frees a log handle. Unlike GenieProfile_free this does not refuse
+        while the handle is still bound — GenieLog_free only drops the SDK's
+        own reference (Logger::reset), and each dialog holds a shared_ptr of
+        its own, so an early free silently leaves those dialogs logging to a
+        handle the caller thinks is gone. Free it after the dialogs."""
+        if log_handle is not None and log_handle.value:
+            self._lib.GenieLog_free(log_handle)
 
     def create_profile(self) -> ProfileHandle:
         """GenieProfile_create. The config handle is a documented placeholder

@@ -57,8 +57,10 @@ def _install_signatures(lib) -> None:
         # config
         ("GenieNodeConfig_createFromJson", [C.c_char_p, C.POINTER(Handle)]),
         ("GenieNodeConfig_free", [Handle]),
+        ("GenieNodeConfig_bindLogger", [Handle, Handle]),
         ("GeniePipelineConfig_createFromJson", [C.c_char_p, C.POINTER(Handle)]),
         ("GeniePipelineConfig_free", [Handle]),
+        ("GeniePipelineConfig_bindLogger", [Handle, Handle]),
         # node
         ("GenieNode_create", [Handle, C.POINTER(Handle)]),
         ("GenieNode_free", [Handle]),
@@ -134,11 +136,15 @@ def _check(status, what):
 
 
 class Node:
-    def __init__(self, config):
+    def __init__(self, config, log_handle=None):
         """config: a path to e.g. img-enc-htp.json (str/PathLike, read and
         passed as-is), or an already-loaded/modified dict (e.g. after
         rewriting the extensions path for HTP pinning, to pass it without
-        going through a file)."""
+        going through a file).
+
+        log_handle: a GenieLog_Handle_t (capi.GenieLib.create_logger) to bind
+        to this node's config, so the SDK actually emits its own messages for
+        this node. Like the dialog path, binding must happen before create."""
         lib = _get_lib()
         if isinstance(config, dict):
             cfg_str = json.dumps(config)
@@ -156,6 +162,9 @@ class Node:
 
         self._handle = C.c_void_p()
         try:
+            if log_handle is not None:
+                _check(lib.GenieNodeConfig_bindLogger(cfg, log_handle),
+                       f"GenieNodeConfig_bindLogger({self._name})")
             _check(lib.GenieNode_create(cfg, C.byref(self._handle)),
                    f"GenieNode_create({self._name})")
         finally:
@@ -220,10 +229,10 @@ class Node:
 
 
 class Pipeline:
-    def __init__(self, config_json=None):
+    def __init__(self, config_json=None, log_handle=None):
         """config_json: dict or JSON string. genie-app's
         'pipeline config create pipelineConfig' takes no argument, so the
-        default is empty."""
+        default is empty. log_handle: see Node.__init__."""
         lib = _get_lib()
         if config_json is None:
             cfg_str = "{}"
@@ -238,6 +247,9 @@ class Pipeline:
 
         self._handle = C.c_void_p()
         try:
+            if log_handle is not None:
+                _check(lib.GeniePipelineConfig_bindLogger(cfg, log_handle),
+                       "GeniePipelineConfig_bindLogger")
             _check(lib.GeniePipeline_create(cfg, C.byref(self._handle)),
                    "GeniePipeline_create")
         finally:
