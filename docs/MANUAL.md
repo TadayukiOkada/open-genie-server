@@ -303,10 +303,13 @@ Configuring a second slot — two `TEXT_SLOTS` entries, or `TEXT_SLOTS` plus
 [ERROR] Startup failed: GenieDialog_create failed: -1
 ```
 
-`err 1002` is `QNN_COMMON_ERROR_MEM_ALLOC`. The first slot loads fine; the
-second one fails partway through creating its contexts. **The server cannot
-predict this** — there is no API that reports the budget, so the failure
-surfaces only when you try the combination.
+`err 1002` is `QNN_COMMON_ERROR_MEM_ALLOC`, so it reads as "the DSP ran out of
+memory". It is not: the allocation that fails is a **host-side mapping** of a
+context's weights, against a budget that is not DSP memory and not guest memory
+([Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives)).
+The first slot loads fine; the second one fails partway through creating its
+contexts. **The server cannot predict this** — there is no API that reports the
+budget, so the failure surfaces only when you try the combination.
 
 Everything below was measured on one board (SA8255P / dual NSP / 12.3 GB,
 QAIRT 2.49.40.260810, `libGenie.so` with the `0001`+`0003` patches). Treat the
