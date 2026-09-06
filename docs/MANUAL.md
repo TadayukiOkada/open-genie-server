@@ -472,6 +472,12 @@ tracks something that scales with the number of context-length variants in the
 bundle, i.e. with how many QNN contexts get created (two graphs versus six here).
 That also means it is not something you can read off a bundle's size.
 
+**That reading has since been confirmed and given a mechanism**: the budget is
+charged **per QNN context**, in a fixed allocation unit, so more context-length
+variants cost more at the same total bytes. What the budget is, and why it is a
+property of how the board was integrated rather than of the SoC, is in
+[Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
+
 > **Measure this only on the first startup after a power cycle.** A failed
 > startup does not clean up the device — the log fills with
 > `Failed to deregister opPackages ... err 6020` and
@@ -538,10 +544,15 @@ Every size class scales strictly with the slot count (3 slots 2,773 MB, 4 slots
 3,698 MB, 6 slots 5,548 MB), so nothing is shared between slots, weights
 included. Two slots on the same model directory cost exactly twice one.
 
-This measures demand, not the budget. It still cannot predict `err 1002` — the
-limit the allocation runs into remains invisible, and load order changes the
-answer at a fixed byte total. But it does tell you what a candidate model will
-ask for before you try the combination.
+This measures demand, not the budget. On its own it does not predict
+`err 1002` — load order changes the answer at a fixed byte total — but it does
+tell you what a candidate model will ask for before you try the combination.
+
+The budget itself is no longer invisible. On the bench these numbers come from
+it is a fixed pool charged **1 unit per QNN context**, which makes the six-slot
+ceiling above arithmetic rather than an empirical surprise, and it also explains
+the load-order reversal. Both are platform-integration properties, so they live
+in [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
 
 > The sweep itself was run without power cycling between configurations, but six
 > of these rows were then re-measured **one power cycle per configuration**, the
@@ -550,9 +561,11 @@ ask for before you try the combination.
 > counts are not depressed by accumulated state, and the load-order reversal
 > holds when each half is its own first startup after its own power cycle.
 >
-> Incidentally that is evidence for the guidance below that an `err 1002`
-> startup failure leaves nothing held: a sweep containing eight failures and a
-> run with a power cycle before every configuration agree to the megabyte.
+> That agreement is evidence about **demand**: the dmabuf totals a sweep with
+> eight failures behind it reports match a run power-cycled before every
+> configuration, to the megabyte. It is **not** evidence that a failed startup
+> leaves nothing held — the budget the allocation runs into is accounted
+> elsewhere and is *not* returned. See the corrected guidance below.
 
 #### What is not established
 
@@ -564,12 +577,20 @@ ask for before you try the combination.
   strongest case is the text + VLM pair above, where two bundles of the *same
   model* report the identical figure to the byte and yet one leaves room for a
   VLM and the other does not.
-- **The mechanism is unknown.** `err 1002` says a DSP-side allocation failed,
-  and nothing in the guest's `/proc` accounts for it. This was not traced
-  through the SDK sources.
-- **Why a *smaller* first model helps is unexplained.** The behavior is
-  consistent with the first `GenieDialog` reserving the bulk of some DSP-side
-  budget, but that is inference from the outcomes, not something observed.
+- ~~**The mechanism is unknown.**~~ **Now traced.** `err 1002` here is not a
+  DSP-side allocation failure at all: it is the **host side** failing to map a
+  context's shared-weights buffer into a DSP protection domain, and the budget
+  it exhausts is accounted outside the guest — which is why nothing in the
+  guest's `/proc` ever added up. The mapping error, the numbers, and the rule
+  that decides which protection domain a context lands on are in [Platform
+  Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives). Turn
+  `GENIE_LOG_LEVEL` to `"info"` to see the real error on your own board.
+- **Why a *smaller* first model helps is now partly explained.** Which
+  protection domain a context lands on follows only from how many contexts the
+  process has created so far, so whichever slot loads first fills one domain —
+  and a bigger first model fills it with fewer, larger mappings. The domain
+  assignment was observed directly; the step from there to model *size* is
+  still inference.
 - ~~**The context-length count's role is not isolated.**~~ **Now isolated, for
   the text + VLM pair.** The 0.6B was exported both ways and kept both bundles,
   which holds the toolchain version and everything else constant; the
@@ -605,12 +626,22 @@ ask for before you try the combination.
   what makes the second one load. It is not an absolute rule about loading:
   small enough slots do co-reside on one core, they just do not run
   concurrently there.
-- **Expect to determine the limit empirically.** Try the combination; if the
-  server starts and both slots report `ready`, it works. There is no way to
-  check in advance.
-- **`err 1002` at startup is not a wedged DSP.** It is a clean failure — the
-  process exits and nothing is left holding resources. Reordering the slots and
-  restarting is safe and is the first thing to try.
+- **Expect to determine the limit empirically** unless you can read your
+  platform's mapping budget, which is **not visible from inside the guest**.
+  Try the combination; if the server starts and both slots report `ready`, it
+  works. Where the budget can be read from outside the guest — as it can on
+  this bench — the ceiling can be computed instead: see [Platform
+  Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
+- **`err 1002` at startup is not a wedged DSP, but it is not free either.**
+  *(Corrected — an earlier revision of this page called it a clean failure that
+  leaves nothing held. The DSP allocations are released; the mapping budget
+  behind them is not.)* The process exits and its dmabuf allocations go away, so
+  reordering the slots and restarting **once** is the right first move. Do not
+  loop on it: each failed startup consumes mapping budget it never returns, and
+  a run of them ends with startup failing at `Failed to create device: 14001`
+  instead — at which point the process may not exit even under `SIGKILL` and the
+  board needs a power cycle. If you are sweeping configurations that fail on
+  purpose, **power-cycle between them**.
 - **Measuring the cost of a model:** sum the `Size` of the `/dmabuf:` mappings in
   `/proc/<server pid>/maps` — see [How many slots of one small model
   fit](#how-many-slots-of-one-small-model-fit-and-what-each-costs) for the
