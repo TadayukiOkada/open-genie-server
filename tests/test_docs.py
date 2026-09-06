@@ -10,6 +10,7 @@ exactly like a Markdown heading.
 """
 
 import re
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -53,12 +54,24 @@ def _parse(path: Path):
 
 
 def _slug(heading: str) -> str:
-    """GitHub's anchor slug, close enough for link checking: drop code ticks
-    and link syntax, lowercase, drop punctuation, spaces to hyphens. CJK
-    characters survive, which is what the Japanese docs link to."""
+    """GitHub's anchor slug: drop code ticks and link syntax, lowercase, drop
+    punctuation, spaces to hyphens. CJK *characters* survive, which is what the
+    Japanese docs link to — but CJK *punctuation* does not.
+
+    That last part is the whole reason this is a function and not a guess. An
+    earlier version kept anything in the CJK block, so `、` and `。` survived
+    into the slug; GitHub strips them like any other punctuation. Every
+    Japanese heading with a comma in it therefore had an anchor the checks
+    below would accept and a browser would not scroll to. Verified against the
+    ids GitHub emits for all of this repository's Markdown, which is the only
+    authority worth having here.
+    """
     heading = re.sub(r"`([^`]*)`", r"\1", heading)
     heading = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)
-    heading = re.sub(r"[^\w\s\-　-鿿]", "", heading.lower().strip())
+    heading = heading.lower().strip()
+    heading = "".join(c for c in heading if c in "-_" or c.isspace()
+                      or not unicodedata.category(c).startswith("P"))
+    heading = re.sub(r"[^\w\s\-　-鿿]", "", heading)
     return heading.replace(" ", "-")
 
 
@@ -172,6 +185,23 @@ def test_links_into_our_own_repo_point_at_files_that_exist(path):
             if fragment not in _anchors(_parse(target)[0]):
                 broken.append(f"{rel}#{fragment} (no such heading)")
     assert not broken, f"{path.name}: {broken}"
+
+
+@pytest.mark.parametrize("path", _markdown_files(),
+                         ids=lambda p: str(p.relative_to(REPO_ROOT)))
+def test_link_text_and_destination_are_not_split_by_a_newline(path):
+    """`[text]` on one line and `(dest)` on the next is not a link.
+
+    CommonMark allows no whitespace between the two, so the whole thing renders
+    as literal text with the URL showing — and every check in this file misses
+    it, because they all match `](`. It only happens when a long Japanese
+    heading is wrapped to keep the source readable, which is exactly when the
+    author is least likely to re-read the rendered page.
+    """
+    _headings, prose = _parse(path)
+    split = [m.group(0).replace("\n", " / ")[:90] for m in
+             re.finditer(r"\[[^\]\n]*\][ \t]*\n[ \t]*\([^)\s]+\)", prose)]
+    assert not split, f"{path.name}: link split across lines: {split}"
 
 
 @pytest.mark.parametrize("path", _markdown_files(),
