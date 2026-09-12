@@ -58,6 +58,12 @@
   request declares `tools`. Without them a text slot streams token by token,
   and a VLM slot, which ignores `tools`, always does. The comparison table
   gains a `stream: true` row.
+- **lm_eval against a Gemma 4 bundle.** `examples/lm_eval` now says when the
+  CPU reference needs `add_bos_token=True` — the SDK adds a BOS on the board
+  while the model's HF tokenizer does not, and without the flag the reference
+  scores 9 to 52 nats low per continuation — and that a bundle built from a QAT
+  checkpoint should also be compared with that checkpoint, which on Gemma 4 E2B
+  sits 20 nats from the original fp32 model. Gains the Gemma 4 E2B timing.
 
 ### For `VLMSpec` authors
 
