@@ -50,6 +50,12 @@
   from the bundle, how the prompt is built, which request fields apply, and
   how tokens are counted. See
   [MANUAL.md](MANUAL.md#gemma-4-text-slot-vs-vlm-slot).
+- **gemma4 streaming is buffered only for a request with `tools`.** The API
+  reference's "Streaming (gemma4)" note read as if every gemma4 stream arrived
+  in one piece at the end; the buffering filter is attached only when the
+  request declares `tools`. Without them a text slot streams token by token,
+  and a VLM slot, which ignores `tools`, always does. The comparison table
+  gains a `stream: true` row.
 
 ### For `VLMSpec` authors
 

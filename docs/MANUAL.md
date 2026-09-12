@@ -1392,6 +1392,7 @@ A Gemma 4 LMM bundle can be loaded either way — as a text slot through its `ge
 | Image resolution | — | one patch grid per slot (`vision-param`); every image is resized to it |
 | `max_tokens`, `stop` | per request | per slot (`VLM_SLOTS[].max_tokens`); the request's values are ignored |
 | `tools` | gemma4's own tool-call dialect | ignored |
+| `stream: true` | token by token — except a request that declares `tools`, whose reply is buffered whole and arrives at the end ([API](./API.md#post-v1chatcompletions)) | token by token (`tools` are ignored, so nothing is buffered) |
 | `logprobs` | supported | 400 |
 | Client disconnect | aborts the generation | the generation runs to completion |
 | Prefix KV cache | the system turn; on a LUT-embedding bundle a hit carries a second BOS | not available |
