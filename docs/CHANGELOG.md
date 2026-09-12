@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased — Gemma 4 QAT bundles, and Gemma 4 image and video input
+## 1.2.0 — Gemma 4 QAT bundles with image and video input, and the SDK's own log
+
+Gemma 4 E2B bundles exported from Google's QAT checkpoint now load and serve
+on both kinds of slot. Getting there took three things: resolving the paths
+of their per-channel-quantized embedding tables, a VLM spec for Gemma 4's
+image encoder, and no longer writing a BOS the SDK already adds. The server
+can also bind the SDK's own log now (`GENIE_LOG_LEVEL`), which is what traced
+`err 1002` to the budget it actually exhausts.
+
+Everything here is an addition or a fix. `gemma4` is a new spec and
+`GENIE_LOG_LEVEL` a new key that defaults to off. Two numbers change under
+existing names, both because they reported less than the SDK prefills:
+`usage.prompt_tokens` now includes the BOS the SDK adds on a bundle whose
+dialog names `bos-token`, and a VLM slot's count includes its chat-template
+markers.
 
 ### Added
 
@@ -16,6 +30,16 @@
   to every text segment, which is logged at startup and counted in `usage`,
   and the template writes no BOS of its own. See
   [MANUAL.md](MANUAL.md#configuration-1).
+- **`GENIE_LOG_LEVEL`** (default `""`, off; `error`, `warn`, `info` or
+  `verbose`). libGenie logs nothing unless a logger is bound to the config a
+  handle was created from, so a failure inside the SDK used to leave nothing
+  but the status code. One `GenieLog` is now bound to every dialog, node and
+  pipeline config the server creates, and re-applied after a hot swap. The SDK
+  writes the lines itself — stdout on Linux, logcat on Android — so they do
+  not pass through Python logging. `info` is loud: a four-slot startup wrote
+  1,836 lines. The first run with it on also settled a question for
+  Limitations: the SDK's continuous batching cannot be switched on from a
+  bundle config.
 
 ### Fixed
 
@@ -48,6 +72,27 @@
 
 ### Documentation
 
+- **What more slots are worth, and what each one costs.** A sweep of
+  `qwen3_0_6b` slots shows that a core does not interleave two dialogs — two
+  slots on one core double the latency and move the wall clock 1.06× — so
+  slots beyond the number of cores buy nothing. Three over-stated claims in the
+  co-residency material are corrected: two slots may share a `device_id`, the
+  allocation that fails can be seen by summing DMA-BUF mappings, and "the
+  second model must go on the other NSP" holds only for some bundles. The
+  sweep's rows were then re-measured from a power cycle each and matched, so
+  its caveat is gone.
+- **What `err 1002` is.** With the SDK's log on, it is the host failing to map
+  a context's shared weights into a DSP protection domain, against a budget
+  kept outside the guest. On the reference bench that budget is a hypervisor
+  page-table pool charged 1,024 KB per QNN context. The advice that a failed
+  startup is clean and safe to retry is corrected in place: the budget is not
+  returned, and repeated failures end in `Failed to create device: 14001` and
+  a power cycle. The platform-specific part moved to
+  [PLATFORM_NOTES.md](PLATFORM_NOTES.md).
+- **Japanese anchors.** The docs test's slugger kept CJK punctuation that
+  GitHub strips, which had been hiding three dead fragment links and two links
+  that rendered as plain text. All five are fixed, and the slugger now agrees
+  with GitHub on every heading in the repository.
 - **Gemma 4 on a text slot and on a VLM slot**, side by side: what each reads
   from the bundle, how the prompt is built, which request fields apply, and
   how tokens are counted. See
