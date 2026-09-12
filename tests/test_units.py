@@ -2101,6 +2101,19 @@ def test_too_many_frames_is_refused_before_anything_touches_the_npu():
                           guard=True)
 
 
+def test_the_refusal_says_how_many_frames_make_a_step_for_this_spec():
+    """Qwen3-VL packs two frames into a step; gemma4 has no temporal packing,
+    and "one step per 1 frames" told the client nothing it could act on."""
+    from genie_server import vlm
+    parts = [("video", list(range(200)))]
+    with pytest.raises(ValueError, match=r"a video is one step per 2 frames\."):
+        vlm.plan_segments(_BudgetSlot(), "", parts, {}, guard=True)
+    slot = _BudgetSlot()
+    slot.spec, _ = _gemma4(height=24, width=24)
+    with pytest.raises(ValueError, match=r"a video is one step per frame\."):
+        vlm.plan_segments(slot, "", parts, {}, guard=True)
+
+
 def test_the_generation_reserve_is_subtracted_from_the_budget():
     """The slot's whole max_tokens is held back, not just the prompt
     measured -- not because decoding across the line is dangerous (measured:

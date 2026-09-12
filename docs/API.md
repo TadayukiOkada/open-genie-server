@@ -83,7 +83,7 @@ Chat completion (for `lm_eval`'s `local-chat-completions` backend, Open WebUI, a
 
 Message `content` may be either a plain string or an OpenAI parts array (`[{"type": "text", ...}]`, as sent by Open WebUI); text parts are flattened automatically, and an `image_url` or `video_url` part routes the request to a VLM slot (see [VLM (Multimodal) Support](./MANUAL.md#vlm-multimodal-support)).
 
-A `video_url` carries frames the client already extracted — base64 JPEGs joined by commas under a `video/jpeg` media type, the form vLLM uses for client-side preprocessing — and `media_io_kwargs.video` (top level of the body; `extra_body` from an OpenAI client) carries the `fps`/`frames_indices` the `<t seconds>` markers come from. Four request errors are specific to this path, all `400`:
+A `video_url` carries frames the client already extracted — base64 JPEGs joined by commas under a `video/jpeg` media type, the form vLLM uses for client-side preprocessing — and `media_io_kwargs.video` (top level of the body; `extra_body` from an OpenAI client) carries the `fps`/`frames_indices` the frame timestamps come from — `<t seconds>` markers on a `qwen3_vl` slot, `mm:ss` on a `gemma4` slot; with no `fps`, neither writes any. Four request errors are specific to this path, all `400`:
 
 - **A media type that is not `video/jpeg`.** No demuxer ships with this server, so a container (`data:video/mp4;base64,...`) is refused rather than half-supported.
 - **A remote `http(s)` URL**, for video as for images: this server does not fetch them.

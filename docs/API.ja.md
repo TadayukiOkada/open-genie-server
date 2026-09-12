@@ -82,7 +82,7 @@ curl $base_url/v1/completions \
 
 メッセージの`content`はプレーン文字列と、OpenAIのparts配列(`[{"type": "text", ...}]`、Open WebUIが送る形式)のどちらでも受け付けます。テキストパーツは自動でフラット化され、`image_url`または`video_url`パーツがあるとVLMスロットにルーティングされます([VLM(マルチモーダル)対応](./MANUAL.ja.md#vlmマルチモーダル対応)参照)。
 
-`video_url`はクライアント側で抽出済みのフレーム列を運びます(`video/jpeg`メディアタイプの下にbase64 JPEGをカンマで連結した、vLLMがクライアント側前処理に使う形式)。`<t seconds>`マーカーの元になる`fps`/`frames_indices`は`media_io_kwargs.video`(ボディ直下。OpenAIクライアントからは`extra_body`)で渡します。この経路に固有のリクエストエラーは4つで、いずれも`400`です:
+`video_url`はクライアント側で抽出済みのフレーム列を運びます(`video/jpeg`メディアタイプの下にbase64 JPEGをカンマで連結した、vLLMがクライアント側前処理に使う形式)。フレームのタイムスタンプの元になる`fps`/`frames_indices`は`media_io_kwargs.video`(ボディ直下。OpenAIクライアントからは`extra_body`)で渡します。タイムスタンプは`qwen3_vl`スロットでは`<t seconds>`マーカー、`gemma4`スロットでは`mm:ss`で、`fps`が無ければどちらも書きません。この経路に固有のリクエストエラーは4つで、いずれも`400`です:
 
 - **`video/jpeg`以外のメディアタイプ**。本サーバにデマルチプレクサは無いので、コンテナ(`data:video/mp4;base64,...`)は中途半端に扱わず拒否します。
 - **リモートの`http(s)` URL**。画像と同じく取りに行きません。

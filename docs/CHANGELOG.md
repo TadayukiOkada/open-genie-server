@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Gemma 4 QAT bundles, and Gemma 4 image input
+## Unreleased — Gemma 4 QAT bundles, and Gemma 4 image and video input
 
 ### Added
 

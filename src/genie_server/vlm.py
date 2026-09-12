@@ -584,6 +584,8 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
 
     if steps > max_steps:
         frames_per_step = spec.temporal_patch_size
+        per_video_step = ("frame" if frames_per_step == 1
+                          else f"{frames_per_step} frames")
         detail = (
             f"{steps} encoder steps ({steps * per_step} vision tokens) but "
             f"only {max_steps} fit (context {vslot.context_size} - "
@@ -598,7 +600,7 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
             return segments
         raise ValueError(
             f"too much visual input for this slot: {detail}. One still image "
-            f"is one step; a video is one step per {frames_per_step} frames. "
+            f"is one step; a video is one step per {per_video_step}. "
             f"Send fewer frames, or lower VLM_SLOTS[].max_tokens to free up "
             f"context.")
     return segments
