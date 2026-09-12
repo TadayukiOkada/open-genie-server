@@ -285,7 +285,8 @@ BFCL=/tmp/bfclvenv/bin/bfcl ./run_bfcl.sh \
 gemma4 has no HF repo of its own to fetch.
 
 **Which mode you pick dominates the number.** Measured on our board,
-`simple_python`, all 400 entries:
+`simple_python`, all 400 entries, with Qualcomm's `gemma4-e2b-it` and the
+handlers as they were then (two BOS — see [below](#one-bos)):
 
 | | Python Simple AST |
 |---|---|
@@ -316,3 +317,27 @@ terminated — `<|tool_call>call:math.gcd{num1:12,num2:15}` with no closing
 `<tool_call|>`. Those 14 are counted as failures here, the same way a mangled
 marker is: not closing your own call is model behaviour, and a parser that
 forgave it would be scoring something else. Tolerating them would add 3.5 points.
+
+### One BOS
+
+**The handlers no longer write `<bos>`.** A Genie bundle whose dialog context
+names `bos-token` — every gemma4 export so far — has libGenie prepend it to every
+query, and BFCL sends its prompt to `/v1/completions` as raw text, so a handler
+that wrote `<bos>` as well prefilled `[2, 2, 105, …]`. The numbers above were
+taken that way and have not been re-measured.
+
+With one BOS, on Gemma 4 E2B exports built from Google's QAT checkpoint (native
+FC, `simple_python`, all 400 entries):
+
+| | Python Simple AST |
+|---|---|
+| E2B QAT — text-only export | **84.00%** |
+| E2B QAT — the image-capable export, its text generator | **83.50%** |
+
+The two exports answer 12 entries differently (7 against 5, not significant) and
+produce identical text on 366 of 400, so the image-capable one costs nothing on
+text function calling. Both stay below a SeqMSE + SpinQuant rebuild of
+`qwen3_4b_instruct_2507` (93.00%; McNemar p < 0.01) and the 1.7B export's
+90.25%, and neither left a call unterminated. **Do not read the jump from 31.50%
+as the effect of either change alone**: the bundle and the BOS count changed
+together.
