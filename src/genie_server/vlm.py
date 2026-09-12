@@ -23,11 +23,13 @@ unavailable" rather than killing a text-only deployment.
 import json
 import logging
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from . import capi
 from .config import ServerConfig
-from .slots import resolve_and_verify, pin_htp_device, load_tokenizer_file
+from .slots import (resolve_and_verify, resolve_lut_paths, pin_htp_device,
+                    load_tokenizer_file)
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +84,14 @@ def _load_vlm_node_config(config_path: Path, device_id: int | None,
     if tok.get("path"):
         tok["path"] = resolve_and_verify(tok["path"], base)
 
-    # embedding_weights.raw — "lut" for text-encoder, "embedding" for
-    # text-generator (same LUT file, two different config shapes).
-    for lut_key in ("lut", "embedding"):
-        lut = cfg.get(lut_key, {})
-        if lut.get("lut-path"):
-            lut["lut-path"] = resolve_and_verify(lut["lut-path"], base)
+    # LUT embeddings — "lut" for text-encoder, "embedding" for text-generator
+    # (same LUT file, two different config shapes). The "perlayer-" pair is
+    # Gemma 4's per-layer embedding table, which both nodes name as well; a
+    # PCQ table adds quant-param files to each (slots.resolve_lut_paths).
+    for lut_key in ("lut", "perlayer-lut", "embedding", "perlayer-embedding"):
+        lut = cfg.get(lut_key)
+        if isinstance(lut, dict):
+            resolve_lut_paths(lut, base)
 
     engine = cfg.get("engine", {})
 
@@ -152,11 +156,24 @@ def _context_size(node_cfgs: dict) -> int:
         return 0
 
 
+def _text_encoder_bos(node_cfgs: dict) -> int | None:
+    """The bos-token the text-encoder config names, or None."""
+    cfg = node_cfgs.get("text_encoder")
+    if not cfg:
+        return None
+    token = next(iter(cfg.values()), {}).get("context", {}).get("bos-token")
+    return token if isinstance(token, int) and token >= 0 else None
+
+
 class VLMSlot:
     """One independent VLM pipeline: image-encoder + text-encoder +
     text-generator GenieNodes wired into a GeniePipeline, per a
     vlm_specs.VLMSpec's topology. Optionally pinned to a single HTP device
     the same way a text Slot is."""
+
+    # The bos-token libGenie's LUT text-encoder prepends to every text
+    # segment, or None; see __init__.
+    text_encoder_bos = None
 
     def __init__(self, name: str, device_id: int | None, model_root: Path,
                  spec_name: str, htp_ext_cache_dir: Path, max_tokens: int = 0,
@@ -189,15 +206,37 @@ class VLMSlot:
         # Pipeline add/connect order still follows the spec.
         node_keys = sorted(self.spec.node_config_files,
                            key=lambda k: k != "text_generator")
-        built = {}
         node_cfgs = {}
         for node_key in node_keys:
             cfg_path = Path(resolve_and_verify(
                 self.spec.node_config_files[node_key], model_root))
-            cfg = _load_vlm_node_config(cfg_path, device_id, name, node_key,
-                                        htp_ext_cache_dir, max_tokens)
-            node_cfgs[node_key] = cfg
-            built[node_key] = genie_node.Node(cfg, log_handle=log_handle)
+            node_cfgs[node_key] = _load_vlm_node_config(
+                cfg_path, device_id, name, node_key, htp_ext_cache_dir, max_tokens)
+        # Before any node exists, so a spec can both read the bundle's own
+        # settings (Gemma 4's patch grid) and adjust the configs the nodes are
+        # built from. Reading configs allocates nothing on the device, so
+        # loading them all first leaves the creation order below unchanged.
+        if self.spec.bind is not None:
+            self.spec = self.spec.bind(self.spec, node_cfgs)
+        # The LUT text-encoder prepends its configured bos-token on every
+        # setData, and a prompt reaches it as one segment per stretch of text
+        # around each image. That is left as the bundle declares it — the
+        # spec's template writes no BOS of its own, usage counts the SDK's,
+        # and the repetition is reported here rather than removed.
+        self.text_encoder_bos = _text_encoder_bos(node_cfgs)
+        if self.text_encoder_bos is not None:
+            logger.warning(
+                f"[{name}] text-encoder context.bos-token={self.text_encoder_bos}: "
+                "libGenie prepends that token to every text segment, and a prompt "
+                "is fed as one segment per stretch of text around each image, so "
+                "a prompt with N images carries it N+1 times. Left as the bundle "
+                "declares it; drop bos-token from the text-encoder config to keep "
+                "only the BOS the model's chat format itself has, if any.")
+        self.spec = replace(self.spec,
+                            text_encoder_adds_bos=self.text_encoder_bos is not None)
+        built = {}
+        for node_key in node_keys:
+            built[node_key] = genie_node.Node(node_cfgs[node_key], log_handle=log_handle)
         nodes = {k: built[k] for k in self.spec.node_config_files}
         self.tokenizer = _load_pipeline_tokenizer(node_cfgs)
         # Baked into the context binaries at export time, so the config's
@@ -453,6 +492,27 @@ def count_vision_tokens(spec, segments: list) -> int:
     return steps * spec.vision_tokens_per_step
 
 
+def count_text_encoder_bos(vslot, segments: list) -> int:
+    """The BOS tokens libGenie adds to this request on its own: one per text
+    segment when the text-encoder config names a bos-token
+    (VLMSlot.text_encoder_bos). The host tokenizer never sees them, so usage
+    and the budget have to add them."""
+    if vslot.text_encoder_bos is None:
+        return 0
+    return sum(1 for kind, _ in segments if kind == "text")
+
+
+def count_prompt_tokens(vslot, segments: list) -> int:
+    """What the text-generator is prefilled with for this request, on the
+    same basis as a text slot's Slot.count_prompt_tokens: every text segment
+    as the spec rendered it — chat-template markers included, each segment
+    tokenized on its own because that is how the text-encoder receives it —
+    plus the vision tokens and the BOS the text-encoder adds per segment."""
+    text = sum(vslot.count_tokens(v) for kind, v in segments if kind == "text")
+    return (text + count_vision_tokens(vslot.spec, segments)
+            + count_text_encoder_bos(vslot, segments))
+
+
 def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
                   video_meta: dict, guard: bool = False) -> list:
     """Builds the spec's text/step segment list, and — when `guard` is on —
@@ -505,9 +565,10 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
         return segments
 
     per_step = spec.vision_tokens_per_step
-    # The template-inclusive text, which is what actually reaches the
-    # tokenizer — more than the raw prompt text `usage` counts as text.
-    text_tokens = vslot.count_tokens("".join(v for k, v in segments if k == "text"))
+    # The rendered text segments and the text-encoder's BOS: everything the
+    # text-generator is prefilled with besides the vision tokens, on the same
+    # basis usage reports.
+    text_tokens = count_prompt_tokens(vslot, segments) - steps * per_step
     reserve = vslot.max_tokens or UNCAPPED_GENERATION_RESERVE
     # The ceiling is the whole context, because that is where the wedge is:
     # a prompt of 4096 still answers (with nothing), 4097 poisons the slot.

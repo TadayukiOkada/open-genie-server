@@ -291,7 +291,7 @@ def prompt_tokens_over_context(slot: Slot, prompt_text: str) -> tuple[int, int] 
     context_size = slot.context_size
     if not context_size:
         return None
-    n = slot.count_tokens(prompt_text)
+    n = slot.count_prompt_tokens(prompt_text)
     return (n, context_size) if n >= context_size else None
 
 
@@ -308,6 +308,6 @@ def default_max_tokens(slot: Slot, prompt_text: str, max_tokens: int | None,
         return max_tokens
     context_size = slot.context_size
     if context_size:
-        remaining = max(context_size - slot.count_tokens(prompt_text), 1)
+        remaining = max(context_size - slot.count_prompt_tokens(prompt_text), 1)
         return min(remaining, extra_cap) if extra_cap > 0 else remaining
     return extra_cap if extra_cap > 0 else None

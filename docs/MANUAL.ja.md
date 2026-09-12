@@ -891,6 +891,15 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 | `gemma` | `<bos><start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n` | **不可**(systemは最初のuserターンに融合) |
 | `gemma4` | `<bos><\|turn>system\n...<turn\|>\n<\|turn>user\n...<turn\|>\n<\|turn>model\n` | 可能(system が独立したターンのため) |
 
+> **先頭の BOS は、SDK が付けないときだけ書きます。** `genie_config.json` の
+> `dialog.context.bos-token` を持つバンドルでは、libGenie が毎回のクエリの先頭にそのトークンを
+> 自分で付けます(LUT 埋め込みのバンドルでは LUT エンコーダが付ける)。そのスロットではサーバは
+> テンプレート自身の `<bos>` / `<|begin_of_text|>` / 最初の `<s>` を書きません。両方が書くと
+> gemma4 のプロンプトの先頭に2つ入っていました — SDK の verbose ログで `[2, 2, 105, …]`。
+> バンドルの設定は変えず、起動ログに `sdk-bos=<id>` として出します。チャット形式に無いトークンを
+> `bos-token` にしているバンドル(Qwen3 のエクスポートは `<|endoftext|>`)では、そのトークンが毎回
+> 先頭に入ったままです。それはバンドルの宣言なので、サーバは取り除きません。
+
 > **なぜ gemma4 を別系統にしているか。** Gemma 2/3 との違いが2つあり、どちらも実害があります:
 >
 > 1. **ターンの区切りが `<\|turn>` と `<turn\|>`(ID 105 と 106)** で、
@@ -940,6 +949,14 @@ HIT:  GenieDialog_reset → GenieDialog_restore → query(remaining, SENTENCE_EN
 ```
 
 通常の`/v1/chat/completions`/`/v1/completions`でのMISS時は**キャッシュへの書き込みは行われません** — 単にfull_promptを1回の`SENTENCE_COMPLETE`クエリとして実行するだけです(`engine.py` の共通生成パス。キャッシュ対象外のリクエストと同じ経路)。上記のBEGIN+`GenieDialog_save`の2段階プライミングは、明示的に`POST /v1/prefix/warmup`を呼んだ場合のみ実行されます。その後、同じprefixに一致するリクエストが来ればHITします。
+
+> **LUT 埋め込みのバンドルでは、HIT のプロンプトに2個目の BOS が入ります。** libGenie の LUT
+> エンコーダは、sentence code に関係なく渡された文字列の先頭にバンドルの `bos-token` を置くので、
+> HIT の `SENTENCE_END` の続きにも付き、モデルには `[BOS, system…, BOS, user…]` が入ります —
+> gemma4 で SDK の verbose ログを見た実測では、ウォームアップした prefix が `[2, 105, 9731, …]`、
+> 続きが `[2, 105, 2364, …]` でした。埋め込みを context binary の中に持つバンドルではこうならず、
+> SDK が BOS を足すのは `SENTENCE_COMPLETE` / `BEGIN` / `REWIND` のときだけです。SDK の挙動なので
+> サーバはそのまま見えるようにしており、HIT のときの `usage.prompt_tokens` はこの2個目を数えません。
 
 ### コストと損益分岐
 
@@ -1103,9 +1120,24 @@ Qwen3-VLのような画像入力モデルに対応する。**テキスト専用�
 `genie_server/vlm_specs.py`の`VLMSpec.static_tensor_files`)。`device_id`が指定されている場合、`Slot`と
 同じ仕組み(`slots.pin_htp_device`)で各ノードのHTP拡張設定を書き換えてNSPピン留めする。
 
-`spec`は`vlm_specs.VLM_SPECS`のキー(既定・現状唯一の実装は`"qwen3_vl"`)。別モデル/別
+`spec`は`vlm_specs.VLM_SPECS`のキーで、`"qwen3_vl"`(既定)か`"gemma4"`。別モデル/別
 解像度エクスポートに対応する場合は`genie_server/vlm_specs.py`に新しい`VLMSpec`を追加登録する
 (GenieXの`core/` vs `models/*.h`分離と同じ発想 — このファイル以外は変更不要)。
+
+**`"gemma4"`**はGemma 4 のLMMバンドルが持つノード設定3つ(`image-encoder.json`、`text-encoder.json`、
+`text-generator.json`)を読み、`sample_inputs/`は要らない。エンコーダの位置IDとプーリングの
+インデックスは、`image-encoder.json`の`vision-param`からデバイス側で作られる。この設定はノード生成時に
+1回だけ読まれるので、**パッチの格子は画像ごとではなくスロットごとに固定**になる。Gemma 4 自身の
+プロセッサは画像ごとに格子を選ぶが、ここではどの画像も縦横比に関係なく`height` × `width`パッチ
+(1パッチ16 px)に拡縮する。入力に合う格子を`vision-param`に書くこと(16:9 なら`36` × `63`)。
+`height` × `width`はエンコーダのエクスポート時の上限 2,520 パッチ以下、どちらも`pooling-kernel-size`の
+倍数でなければならない。画像1枚は`height` × `width` / `pooling-kernel-size`² トークン(39 × 60 で 260)。
+`video_url`は受け付けない。per-layer 埋め込みテーブルと、QAT エクスポートのチャネルごとの
+scale/offset ファイルも、他のパスと同様に`model_root`基準で解決する(テキストスロットの
+`genie_config.json`でも同じ)。バンドルの`text-encoder.json`が`context.bos-token`を持つと、libGenie は
+**テキストの区切りごとに**それを先頭に付けるので、画像 N 枚のプロンプトには N+1 個入る。サーバはそれを
+バンドルの宣言どおりに残し、自分では`<bos>`を書かず、その数を`usage`に含め、起動時に警告を出す。
+Gemma 4 のチャット形式どおり`<bos>`を1つにしたいなら、そこから`bos-token`を外すこと。
 
 ### スロット生成順(`SLOT_LOAD_ORDER`)
 
@@ -1348,6 +1380,29 @@ VLM slot 'vision' ready: model=qwen3-vl device_id=0 spec=qwen3_vl max-num-tokens
 実際に生成された数なので、`max_tokens`が無視される以上、クライアントが要求した値を
 超えることがある。
 
+### Gemma 4: テキストスロットと VLM スロットの違い
+
+Gemma 4 の LMM バンドルはどちらとしても読めます — テキストスロットなら`genie_config.json`、VLM スロットならノード設定3つを使います。2つの経路の違いは画像入力だけではありません。同じバンドルを両方で同時に載せるとテキスト生成部を2つ抱えることになり、これは測っていません。
+
+| | `TEXT_SLOTS` | `VLM_SLOTS`(`"spec": "gemma4"`) |
+|---|---|---|
+| バンドルから読むもの | `genie_config.json`(テキスト専用バンドルのもの、または LMM バンドル自身のもの) | `image-encoder.json`、`text-encoder.json`、`text-generator.json` |
+| 入力 | テキスト | テキストと`image_url`。`video_url`は400で拒否 |
+| 会話 | `messages`の履歴全体を`gemma4`テンプレートで展開 | system メッセージと**最後の** system 以外のメッセージだけ。毎回リセットしたパイプラインから始まる |
+| 送られてきた文字列 | そのまま使う | system とテキストの前後の空白を削る(Gemma 4 のチャットテンプレートどおり) |
+| 先頭の BOS | 1つ: `dialog.context.bos-token`があれば SDK が付け、無ければテンプレートが書く | text-encoder に`bos-token`があれば SDK が**テキストの区切りごとに**付け(画像 N 枚 → N+1 個)、テンプレートは書かない。無ければテンプレートが1つ書く |
+| 画像の解像度 | — | スロットごとに1つのパッチ格子(`vision-param`)。どの画像もそこへ拡縮する |
+| `max_tokens`、`stop` | リクエストごと | スロットごと(`VLM_SLOTS[].max_tokens`)。リクエストの値は無視 |
+| `tools` | gemma4 独自のツール呼び出し方言 | 無視 |
+| `logprobs` | 使える | 400 |
+| クライアントの切断 | 生成を中断する | 生成は最後まで走る |
+| Prefix KV キャッシュ | system ターン。LUT 埋め込みのバンドルでは HIT に2個目の BOS が入る | 使えない |
+| `/v1/models/switch`、LoRA、grammar | 他のテキストスロットと同じ | 使えない |
+| `GENIE_PROFILE` | 使える | 使えない |
+| `usage.prompt_tokens` | 展開したプロンプト + SDK の BOS | 展開したテキストの区切り + 区切りごとの text-encoder の BOS + 画像1枚あたり`height × width / pooling-kernel-size²` |
+
+`enable_thinking`はどちらの経路でも何も変えません。これが使う`/no_think`スイッチに gemma4 版の相当物が無いためです([チャットテンプレートの選択ルール](#チャットテンプレートの選択ルール))。
+
 ### V1のスコープ外(既知の制約)
 
 `GenieNode.h`/`GeniePipeline.h`には`GenieDialog`にある以下のAPIが**存在しない**ため、
@@ -1374,6 +1429,8 @@ VLM経路では以下がサポートされない:
 
 トークン数はモデル自身のトークナイザ(`genie_config.json` が指すパスを `tokenizers` パッケージで読み込んだもの)で数えています。この値は3か所で使われます: レスポンスの `usage`、長すぎるプロンプトを400で弾く**コンテキスト超過チェック**、そして `max_tokens` 未指定時の既定値(コンテキストサイズ − プロンプト長)です。
 
+**3つとも、SDK が自分で付ける BOS を含めて数えます。** バンドルが `bos-token` を持つと、libGenie はホストのトークナイザを通さずにそれをプロンプトの先頭に置くので([チャットテンプレートの選択ルール](#チャットテンプレートの選択ルール))、1つ足します — VLM スロットではテキストの区切りごとに1つ。以前の `prompt_tokens` は SDK が prefill した数より1少なくなっていました。
+
 **`tokenizers` が未インストールの場合、この3つとも `len(text.split())` にフォールバックします。** 単語を空白で区切る言語なら妥当な近似ですが、区切らない言語ではまったく役に立ちません。Qwen3 のトークナイザとの実測比較:
 
 | サンプル | 実際のトークン数 | `split()` | ずれ |
@@ -1394,7 +1451,7 @@ VLM経路では以下がサポートされない:
 - **`max_tokens` の既定値がコンテキストのほぼ全体になります。** 「コンテキストサイズ − プロンプトのトークン数」で計算しているため、プロンプトを過小に数えると、すでに使い切っているはずの分を生成予算として渡してしまいます。
 - **トークン数を数える下流の処理がすべて狂います。** `lm_eval` の集計や、呼び出し側が独自に載せているコスト計算・クォータ管理などが該当します。
 
-**VLMスロットもテキストスロットと同じ基準で数え、そこに導出値を足します。** composable pipeline はホスト側にトークナイザオブジェクトを公開しませんが、text-generator ノードの設定にはノード自身が使うのと同じ `tokenizer.json` のパスが書かれているため、スロットはそのファイルを直接読み込みます。`usage` のテキスト部分はテキストスロットと同じ基準になり、`tokenizers` 未導入時に空白区切りへ退避するのも同じです。
+**VLMスロットもテキストスロットと同じ基準で数え、そこに導出値を足します。** composable pipeline はホスト側にトークナイザオブジェクトを公開しませんが、text-generator ノードの設定にはノード自身が使うのと同じ `tokenizer.json` のパスが書かれているため、スロットはそのファイルを直接読み込みます。数えるのは spec が展開したテキストの区切りそのもの — テキストスロットが展開したプロンプトを数えるのと同じくチャットテンプレートのマーカーを含み、text-encoder が受け取る単位どおり区切りごとに — と、text-encoder が区切りごとに付ける BOS です。`tokenizers` 未導入時に空白区切りへ退避するのも同じです。Gemma 4 E2B の LMM バンドルに画像1枚では 286 になり、SDK の verbose ログに出る prefill(テキスト 15 + 9、BOS 2、視覚 260)とちょうど一致します。以前の版のようにリクエスト自身の語だけを数えると 271 でした。
 
 視覚部分はそもそもトークナイズできません。画像はホスト側でテキストにならず(image-encoder ノードが埋め込みを直接パイプラインへ流すため)、`GenieNode.h` にも `GeniePipeline.h` にも数を返す API がありません。そのため `prompt_tokens` には、トークナイズしたテキストに加えて**導出値** — エンコーダのステップ数 × spec の1ステップあたりトークン数(512×512 の Qwen3-VL エクスポートでは 256) — を足しています。この導出はコンテキストが実際に尽きる位置が裏付けています。context 4096 のバンドルは15ステップまで通り16ステップ目で落ちますが、これはちょうど 16 × 256 です。
 

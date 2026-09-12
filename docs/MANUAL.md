@@ -955,6 +955,17 @@ Prompt format per template:
 | `gemma` | `<bos><start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n` | **not possible** (system folded into the first user turn) |
 | `gemma4` | `<bos><\|turn>system\n...<turn\|>\n<\|turn>user\n...<turn\|>\n<\|turn>model\n` | possible (system is its own turn) |
 
+> **The leading BOS is written only when the SDK will not add one.** A bundle
+> whose `genie_config.json` names `dialog.context.bos-token` has libGenie
+> prepend that token to every query itself (on a LUT-embedding bundle, the LUT
+> encoder does it). For such a slot the server leaves out the template's own
+> `<bos>` / `<|begin_of_text|>` / first `<s>`: writing both put two in front of
+> every gemma4 prompt — `[2, 2, 105, …]` in the SDK's verbose log. The bundle's
+> setting is not changed, and the startup log shows it as `sdk-bos=<id>`. A
+> bundle whose `bos-token` is a token its chat format does not have (the Qwen3
+> exports name `<|endoftext|>`) still gets that token in front of every prompt:
+> that is what the bundle declares, and the server does not remove it.
+
 > **Why gemma4 is a separate family.** Two differences from Gemma 2/3, both
 > load-bearing:
 >
@@ -1006,6 +1017,16 @@ Warm-up (POST /v1/prefix/warmup only): GenieDialog_reset → query(prefix, SENTE
 ```
 
 A normal `/v1/chat/completions`/`/v1/completions` MISS does **not** populate the cache — it just runs the full prompt as a single `SENTENCE_COMPLETE` query (the shared generation path in `engine.py`), identical to an uncacheable request. Only an explicit `POST /v1/prefix/warmup` call runs the two-step `SENTENCE_BEGIN` + `GenieDialog_save` priming shown above; after that, later requests whose prefix matches will `HIT`.
+
+> **On a LUT-embedding bundle a hit carries a second BOS.** libGenie's LUT
+> encoder prepends the bundle's `bos-token` to whatever text it is given,
+> whatever the sentence code, so the `SENTENCE_END` remainder of a hit gets one
+> too and the model sees `[BOS, system…, BOS, user…]` — measured on gemma4 with
+> verbose SDK logging: the warmed prefix `[2, 105, 9731, …]`, the remainder
+> `[2, 105, 2364, …]`. A bundle whose embedding lives inside the context binary
+> does not do this: there the SDK adds its BOS only on `SENTENCE_COMPLETE`,
+> `BEGIN` and `REWIND`. It is the SDK's behaviour and the server leaves it
+> visible; `usage.prompt_tokens` on a hit does not count the second BOS.
 
 ### What it costs, and when it pays
 
@@ -1164,7 +1185,9 @@ Under `model_root`, in addition to the file set `genie-app-script.txt` expects (
 `sample_inputs/{position_ids_cos,position_ids_sin,full_attention_mask,window_attention_mask}.raw`
 for positional encoding/attention masks (loaded once at startup assuming a fixed resolution, then reused for every subsequent request — see `VLMSpec.static_tensor_files` in `genie_server/vlm_specs.py`). When `device_id` is given, each node's HTP extension config is rewritten for NSP pinning using the same mechanism as `Slot` (`slots.pin_htp_device`).
 
-`spec` is a key into `vlm_specs.VLM_SPECS` (the default, and currently only implemented, value is `"qwen3_vl"`). To support a different model or a different resolution export, register a new `VLMSpec` in `genie_server/vlm_specs.py` (the same idea as GenieX's `core/` vs `models/*.h` split — no other file needs to change).
+`spec` is a key into `vlm_specs.VLM_SPECS`: `"qwen3_vl"` (the default) or `"gemma4"`. To support a different model or a different resolution export, register a new `VLMSpec` in `genie_server/vlm_specs.py` (the same idea as GenieX's `core/` vs `models/*.h` split — no other file needs to change).
+
+**`"gemma4"`** takes the three node configs a Gemma 4 LMM bundle ships (`image-encoder.json`, `text-encoder.json`, `text-generator.json`) and no `sample_inputs/`: the encoder's position ids and pooling index are computed on the device from `vision-param` in `image-encoder.json`. That block is read once, when the node is created, so **the patch grid is fixed per slot, not per image**. Every image is resized to `height` × `width` patches of 16 px whatever its aspect ratio, where Gemma 4's own processor would pick a grid per image; set `vision-param` to the grid that suits your input (for 16:9, `36` × `63`). `height` × `width` must not exceed the 2,520 patches the encoder was exported with, and both must be multiples of `pooling-kernel-size`. One image costs `height` × `width` / `pooling-kernel-size`² tokens (260 for 39 × 60). `video_url` parts are refused. The per-layer embedding tables, and the per-channel scale/offset files of a QAT export, are resolved against `model_root` like every other path — for a text slot's `genie_config.json` as well. If the bundle's `text-encoder.json` names a `context.bos-token`, libGenie prepends it to **every text segment**, so a prompt with N images carries it N+1 times; the server leaves that as declared, writes no `<bos>` of its own, counts those tokens in `usage`, and logs a warning at startup. Omit `bos-token` there to get the single `<bos>` Gemma 4's chat format has.
 
 ### Slot creation order (`SLOT_LOAD_ORDER`)
 
@@ -1355,6 +1378,29 @@ truncation is reported through `finish_reason`, not as an error. Note that
 `usage.completion_tokens` reflects what was actually generated, which for a VLM request
 may exceed the `max_tokens` the client asked for, since that value is ignored.
 
+### Gemma 4: text slot vs VLM slot
+
+A Gemma 4 LMM bundle can be loaded either way — as a text slot through its `genie_config.json`, or as a VLM slot through its three node configs — and the two paths differ in more than image input. Loading one bundle both ways at once holds its text generator twice; that has not been measured.
+
+| | `TEXT_SLOTS` | `VLM_SLOTS` with `"spec": "gemma4"` |
+|---|---|---|
+| Reads from the bundle | `genie_config.json` (a text-only bundle's, or an LMM bundle's own) | `image-encoder.json`, `text-encoder.json`, `text-generator.json` |
+| Input | text | text and `image_url`; `video_url` is refused with a 400 |
+| Conversation | the whole `messages` history, rendered with the `gemma4` template | the system message and the **last** non-system message only; every request starts from a reset pipeline |
+| Text as sent | used as is | system and text parts trimmed, as Gemma 4's chat template does |
+| Leading BOS | one: the SDK's when `dialog.context.bos-token` is set, otherwise the template's | text-encoder `bos-token` set: the SDK adds one **per text segment** (N images → N+1) and the template writes none; unset: the template writes one |
+| Image resolution | — | one patch grid per slot (`vision-param`); every image is resized to it |
+| `max_tokens`, `stop` | per request | per slot (`VLM_SLOTS[].max_tokens`); the request's values are ignored |
+| `tools` | gemma4's own tool-call dialect | ignored |
+| `logprobs` | supported | 400 |
+| Client disconnect | aborts the generation | the generation runs to completion |
+| Prefix KV cache | the system turn; on a LUT-embedding bundle a hit carries a second BOS | not available |
+| `/v1/models/switch`, LoRA, grammar | as for any text slot | not available |
+| `GENIE_PROFILE` | supported | not available |
+| `usage.prompt_tokens` | the rendered prompt + the SDK's BOS | the rendered text segments + the text-encoder's BOS per segment + `height × width / pooling-kernel-size²` per image |
+
+`enable_thinking` changes nothing on either path: the `/no_think` switch it drives has no gemma4 equivalent (see [Chat Template Selection Rules](#chat-template-selection-rules)).
+
 ### Out of scope for V1 (known limitations)
 
 `GenieNode.h`/`GeniePipeline.h` **don't have** the following APIs that `GenieDialog` has, so the VLM path doesn't support:
@@ -1372,6 +1418,8 @@ Every endpoint, grouped by purpose, lives in **[API.md](./API.md)** — request 
 ## Token counting
 
 Token counts come from the model's own tokenizer, loaded from the path in `genie_config.json` with the `tokenizers` package. They feed three things: the `usage` numbers in a response, the context-overflow check that rejects an oversized prompt with a 400, and the default `max_tokens` when a request does not specify one (context size minus prompt length).
+
+**All three include the BOS the SDK adds on its own.** When the bundle names a `bos-token`, libGenie puts it in front of the prompt without the host tokenizer ever seeing it (see [Chat Template Selection Rules](#chat-template-selection-rules)), so the count adds one — on a VLM slot, one per text segment. Before this the reported `prompt_tokens` was one short of what the SDK prefilled.
 
 **Without `tokenizers` installed, all three fall back to `len(text.split())`.** That is a reasonable approximation for text that separates words with spaces and a useless one for text that does not. Measured against the Qwen3 tokenizer:
 
@@ -1393,7 +1441,7 @@ The consequences go beyond wrong `usage` numbers:
 - **The default `max_tokens` becomes almost the whole context.** It is computed as context size minus prompt tokens, so undercounting the prompt leaves a budget the prompt has already spent.
 - **Anything downstream that meters tokens is wrong**, including `lm_eval` accounting and any per-request cost or quota tracking a caller layers on top.
 
-**VLM slots count the same way text slots do, plus one derived half.** The composable pipeline gives the host no tokenizer object, but the text-generator node's config names the same `tokenizer.json` the node itself tokenizes with, so the slot loads that file directly and the text half of `usage` is on the same basis as a text slot's — with the same `tokenizers`-not-installed fallback to whitespace.
+**VLM slots count on the same basis as text slots, plus one derived half.** The composable pipeline gives the host no tokenizer object, but the text-generator node's config names the same `tokenizer.json` the node itself tokenizes with, so the slot loads that file directly and counts each text segment exactly as the spec rendered it — chat-template markers included, as a text slot counts its rendered prompt, and each segment on its own, since that is how the text-encoder receives it — plus the BOS the text-encoder adds per segment, with the same `tokenizers`-not-installed fallback to whitespace. On a Gemma 4 E2B LMM bundle with one image this comes to 286, exactly the prefill the SDK's verbose log shows (15 + 9 text, 2 BOS, 260 vision); counting only the request's own words, as earlier versions did, gave 271.
 
 The visual half cannot be tokenized at all: the image never becomes text on the host (the image-encoder node emits embeddings straight into the pipeline), and neither `GenieNode.h` nor `GeniePipeline.h` hands the count back. `prompt_tokens` therefore adds a **derived** figure — encoder steps x the spec's tokens per step (256 for the 512x512 Qwen3-VL export) — to the tokenized text. The derivation is confirmed by where the context actually runs out: the 4096-context bundle takes 15 steps and fails on the 16th, which is exactly 16 x 256.
 

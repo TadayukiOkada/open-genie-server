@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased — Gemma 4 QAT bundles, and Gemma 4 image input
+
+### Added
+
+- **The `"gemma4"` VLM spec.** A Gemma 4 LMM bundle (image encoder, LUT text
+  encoder, text generator) as a `VLM_SLOTS` entry. The encoder's position ids
+  and pooling index are made on the device from `vision-param`, which the
+  node reads once at creation, so **the patch grid is fixed per slot rather
+  than chosen per image** as Gemma 4's own processor does: every image is
+  resized to that grid. `video_url` parts are refused. A `bos-token` in the
+  bundle's text-encoder config is left as declared: libGenie then prepends it
+  to every text segment, which is logged at startup and counted in `usage`,
+  and the template writes no BOS of its own. See
+  [MANUAL.md](MANUAL.md#configuration-1).
+
+### Fixed
+
+- **Per-channel-quantized embedding tables load from outside their
+  directory.** A PCQ table — what the Gemma 4 QAT exports ship — names
+  `quant-param.scale` and `quant-param.offset` as `.bin` paths, and the SDK
+  opens them relative to the working directory. Only `lut-path` was
+  resolved, so such a bundle failed to load unless the server ran from
+  inside it. Now resolved for text slots (`dialog.embedding`,
+  `dialog.perlayer-embedding`) and VLM node configs alike, where the
+  per-layer tables (`perlayer-lut`, `perlayer-embedding`) had not been
+  resolved at all.
+- **A chat template no longer writes a BOS the SDK already adds.** When a
+  bundle's dialog context names `bos-token`, libGenie prepends that token to
+  every query, and the `gemma4`, `gemma`, `llama3` and `llama2` templates
+  wrote their own on top: a gemma4 prompt reached the model as
+  `[2, 2, 105, …]` (the SDK's verbose log). The template's BOS is now left out
+  for such a slot; the bundle itself is not changed. `usage.prompt_tokens` —
+  and the context check and default `max_tokens` built on the same count —
+  now includes the BOS the SDK adds, which it was one short of. On a
+  LUT-embedding bundle the SDK also puts a BOS in front of a prefix-cache
+  hit's remainder; that is documented under Prefix KV Cache and left as it is.
+- **A VLM slot's `usage.prompt_tokens` counts the prompt as rendered.** Its
+  text half used to be the request's own words, chat-template markers left
+  out — while a comment claimed that matched the text path, which has always
+  counted its rendered prompt. It now counts each text segment the spec
+  renders, markers included, plus the vision tokens and the text-encoder's
+  BOS, so both kinds of slot report what the SDK prefills. The budget guard
+  counts the same way.
+
+### Documentation
+
+- **Gemma 4 on a text slot and on a VLM slot**, side by side: what each reads
+  from the bundle, how the prompt is built, which request fields apply, and
+  how tokens are counted. See
+  [MANUAL.md](MANUAL.md#gemma-4-text-slot-vs-vlm-slot).
+
+### For `VLMSpec` authors
+
+`VLMSpec` gains two optional fields: `max_patches` (the row count
+`pixel_values` is zero-padded to) and `bind(spec, node_cfgs)`, called with
+every node config loaded but before any node is created, so a spec can read
+what the bundle was exported with and adjust the configs. The slot now loads
+all node configs before creating the first node; the creation order itself is
+unchanged. `text_encoder_adds_bos` is set by the slot from the loaded
+text-encoder config, for a template that has a BOS of its own to leave out.
+
 ## 1.1.0 — video as frames, and a prompt count that includes them
 
 A VLM request could already carry several images, but each one spent a whole
