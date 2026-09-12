@@ -784,22 +784,31 @@ def vlm_video_body(ctx, n_frames, **extra):
 
 
 def t_vlm_video(ctx):
-    """A video part answers, and costs half the context the same frames would
-    as separate images: the ViT takes temporal_patch_size frames per step, so
-    6 frames are 3 steps at 256 tokens each rather than 6."""
-    six = ctx.post_json("/v1/chat/completions", vlm_video_body(ctx, 6))
-    content = six["choices"][0]["message"]["content"] or ""
-    if not content.strip():
-        raise CheckFailure("empty response to a video request")
+    """A video part answers, and every frame is counted: two more frames add
+    the same prompt tokens each time. How many depends on the spec -- qwen3_vl
+    packs two frames into one 256-token step, gemma4 gives each frame its own
+    step at the slot's grid -- so the check is that the cost is linear and
+    large enough to be vision tokens, not a number one spec happens to have."""
+    usage, content = {}, ""
+    for n in (2, 4, 6):
+        r = ctx.post_json("/v1/chat/completions", vlm_video_body(ctx, n))
+        if n == 6:
+            content = r["choices"][0]["message"]["content"] or ""
+            if not content.strip():
+                raise CheckFailure("empty response to a video request")
+        usage[n] = r["usage"]["prompt_tokens"]
 
-    two = ctx.post_json("/v1/chat/completions", vlm_video_body(ctx, 2))
-    delta = six["usage"]["prompt_tokens"] - two["usage"]["prompt_tokens"]
-    if delta != 2 * 256:
+    first, second = usage[4] - usage[2], usage[6] - usage[4]
+    # The frames' timestamps are text and may tokenize a little differently
+    # as the clock ticks over; that is what the slack is for. 64 tokens per
+    # two frames is more than any spec's markers alone, so a count that
+    # dropped the vision tokens still fails.
+    if first < 64 or abs(second - first) > 4:
         raise CheckFailure(
-            f"6 frames minus 2 frames should be 2 steps = 512 prompt tokens, "
-            f"got {delta} ({six['usage']} vs {two['usage']})")
-    return (f"6 frames = {six['usage']['prompt_tokens']} prompt tokens, "
-            f"response={content[:60]!r}")
+            f"2 -> 4 -> 6 frames should add the same prompt tokens each time, "
+            f"at least 64: got +{first} then +{second} ({usage})")
+    return (f"2/4/6 frames = {usage[2]}/{usage[4]}/{usage[6]} prompt tokens "
+            f"(+{first}, +{second}), response={content[:60]!r}")
 
 
 def t_vlm_video_budget(ctx):
@@ -812,8 +821,8 @@ def t_vlm_video_budget(ctx):
     if not ctx.cfg.get("vlm", {}).get("budget_guard"):
         raise SkipTest("vlm.budget_guard not configured (server-side "
                        "VLM_VISION_BUDGET_GUARD is off by default)")
-    # 64 frames = 32 steps = 8192 vision tokens: past any context this
-    # bundle family is exported with.
+    # 64 frames is 32 qwen3_vl steps (8192 vision tokens) or 64 gemma4 steps:
+    # past any context these bundles are exported with.
     r = ctx.call("POST", "/v1/chat/completions", body=vlm_video_body(ctx, 64))
     if r.status_code != 400:
         raise CheckFailure(f"oversized video -> HTTP {r.status_code}, want 400")
@@ -1174,7 +1183,7 @@ TESTS = [
     ("V03", "VLM stream matches sync",           t_vlm_stream_matches_sync),
     ("V04", "VLM stream usage accounting",       t_vlm_stream_usage),
     ("V05", "VLM slot recovers after disconnect", t_vlm_disconnect),
-    ("V06", "VLM video chat (frames packed per step)", t_vlm_video),
+    ("V06", "VLM video chat (every frame counted)", t_vlm_video),
     ("V07", "VLM vision budget guard refuses 400",  t_vlm_video_budget),
     ("G01", "grammar: JSON Schema",             t_grammar_json_schema),
     ("G02", "grammar: FSM reset between queries", t_grammar_repeat_reset),
