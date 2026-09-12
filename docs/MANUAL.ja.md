@@ -1394,6 +1394,7 @@ Gemma 4 の LMM バンドルはどちらとしても読めます — テキス�
 | 画像の解像度 | — | スロットごとに1つのパッチ格子(`vision-param`)。どの画像もそこへ拡縮する |
 | `max_tokens`、`stop` | リクエストごと | スロットごと(`VLM_SLOTS[].max_tokens`)。リクエストの値は無視 |
 | `tools` | gemma4 独自のツール呼び出し方言 | 無視 |
+| `stream: true` | トークンごと。ただし `tools` を付けたリクエストは応答を丸ごとバッファし、最後にまとめて届く([API](./API.ja.md#post-v1chatcompletions)) | トークンごと(`tools` を無視するのでバッファしない) |
 | `logprobs` | 使える | 400 |
 | クライアントの切断 | 生成を中断する | 生成は最後まで走る |
 | Prefix KV キャッシュ | system ターン。LUT 埋め込みのバンドルでは HIT に2個目の BOS が入る | 使えない |
