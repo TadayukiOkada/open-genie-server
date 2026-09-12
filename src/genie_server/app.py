@@ -631,7 +631,7 @@ def create_app(state: ServerState) -> FastAPI:
                         request_id, model_name, "", finish_reason=reason),
                     preamble=preamble,
                     include_usage=_include_usage(body),
-                    prompt_tokens=slot.count_tokens(prompt),
+                    prompt_tokens=slot.count_prompt_tokens(prompt),
                     usage_object_type="text_completion",
                 ),
                 media_type="text/event-stream")
@@ -653,7 +653,7 @@ def create_app(state: ServerState) -> FastAPI:
                 state.lib, slot, QueryPlan(full_prompt=prompt), req_params, gen,
                 None, cfg.inference_timeout_s, collector=collector)
             text = await _collect_or_raise(gen, state)
-            total_pt += slot.count_tokens(prompt)
+            total_pt += slot.count_prompt_tokens(prompt)
             total_ct += gen.completion_tokens
             choices.append({
                 "text": (prompt + text) if echo else text,
@@ -712,15 +712,14 @@ def create_app(state: ServerState) -> FastAPI:
 
         request_id = f"chatcmpl-{uuid.uuid4()}"
         # Counted before the stream branch so both paths report the same
-        # prompt_tokens. Two halves, because they are known two different
-        # ways: the request's own text through the tokenizer (chat-template
-        # markers excluded, as on the text path), plus the visual input
-        # derived from the step count — the pipeline never reports that one
-        # back, and leaving it out understated a 28-frame request's prompt by
-        # 3584 tokens while reporting the same 20 as a 10-frame one.
-        prompt_text = system_text + "".join(p[1] for p in parts if p[0] == "text")
-        prompt_tokens = (vslot.count_tokens(prompt_text)
-                         + vlm.count_vision_tokens(vslot.spec, segments))
+        # prompt_tokens, and on the text path's basis: what is prefilled. The
+        # rendered text segments through the tokenizer (chat-template markers
+        # included, as a text slot counts its rendered prompt), the visual
+        # input derived from the step count — the pipeline never reports that
+        # one back, and leaving it out understated a 28-frame request's prompt
+        # by 3584 tokens while reporting the same 20 as a 10-frame one — and
+        # the BOS the text-encoder adds per segment. See vlm.count_prompt_tokens.
+        prompt_tokens = vlm.count_prompt_tokens(vslot, segments)
         gen = Generation(request_id, vslot, state.lib)
         vlm.start_vlm_generation(state.lib, vslot, segments, images,
                                  params, gen)
@@ -824,7 +823,8 @@ def create_app(state: ServerState) -> FastAPI:
         } if (tools and cfg.tool_call_recovery) else None
         prefix_prompt, query_prompt, cacheable = \
             templates.split_prompt_for_prefix_cache(msgs, slot.chat_template,
-                                                    slot.tool_format)
+                                                    slot.tool_format,
+                                                    bos=slot.sdk_bos_token is None)
         full_prompt = prefix_prompt + query_prompt if cacheable else query_prompt
         _require_context_room(slot, full_prompt)
         params.max_tokens = engine.default_max_tokens(
@@ -855,7 +855,7 @@ def create_app(state: ServerState) -> FastAPI:
                     tool_filter=slot.tool_format.stream_filter(known_tool_names)
                     if tools else None,
                     include_usage=_include_usage(body),
-                    prompt_tokens=slot.count_tokens(full_prompt),
+                    prompt_tokens=slot.count_prompt_tokens(full_prompt),
                 ),
                 media_type="text/event-stream")
 
@@ -869,7 +869,7 @@ def create_app(state: ServerState) -> FastAPI:
                 finish_reason = "tool_calls"
         return protocol.chat_response(
             request_id, model_name, text, finish_reason,
-            slot.count_tokens(full_prompt), gen.completion_tokens,
+            slot.count_prompt_tokens(full_prompt), gen.completion_tokens,
             tool_calls=tool_calls,
             logprobs=logprobs_mod.chat_logprobs(slot.tokenizer, collector.results)
             if collector is not None else None)
@@ -977,7 +977,7 @@ def create_app(state: ServerState) -> FastAPI:
             [{"role": "system", "content": system_prompt}],
             enable_thinking=enable_thinking)
         prefix_prompt, _, cacheable = templates.split_prompt_for_prefix_cache(
-            messages, slot.chat_template)
+            messages, slot.chat_template, bos=slot.sdk_bos_token is None)
         if not cacheable or not prefix_prompt:
             # Name the actual reason for this template — quoting Llama2's
             # would just misdirect someone debugging a Gemma slot.

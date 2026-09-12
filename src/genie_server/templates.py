@@ -124,15 +124,23 @@ def _render_chatml_message(m: dict, tool_format=None) -> str:
     return f"<|im_start|>{role}\n{content}<|im_end|>\n"
 
 
-def render_chat_prompt(messages: list, template: str, tool_format=None) -> str:
+def render_chat_prompt(messages: list, template: str, tool_format=None,
+                       bos: bool = True) -> str:
     """Formats a prepared messages array into a prompt string ending with the
     assistant generation header.
 
     tool_format decides how an assistant turn's tool_calls are rendered back
     into the prompt; it defaults to Hermes, which is what every template here
-    except gemma4 expects."""
+    except gemma4 expects.
+
+    bos=False leaves out the BOS the template would otherwise open with
+    (`<bos>`, `<|begin_of_text|>`, llama2's first `<s>`). Pass it when the
+    bundle's dialog context names a bos-token: libGenie then prepends that
+    token to every query itself, and writing it here as well puts two in
+    front of the prompt (measured on gemma4, where the SDK prefilled
+    [2, 2, 105, ...]). Either way the bundle's own setting is left as it is."""
     if template == "llama3":
-        out = "<|begin_of_text|>"
+        out = "<|begin_of_text|>" if bos else ""
         for m in messages:
             role = m.get("role", "user")
             content = m.get("content", "")
@@ -157,13 +165,13 @@ def render_chat_prompt(messages: list, template: str, tool_format=None) -> str:
                 sys_c = ""
             elif r == "assistant":
                 out += f" {c} </s>"
-        return out
+        return out if bos else out.removeprefix("<s>")
 
     if template == "gemma":
         # Gemma 2/3 family. There is no system role: per Google's own chat
         # template, system text is prepended to the first user turn. The
         # assistant role is named "model".
-        out, sys_c = "<bos>", ""
+        out, sys_c = ("<bos>" if bos else ""), ""
         for m in messages:
             r, c = m.get("role", "user"), m.get("content", "")
             if r == "system":
@@ -188,7 +196,7 @@ def render_chat_prompt(messages: list, template: str, tool_format=None) -> str:
         #    turn. Google's template opens <|turn>system, and tool
         #    declarations live inside that same turn.
         fmt = tool_format or tool_formats.HermesToolFormat
-        out = "<bos>"
+        out = "<bos>" if bos else ""
         for m in messages:
             r, c = m.get("role", "user"), m.get("content", "")
             if r == "assistant" and m.get("tool_calls"):
@@ -212,30 +220,31 @@ def render_chat_prompt(messages: list, template: str, tool_format=None) -> str:
 
 
 def split_prompt_for_prefix_cache(messages: list, template: str,
-                                  tool_format=None) -> tuple[str, str, bool]:
+                                  tool_format=None,
+                                  bos: bool = True) -> tuple[str, str, bool]:
     """Returns (prefix_prompt, remaining_prompt, cacheable) for the prefix KV
     cache: the system turn is the cacheable prefix, everything after it the
     per-request remainder. Llama2/Mistral fuses system into [INST] and Gemma
     2/3 prepends it to the first user turn — neither is splittable. gemma4
     keeps system as its own turn, so it splits like chatml does."""
     if template in ("llama2", "gemma"):
-        return "", render_chat_prompt(messages, template, tool_format), False
+        return "", render_chat_prompt(messages, template, tool_format, bos), False
 
     sys_msgs = [m for m in messages if m.get("role") == "system"]
     non_sys = [m for m in messages if m.get("role") != "system"]
     if not sys_msgs:
-        return "", render_chat_prompt(messages, template, tool_format), False
+        return "", render_chat_prompt(messages, template, tool_format, bos), False
 
     sc = sys_msgs[0].get("content", "")
     if template == "gemma4":
         # gemma4 keeps system as its own turn, so unlike Gemma 2/3 it splits.
-        prefix = f"<bos><|turn>system\n{sc}<turn|>\n"
-        remaining = render_chat_prompt(non_sys, template, tool_format)[len("<bos>"):]
+        prefix = ("<bos>" if bos else "") + f"<|turn>system\n{sc}<turn|>\n"
+        remaining = render_chat_prompt(non_sys, template, tool_format, bos=False)
         return prefix, remaining, True
     if template == "llama3":
-        prefix = (f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>"
-                  f"\n\n{sc}<|eot_id|>")
-        remaining = render_chat_prompt(non_sys, template, tool_format)[len("<|begin_of_text|>"):]
+        prefix = (("<|begin_of_text|>" if bos else "")
+                  + f"<|start_header_id|>system<|end_header_id|>\n\n{sc}<|eot_id|>")
+        remaining = render_chat_prompt(non_sys, template, tool_format, bos=False)
     else:  # chatml
         prefix = f"<|im_start|>system\n{sc}<|im_end|>\n"
         remaining = render_chat_prompt(non_sys, template, tool_format)

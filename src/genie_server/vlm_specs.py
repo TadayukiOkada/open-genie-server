@@ -13,8 +13,12 @@ this module come from the QAIRT AI Hub Qwen3-VL-4B export's
 (MODELS/qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p/metadata.json)
 genie.vision_preprocessing block — for a different export/resolution, check
 that model's own metadata.json and build a new VLMSpec accordingly.
+
+The Gemma 4 spec's constants come from the model's own processor config
+(Gemma4ImageProcessor), and its patch grid from the bundle's image-encoder
+config at load time — see gemma4_bind.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import numpy as np
@@ -78,6 +82,24 @@ class VLMSpec:
     # (rather than a self-referential closure bound at dataclass
     # construction time).
     preprocess_step: Callable = field(repr=False)
+
+    # Rows pixel_values is zero-padded to, for an encoder exported with a
+    # fixed maximum and told at load time how many of them are real
+    # (Gemma 4). 0 = the input is exactly the resolution's own patch count
+    # (Qwen3-VL).
+    max_patches: int = 0
+
+    # True when the bundle's text-encoder config names a bos-token, so
+    # libGenie prepends a BOS to every text segment itself. Set by VLMSlot
+    # from the loaded config; a template with a BOS of its own leaves it out.
+    text_encoder_adds_bos: bool = False
+
+    # (spec, node_cfgs) -> VLMSpec, or None. Called once per slot with every
+    # node config loaded (paths already resolved) but before any node is
+    # created, so a spec can read what the bundle was exported with and
+    # adjust the configs it is about to be built from. The slot uses the spec
+    # it returns.
+    bind: Callable | None = field(default=None, repr=False)
 
     @property
     def vision_tokens_per_step(self) -> int:
@@ -292,6 +314,117 @@ def qwen3vl_build_prompt_segments(system_text: str, parts: list,
     return segments
 
 
+# ---------------------------------------------------------------- Gemma 4
+
+def gemma4_bind(spec: "VLMSpec", node_cfgs: dict) -> "VLMSpec":
+    """Fixes the spec to the patch grid the bundle's image-encoder config
+    names. The configs themselves are left as they are.
+
+    **The grid is per slot, not per image.** Gemma 4's own processor resizes
+    each image to the largest grid of its aspect ratio that fits the patch
+    budget (640x427 becomes 60x39 patches). On the device the encoder's
+    position ids and pooling index are computed from `vision-param` (height
+    and width in patches, pooling-kernel-size), but that block is read once,
+    when the node is created, and nothing changes it per request. So every
+    image this slot sees is resized to that one grid, stretched if its aspect
+    ratio differs; set vision-param to the grid that suits the input.
+    """
+    vision = (next(iter(node_cfgs["image_encoder"].values()))
+              .get("engine", {}).get("model", {}).get("vision-param") or {})
+    rows, cols = vision.get("height"), vision.get("width")
+    pool = vision.get("pooling-kernel-size")
+    if not all(isinstance(v, int) and v > 0 for v in (rows, cols, pool)):
+        raise ValueError(
+            "gemma4: the image-encoder config needs engine.model.vision-param "
+            "with positive integer height, width and pooling-kernel-size "
+            f"(got {vision!r})")
+    if rows % pool or cols % pool:
+        raise ValueError(
+            f"gemma4: vision-param {rows}x{cols} patches is not divisible by "
+            f"pooling-kernel-size {pool}")
+    if rows * cols > spec.max_patches:
+        raise ValueError(
+            f"gemma4: vision-param {rows}x{cols} = {rows * cols} patches "
+            f"exceeds the {spec.max_patches} the encoder takes")
+
+    return replace(spec, image_height=rows * spec.patch_size,
+                   image_width=cols * spec.patch_size, spatial_merge_size=pool)
+
+
+def gemma4_preprocess_step(images: list, payload, spec: "VLMSpec") -> np.ndarray:
+    """One image -> pixel_values (max_patches, 3 * patch * patch) float32.
+
+    What Gemma4ImageProcessor does apart from choosing the grid (see
+    gemma4_bind): bicubic resize, rescale to [0, 1] with no normalization
+    (Gemma 4 was trained on [0, 1] pixels), patches in raster order with each
+    patch flattened channels-last, zero rows out to max_patches. Compared
+    against the transformers processor's output for a 640x427 image at the
+    grid it picks (60x39): same layout, every value within one 8-bit step.
+    """
+    from PIL import Image
+
+    if len(payload) != 1:
+        raise ValueError(
+            f"step payload has {len(payload)} frames, but the gemma4 encoder "
+            "takes one image per execution")
+    patch = spec.patch_size
+    rows, cols = spec.image_height // patch, spec.image_width // patch
+    img = images[payload[0]].convert("RGB").resize(
+        (spec.image_width, spec.image_height), Image.BICUBIC)
+    x = np.asarray(img, dtype=np.float32) / 255.0                  # (H, W, 3)
+    patches = (x.reshape(rows, patch, cols, patch, 3)
+               .transpose(0, 2, 1, 3, 4)                             # r c ph pw ch
+               .reshape(rows * cols, -1))
+    out = np.zeros((spec.max_patches, patches.shape[1]), np.float32)
+    out[:rows * cols] = patches
+    return out
+
+
+def gemma4_build_prompt_segments(system_text: str, parts: list,
+                                 video_meta: dict, spec: "VLMSpec") -> list:
+    """OpenAI content parts -> Accumulator-order segments in Gemma 4's chat
+    format.
+
+    Follows the model's chat template: `<bos>` (unless the text-encoder adds
+    one to every segment itself — spec.text_encoder_adds_bos — in which case
+    the prompt carries the SDK's BOS tokens and none of ours), a system turn
+    only when there is a system message, text parts trimmed and joined with nothing between
+    them, and each image as `<|image>` + its soft tokens + `<image|>` — what
+    the processor expands the template's image placeholder into. The soft
+    tokens are the encoder's output, so the text before an image ends at
+    `<|image>` and the text after it starts at `<image|>`.
+
+    Video is refused. Gemma 4 does take video, but as frames encoded at a
+    smaller budget than still images (70 soft tokens rather than 280), each
+    after an mm:ss timestamp: a different encoder resolution from the one
+    this slot's grid is fixed to.
+    """
+    segments = []
+    buf = "" if spec.text_encoder_adds_bos else "<bos>"
+    if system_text:
+        buf += "<|turn>system\n" + system_text.strip() + "<turn|>\n"
+    buf += "<|turn>user\n"
+
+    for kind, value in parts:
+        if kind == "text":
+            buf += value.strip()
+        elif kind == "image":
+            buf += "<|image>"
+            segments.append(("text", buf))
+            segments.append(("step", (value,)))
+            buf = "<image|>"
+        elif kind == "video":
+            raise ValueError(
+                "the gemma4 VLM spec does not take video_url parts; send "
+                "still images as image_url parts")
+        else:
+            raise ValueError(f"unknown content part kind: {kind}")
+
+    buf += "<turn|>\n<|turn>model\n"
+    segments.append(("text", buf))
+    return segments
+
+
 # ---------------------------------------------------------------- registry
 
 QWEN3_VL_SPEC = VLMSpec(
@@ -335,8 +468,50 @@ QWEN3_VL_SPEC = VLMSpec(
     preprocess_step=qwen3vl_preprocess_step,
 )
 
+GEMMA4_SPEC = VLMSpec(
+    name="gemma4",
+    node_config_files={
+        "image_encoder": "image-encoder.json",
+        "text_encoder": "text-encoder.json",
+        "text_generator": "text-generator.json",
+    },
+    # No WILDCARD: the encoder's only output is the image embedding, and the
+    # position ids and pooling index it takes are made on the device.
+    connections=[
+        ("image_encoder", "IMAGE_ENCODER_EMBEDDING_OUTPUT",
+         "text_generator", "TEXT_GENERATOR_EMBEDDING_INPUT"),
+        ("text_encoder", "TEXT_ENCODER_EMBEDDING_OUTPUT",
+         "text_generator", "TEXT_GENERATOR_EMBEDDING_INPUT"),
+    ],
+    text_encoder_text_input_io="TEXT_ENCODER_TEXT_INPUT",
+    text_encoder_embedding_output_io="TEXT_ENCODER_EMBEDDING_OUTPUT",
+    image_encoder_image_input_io="IMAGE_ENCODER_IMAGE_INPUT",
+    image_encoder_embedding_output_io="IMAGE_ENCODER_EMBEDDING_OUTPUT",
+    text_generator_embedding_input_io="TEXT_GENERATOR_EMBEDDING_INPUT",
+    text_generator_text_output_io="TEXT_GENERATOR_TEXT_OUTPUT",
+    static_tensor_files={},
+    # Placeholders until gemma4_bind reads the grid from vision-param.
+    image_width=0,
+    image_height=0,
+    patch_size=16,
+    # pooling-kernel-size plays the part of the spatial merge: each k x k
+    # block of patches becomes one soft token (39x60 patches -> 260).
+    spatial_merge_size=3,
+    temporal_patch_size=1,
+    # The processor config's image_processor: rescale only, no normalization.
+    normalize_mean=(0.0, 0.0, 0.0),
+    normalize_std=(1.0, 1.0, 1.0),
+    build_prompt_segments=gemma4_build_prompt_segments,
+    preprocess_step=gemma4_preprocess_step,
+    # max_soft_tokens 280 x pooling 3**2: the encoder's input length in the
+    # E2B export (pixel_values [1, 2520, 768]).
+    max_patches=2520,
+    bind=gemma4_bind,
+)
+
 VLM_SPECS = {
     "qwen3_vl": QWEN3_VL_SPEC,
+    "gemma4": GEMMA4_SPEC,
 }
 
 

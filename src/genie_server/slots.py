@@ -42,6 +42,27 @@ def resolve_and_verify(rel: str, base: Path) -> str:
     return str(p)
 
 
+def resolve_lut_paths(lut: dict, base: Path) -> None:
+    """Resolves the files one LUT-embedding block names against base, in place.
+
+    Every such block has a lut-path. A per-channel-quantized (PCQ) table --
+    what the Gemma 4 QAT exports ship, one scale and offset per vocabulary
+    entry -- also turns quant-param.scale and quant-param.offset from numbers
+    into paths to .bin files. The SDK opens all three with a plain ifstream,
+    so a relative one resolves against the server's working directory:
+    "Embedding File not present." for the table, "PCQ scale file not found"
+    for the encodings, with the files sitting right there in the model
+    directory. A numeric scale/offset (per-tensor quantization) is left as
+    it is."""
+    if lut.get("lut-path"):
+        lut["lut-path"] = resolve_and_verify(lut["lut-path"], base)
+    quant = lut.get("quant-param")
+    if isinstance(quant, dict):
+        for key in ("scale", "offset"):
+            if isinstance(quant.get(key), str):
+                quant[key] = resolve_and_verify(quant[key], base)
+
+
 @dataclass
 class ModelAssets:
     """Everything load_model() produces for one model, before any Slot adopts
@@ -128,6 +149,22 @@ class Slot:
         if self.tokenizer is not None:
             return len(self.tokenizer.encode(text).ids)
         return len(text.split())
+
+    @property
+    def sdk_bos_token(self) -> int | None:
+        """The BOS id libGenie prepends to every query on its own, or None.
+
+        A bundle whose dialog context names a bos-token gets that token put in
+        front of each prompt by the SDK (on a LUT-embedding bundle, by the LUT
+        encoder). The chat template then must not write one too, and usage has
+        to count it, because the host tokenizer never sees it."""
+        token = self.dialog_cfg.get("context", {}).get("bos-token")
+        return token if isinstance(token, int) and token >= 0 else None
+
+    def count_prompt_tokens(self, text: str) -> int:
+        """What the SDK prefills for this prompt: count_tokens plus the BOS it
+        adds itself (sdk_bos_token)."""
+        return self.count_tokens(text) + (self.sdk_bos_token is not None)
 
 
 # ---------------------------------------------------------------- model loading
@@ -234,16 +271,14 @@ def load_dialog_config(model_dir: Path, device_id: int | None, slot_name: str,
     if isinstance(bincfg.get("ctx-bins"), list):
         bincfg["ctx-bins"] = [resolve_and_verify(b, model_dir) for b in bincfg["ctx-bins"]]
 
-    # LUT embeddings (dialog.embedding / dialog.perlayer-embedding): the SDK
-    # opens lut-path with a plain ifstream, so a relative one resolves against
-    # the server's working directory rather than the bundle -- "Embedding File
-    # not present." from LUT.cpp with the file sitting right there in the model
-    # directory. Gemma-class bundles carry these; the Qwen3 exports do not,
-    # which is why nothing needed it until now.
+    # LUT embeddings (dialog.embedding / dialog.perlayer-embedding): the table
+    # and, for a PCQ table, its quant-param files -- see resolve_lut_paths.
+    # Gemma-class bundles carry these; the Qwen3 exports do not, which is why
+    # nothing needed it until then.
     for key in ("embedding", "perlayer-embedding"):
         emb = dcfg.get(key)
-        if isinstance(emb, dict) and emb.get("lut-path"):
-            emb["lut-path"] = resolve_and_verify(emb["lut-path"], model_dir)
+        if isinstance(emb, dict):
+            resolve_lut_paths(emb, model_dir)
 
     # LoRA adapter weights (dialog.engine.model.binary.lora.adapters[].
     # bin-sections[]): same story as the LUTs and the ctx-bins -- a relative
@@ -353,7 +388,8 @@ class SlotManager:
             logger.info(
                 f"Slot '{slot.name}' ready: model={slot.active_model_id} "
                 f"device_id={slot.device_id if slot.device_id is not None else '(unpinned)'} "
-                f"template={slot.chat_template}")
+                f"template={slot.chat_template} "
+                    f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token}")
         self._by_name = {s.name: s for s in self.slots}
         self.reindex()
 
@@ -488,4 +524,5 @@ class SlotManager:
         self.reindex()
         self.lib.free_dialog(old_handle_to_free)
         logger.info(f"[{slot.name}] Model switched: model={slot.active_model_id} "
-                    f"template={slot.chat_template}")
+                    f"template={slot.chat_template} "
+                    f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token}")

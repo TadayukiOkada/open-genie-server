@@ -767,6 +767,284 @@ def test_vlm_count_tokens_uses_the_tokenizer_then_falls_back(tmp_path):
     assert slot.count_tokens("a,b c") == 2   # whitespace fallback
 
 
+# ------------------------------------------------- LUT embedding paths (PCQ)
+
+def _pcq_lut(base, prefix):
+    """A per-channel-quantized LUT block as the Gemma 4 QAT exports write it:
+    scale and offset are .bin paths, not numbers."""
+    table = base / "embedding-table"
+    table.mkdir(exist_ok=True)
+    for suffix in ("lut", "scale", "offset"):
+        (table / f"{prefix}_{suffix}.bin").write_bytes(b"\0" * 8)
+    return {"version": 1, "lut-path": f"embedding-table/{prefix}_lut.bin",
+            "size": 4, "datatype": "ufixed2",
+            "quant-param": {"scale": f"embedding-table/{prefix}_scale.bin",
+                            "offset": f"embedding-table/{prefix}_offset.bin"}}
+
+
+def test_pcq_quant_param_files_resolve_against_the_bundle(tmp_path):
+    """The SDK opens all three files relative to the working directory, so
+    resolving only lut-path left a QAT bundle loadable from nowhere but
+    inside its own directory."""
+    from genie_server.slots import resolve_lut_paths
+    lut = _pcq_lut(tmp_path, "embedding")
+    resolve_lut_paths(lut, tmp_path)
+    for path in (lut["lut-path"], lut["quant-param"]["scale"],
+                 lut["quant-param"]["offset"]):
+        assert Path(path).is_absolute() and Path(path).is_file()
+
+
+def test_per_tensor_quant_params_are_numbers_and_left_alone(tmp_path):
+    from genie_server.slots import resolve_lut_paths
+    (tmp_path / "lut.bin").write_bytes(b"\0")
+    lut = {"lut-path": "lut.bin", "quant-param": {"scale": 0.0123, "offset": -32768}}
+    resolve_lut_paths(lut, tmp_path)
+    assert lut["quant-param"] == {"scale": 0.0123, "offset": -32768}
+
+
+def test_a_missing_pcq_file_fails_the_load(tmp_path):
+    from genie_server.slots import resolve_lut_paths
+    lut = _pcq_lut(tmp_path, "embedding")
+    (tmp_path / "embedding-table" / "embedding_offset.bin").unlink()
+    with pytest.raises(FileNotFoundError, match="embedding_offset.bin"):
+        resolve_lut_paths(lut, tmp_path)
+
+
+def test_dialog_config_resolves_both_pcq_tables(tmp_path):
+    from genie_server.slots import load_dialog_config
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "genie_config.json").write_text(json.dumps({"dialog": {
+        "embedding": _pcq_lut(model_dir, "embedding"),
+        "perlayer-embedding": _pcq_lut(model_dir, "ple")}}))
+    config_json, _ = load_dialog_config(model_dir, None, "chat", tmp_path / "htpcache")
+    sent = json.loads(config_json)["dialog"]   # the bytes handed to the SDK
+    for key in ("embedding", "perlayer-embedding"):
+        assert Path(sent[key]["lut-path"]).is_absolute()
+        assert Path(sent[key]["quant-param"]["scale"]).is_absolute()
+        assert Path(sent[key]["quant-param"]["offset"]).is_absolute()
+
+
+def test_vlm_node_configs_resolve_the_per_layer_tables(tmp_path):
+    """Gemma 4's text-encoder and text-generator nodes each name a second,
+    per-layer table, which the node loader used to skip entirely."""
+    from genie_server.vlm import _load_vlm_node_config
+    enc = tmp_path / "text-encoder.json"
+    enc.write_text(json.dumps({"text-encoder": {
+        "lut": _pcq_lut(tmp_path, "embedding"),
+        "perlayer-lut": _pcq_lut(tmp_path, "ple")}}))
+    gen = tmp_path / "text-generator.json"
+    gen.write_text(json.dumps({"text-generator": {
+        "embedding": _pcq_lut(tmp_path, "embedding"),
+        "perlayer-embedding": _pcq_lut(tmp_path, "ple")}}))
+    for path, keys in ((enc, ("lut", "perlayer-lut")),
+                       (gen, ("embedding", "perlayer-embedding"))):
+        cfg = next(iter(_load_vlm_node_config(
+            path, None, "vision", "node", tmp_path / "htpcache").values()))
+        for key in keys:
+            assert Path(cfg[key]["lut-path"]).is_absolute()
+            assert Path(cfg[key]["quant-param"]["scale"]).is_absolute()
+            assert Path(cfg[key]["quant-param"]["offset"]).is_absolute()
+
+
+# ------------------------------------------------------------ gemma4 VLM spec
+
+def _gemma4_node_cfgs(height=39, width=60, pool=3):
+    """The parts of a Gemma 4 LMM bundle's node configs gemma4_bind reads."""
+    return {
+        "image_encoder": {"image-encoder": {"engine": {"model": {"vision-param": {
+            "height": height, "width": width, "pooling-kernel-size": pool}}}}},
+        "text_encoder": {"text-encoder": {"context": {
+            "version": 1, "bos-token": 2, "n-vocab": 262144, "ctx-size": 4096,
+            "embed-size": 1536, "pad-token": 0}}},
+        "text_generator": {"text-generator": {"context": {"size": 4096}}},
+    }
+
+
+def _gemma4(**grid):
+    from genie_server import vlm_specs
+    spec = vlm_specs.get_spec("gemma4")
+    cfgs = _gemma4_node_cfgs(**grid)
+    return spec.bind(spec, cfgs), cfgs
+
+
+def test_gemma4_grid_comes_from_the_bundle():
+    """39x60 patches pooled 3x3 is 260 soft tokens — what the processor gives
+    a 640x427 image, and the number usage and the budget guard both need."""
+    spec, _ = _gemma4()
+    assert (spec.image_height, spec.image_width) == (39 * 16, 60 * 16)
+    assert spec.vision_tokens_per_step == 260
+
+
+def test_gemma4_leaves_the_text_encoder_bos_as_the_bundle_declares_it():
+    """Dropping it from the config would hide what the bundle and the SDK do
+    together — a BOS in front of every text segment. The template writes no
+    BOS of its own instead."""
+    import dataclasses
+    spec, cfgs = _gemma4()
+    assert cfgs["text_encoder"]["text-encoder"]["context"]["bos-token"] == 2
+    parts = [("image", 0), ("text", "hi")]
+
+    def text(s):
+        return "".join(v for k, v in s.build_prompt_segments("", parts, {}, s)
+                       if k == "text")
+
+    assert text(spec).startswith("<bos>") and text(spec).count("<bos>") == 1
+    assert "<bos>" not in text(dataclasses.replace(spec, text_encoder_adds_bos=True))
+
+
+def test_text_encoder_bos_is_one_per_text_segment():
+    from genie_server.vlm import VLMSlot, _text_encoder_bos, count_text_encoder_bos
+    cfgs = _gemma4_node_cfgs()
+    assert _text_encoder_bos(cfgs) == 2
+    del cfgs["text_encoder"]["text-encoder"]["context"]["bos-token"]
+    assert _text_encoder_bos(cfgs) is None
+    segments = [("text", "a"), ("step", (0,)), ("text", "b"), ("step", (1,)),
+                ("text", "c")]
+    slot = VLMSlot.__new__(VLMSlot)
+    assert count_text_encoder_bos(slot, segments) == 0
+    slot.text_encoder_bos = 2
+    assert count_text_encoder_bos(slot, segments) == 3
+
+
+def test_vlm_prompt_tokens_count_the_rendered_segments_like_a_text_slot():
+    """The text half is the prompt as rendered — chat-template markers and
+    all, each segment on its own as the text-encoder gets it — not just the
+    words the client sent, which is what a text slot's count already was."""
+    from genie_server.vlm import count_prompt_tokens
+
+    class Stub:
+        spec = _spec()
+        text_encoder_bos = None
+
+        def count_tokens(self, text):
+            return len(text.split())
+
+    slot = Stub()
+    segments = slot.spec.build_prompt_segments(
+        "be brief", [("text", "what is this"), ("image", 0)], {}, slot.spec)
+    rendered = [v for k, v in segments if k == "text"]
+    expected = sum(len(v.split()) for v in rendered) + slot.spec.vision_tokens_per_step
+    assert count_prompt_tokens(slot, segments) == expected
+    assert expected > len("be brief what is this".split()) + slot.spec.vision_tokens_per_step
+    slot.text_encoder_bos = 151643
+    assert count_prompt_tokens(slot, segments) == expected + len(rendered)
+
+
+@pytest.mark.parametrize("height, width, pool, match", [
+    (40, 60, 3, "divisible"),
+    (51, 51, 3, "exceeds"),          # 2601 > 2520
+    (39, None, 3, "vision-param"),
+])
+def test_gemma4_refuses_a_grid_the_encoder_cannot_take(height, width, pool, match):
+    with pytest.raises(ValueError, match=match):
+        _gemma4(height=height, width=width, pool=pool)
+
+
+def test_gemma4_prompt_follows_the_chat_template():
+    spec, _ = _gemma4()
+    segs = spec.build_prompt_segments(
+        " Be brief. ", [("text", " What is this? "), ("image", 0)], {}, spec)
+    assert segs == [
+        ("text", "<bos><|turn>system\nBe brief.<turn|>\n<|turn>user\nWhat is this?<|image>"),
+        ("step", (0,)),
+        ("text", "<image|><turn|>\n<|turn>model\n"),
+    ]
+
+
+def test_gemma4_without_a_system_message_has_no_system_turn():
+    spec, _ = _gemma4()
+    segs = spec.build_prompt_segments("", [("image", 0)], {}, spec)
+    assert segs[0] == ("text", "<bos><|turn>user\n<|image>")
+
+
+def test_gemma4_refuses_video():
+    spec, _ = _gemma4()
+    with pytest.raises(ValueError, match="video"):
+        spec.build_prompt_segments("", [("video", [0, 1])], {}, spec)
+
+
+def test_gemma4_patches_are_raster_order_channels_last_then_zero_padded():
+    """Each patch flattened (row, col, channel) and patches row by row, as
+    Gemma4ImageProcessor lays them out; a channels-first flattening hands the
+    encoder the same numbers in the wrong places."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from PIL import Image
+    rows, cols, p = 6, 9, 16
+    spec, _ = _gemma4(height=rows, width=cols)
+    arr = np.zeros((rows * p, cols * p, 3), np.uint8)
+    for r in range(rows):
+        for c in range(cols):
+            arr[r * p:(r + 1) * p, c * p:(c + 1) * p] = (r * 10, c * 10, 200)
+    out = spec.preprocess_step([Image.fromarray(arr)], (0,), spec)
+    assert out.shape == (2520, 3 * p * p) and out.dtype == np.float32
+    for r in range(rows):
+        for c in range(cols):
+            patch = out[r * cols + c].reshape(p, p, 3)
+            assert np.allclose(patch[..., 0], r * 10 / 255)
+            assert np.allclose(patch[..., 1], c * 10 / 255)
+            assert np.allclose(patch[..., 2], 200 / 255)
+    assert not out[rows * cols:].any()
+
+
+# ------------------------------------------------- the BOS the SDK adds itself
+
+def test_template_leaves_its_bos_to_a_bundle_that_declares_one():
+    """A bundle whose dialog context names a bos-token has libGenie prepend it
+    to every query; a template writing its own as well put two in front of a
+    gemma4 prompt ([2, 2, 105, ...] in the SDK's own log)."""
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    for template, bos in (("gemma4", "<bos>"), ("gemma", "<bos>"),
+                          ("llama3", "<|begin_of_text|>"), ("llama2", "<s>")):
+        assert (templates.render_chat_prompt(msgs, template)
+                == bos + templates.render_chat_prompt(msgs, template, bos=False)), template
+    assert (templates.render_chat_prompt(msgs, "chatml", bos=False)
+            == templates.render_chat_prompt(msgs, "chatml"))
+
+
+def test_prefix_split_without_bos_still_reassembles():
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    for template in ("gemma4", "llama3", "chatml"):
+        prefix, remaining, cacheable = templates.split_prompt_for_prefix_cache(
+            msgs, template, bos=False)
+        assert cacheable
+        assert prefix + remaining == templates.render_chat_prompt(msgs, template, bos=False)
+    assert (templates.split_prompt_for_prefix_cache(msgs, "gemma4", bos=False)[0]
+            == "<|turn>system\nsys<turn|>\n")
+
+
+def test_slot_takes_the_sdk_bos_from_the_dialog_context_and_counts_it():
+    from genie_server.slots import Slot
+    slot = Slot(name="chat", device_id=None, model_root=Path("/m"))
+    slot.dialog_cfg = {"context": {"bos-token": 2}}
+    assert slot.sdk_bos_token == 2
+    assert slot.count_prompt_tokens("a b c") == slot.count_tokens("a b c") + 1
+    slot.dialog_cfg = {"context": {"size": 4096}}
+    assert slot.sdk_bos_token is None
+    assert slot.count_prompt_tokens("a b c") == slot.count_tokens("a b c")
+
+
+@pytest.mark.parametrize("bos_token", [2, None])
+def test_chat_prompt_and_usage_follow_the_bundles_bos_token(tmp_path, bos_token):
+    """The query handed to the SDK carries a BOS only when the SDK will not
+    add one, and usage counts the one it adds."""
+    from fastapi.testclient import TestClient
+    from conftest import build_state
+    from genie_server.app import create_app
+    state = build_state(tmp_path, template="gemma4")
+    slot = state.manager.slots[0]
+    if bos_token is not None:
+        slot.dialog_cfg["context"]["bos-token"] = bos_token
+    r = TestClient(create_app(state)).post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+    assert r.status_code == 200
+    sent = state.lib.queries[-1]
+    assert sent.startswith("<bos>") is (bos_token is None)
+    assert (r.json()["usage"]["prompt_tokens"]
+            == slot.count_tokens(sent) + (bos_token is not None))
+
+
 # ------------------------------------------------------------- QnnHtp.poll
 
 def _model_dir_with_poll(tmp_path, poll_value):
@@ -986,6 +1264,7 @@ def _slot_stub(context_size, tokens_per_text=None):
     s = S()
     s.context_size = context_size
     s.count_tokens = tokens_per_text or (lambda text: len(text.split()))
+    s.count_prompt_tokens = s.count_tokens      # a bundle with no SDK-added BOS
     return s
 
 
@@ -1745,6 +2024,8 @@ def test_vision_tokens_per_step_is_a_quarter_of_the_patch_rows():
 
 class _BudgetSlot:
     """Just the fields plan_segments reads."""
+    text_encoder_bos = None
+
     def __init__(self, context_size=4096, max_tokens=256):
         self.spec = _spec()
         self.context_size = context_size
