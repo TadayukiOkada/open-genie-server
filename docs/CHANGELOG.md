@@ -69,6 +69,11 @@ markers.
   renders, markers included, plus the vision tokens and the text-encoder's
   BOS, so both kinds of slot report what the SDK prefills. The budget guard
   counts the same way.
+- **The device integration test V06 counts frames for any spec.** It asserted
+  Qwen3-VL's 512 prompt tokens for four extra frames, so it failed against a
+  gemma4 slot that was doing what its spec says (1,076: one 260-token step per
+  frame, plus markers). It now checks that 2, 4 and 6 frames add the same
+  prompt tokens each time, at least 64 per two frames.
 
 ### Documentation
 
