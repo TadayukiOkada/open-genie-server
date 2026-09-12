@@ -958,10 +958,38 @@ def test_gemma4_without_a_system_message_has_no_system_turn():
     assert segs[0] == ("text", "<bos><|turn>user\n<|image>")
 
 
-def test_gemma4_refuses_video():
-    spec, _ = _gemma4()
-    with pytest.raises(ValueError, match="video"):
-        spec.build_prompt_segments("", [("video", [0, 1])], {}, spec)
+def test_gemma4_video_is_a_step_per_frame_with_mmss_timestamps():
+    """Gemma4Processor.replace_video_token's layout: `mm:ss <|image>` + the
+    frame's soft tokens + `<image|>`, frames joined by a space. No temporal
+    packing, so each frame is its own encoder step."""
+    spec, _ = _gemma4(height=24, width=24)
+    segs = spec.build_prompt_segments(
+        "", [("video", [0, 1, 2]), ("text", " What happens? ")], {"fps": 2.0}, spec)
+    assert segs == [
+        ("text", "<bos><|turn>user\n00:00 <|image>"),
+        ("step", (0,)),
+        ("text", "<image|> 00:00 <|image>"),
+        ("step", (1,)),
+        ("text", "<image|> 00:01 <|image>"),
+        ("step", (2,)),
+        ("text", "<image|>What happens?<turn|>\n<|turn>model\n"),
+    ]
+    assert spec.vision_tokens_per_step == 64       # 24x24 patches pooled 3x3
+
+
+def test_gemma4_video_without_fps_writes_no_timestamps():
+    """Same rule as the Qwen3-VL markers: no timeline rather than an invented
+    one (Gemma's processor would assume 24 fps)."""
+    spec, _ = _gemma4(height=24, width=24)
+    text = "".join(v for k, v in spec.build_prompt_segments(
+        "", [("video", [0, 1])], {}, spec) if k == "text")
+    assert text == "<bos><|turn>user\n<|image><image|> <|image><image|><turn|>\n<|turn>model\n"
+
+
+def test_gemma4_timestamps_are_minutes_and_whole_seconds():
+    from genie_server.vlm_specs import _mmss
+    assert [_mmss(t) for t in (0.0, 0.5, 1.0, 59.9, 61.9, 600.0)] == \
+        ["00:00", "00:00", "00:01", "00:59", "01:01", "10:00"]
 
 
 def test_gemma4_patches_are_raster_order_channels_last_then_zero_padded():
@@ -2071,6 +2099,19 @@ def test_too_many_frames_is_refused_before_anything_touches_the_npu():
     with pytest.raises(ValueError, match="too much visual input"):
         vlm.plan_segments(slot, "", [("video", list(range(200)))], {"fps": 2.0},
                           guard=True)
+
+
+def test_the_refusal_says_how_many_frames_make_a_step_for_this_spec():
+    """Qwen3-VL packs two frames into a step; gemma4 has no temporal packing,
+    and "one step per 1 frames" told the client nothing it could act on."""
+    from genie_server import vlm
+    parts = [("video", list(range(200)))]
+    with pytest.raises(ValueError, match=r"a video is one step per 2 frames\."):
+        vlm.plan_segments(_BudgetSlot(), "", parts, {}, guard=True)
+    slot = _BudgetSlot()
+    slot.spec, _ = _gemma4(height=24, width=24)
+    with pytest.raises(ValueError, match=r"a video is one step per frame\."):
+        vlm.plan_segments(slot, "", parts, {}, guard=True)
 
 
 def test_the_generation_reserve_is_subtracted_from_the_budget():
