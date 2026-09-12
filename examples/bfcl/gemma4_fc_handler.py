@@ -244,7 +244,11 @@ class Gemma4FCHandler(OSSHandler):
             system = str(rest[0].get("content", "")).strip()
             rest = rest[1:]
 
-        out = "<bos>"
+        # No "<bos>": this prompt reaches /v1/completions as raw text, and a
+        # Genie bundle whose dialog context names bos-token (every gemma4
+        # export so far) has libGenie prepend it to every query. Writing it
+        # here too prefilled [2, 2, 105, ...].
+        out = ""
         if system or function:
             out += "<|turn>system\n" + system
             for tool in (function or []):

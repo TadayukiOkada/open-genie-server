@@ -33,7 +33,10 @@ class Gemma4Handler(GemmaHandler):
 
     @override
     def _format_prompt(self, messages, function):
-        formatted_prompt = "<bos>"
+        # No "<bos>": libGenie prepends the bundle's bos-token to every query
+        # it is sent as raw text, so writing it here doubles it (see
+        # gemma4_fc_handler.py).
+        formatted_prompt = ""
 
         if messages[0]["role"] == "system":
             first_user_prefix = messages[0]["content"].strip() + "\n\n"
