@@ -9,7 +9,9 @@
   and pooling index are made on the device from `vision-param`, which the
   node reads once at creation, so **the patch grid is fixed per slot rather
   than chosen per image** as Gemma 4's own processor does: every image is
-  resized to that grid. `video_url` parts are refused. A `bos-token` in the
+  resized to that grid. A `video_url` is one encoder step per frame, each
+  after Gemma 4's `mm:ss` timestamp; the processor's smaller video budget (70
+  soft tokens a frame) means a video slot wants a smaller grid. A `bos-token` in the
   bundle's text-encoder config is left as declared: libGenie then prepends it
   to every text segment, which is logged at startup and counted in `usage`,
   and the template writes no BOS of its own. See

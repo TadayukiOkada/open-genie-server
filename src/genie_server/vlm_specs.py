@@ -185,7 +185,7 @@ def qwen3vl_preprocess_step(images: list, payload, spec: "VLMSpec") -> np.ndarra
     return _qwen3vl_patchify(frames[0], frames[1], spec)
 
 
-def _qwen3vl_frame_times(n_frames: int, video_meta: dict):
+def _frame_times(n_frames: int, video_meta: dict):
     """Per-frame timestamps in seconds, or None when the request carried no
     timeline to derive them from.
 
@@ -297,7 +297,7 @@ def qwen3vl_build_prompt_segments(system_text: str, parts: list,
             emit_step([value] * per_step)
         elif kind == "video":
             frames = list(value)
-            times = _qwen3vl_frame_times(len(frames), video_meta)
+            times = _frame_times(len(frames), video_meta)
             for start in range(0, len(frames), per_step):
                 window = frames[start:start + per_step]
                 while len(window) < per_step:      # odd tail: repeat the last frame
@@ -380,6 +380,12 @@ def gemma4_preprocess_step(images: list, payload, spec: "VLMSpec") -> np.ndarray
     return out
 
 
+def _mmss(seconds: float) -> str:
+    """Gemma 4's video frame timestamp: minutes and whole seconds, as
+    Gemma4Processor.replace_video_token formats them."""
+    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
+
+
 def gemma4_build_prompt_segments(system_text: str, parts: list,
                                  video_meta: dict, spec: "VLMSpec") -> list:
     """OpenAI content parts -> Accumulator-order segments in Gemma 4's chat
@@ -394,10 +400,14 @@ def gemma4_build_prompt_segments(system_text: str, parts: list,
     tokens are the encoder's output, so the text before an image ends at
     `<|image>` and the text after it starts at `<image|>`.
 
-    Video is refused. Gemma 4 does take video, but as frames encoded at a
-    smaller budget than still images (70 soft tokens rather than 280), each
-    after an mm:ss timestamp: a different encoder resolution from the one
-    this slot's grid is fixed to.
+    Video is one step per frame — Gemma 4 has no temporal packing — laid out
+    as Gemma4Processor does: `mm:ss <|image>` + that frame's soft tokens +
+    `<image|>`, frames joined by a space. The timestamps come from
+    media_io_kwargs.video exactly as Qwen3-VL's do (_frame_times), truncated
+    to whole seconds; with no fps none is written, where the processor would
+    assume 24 fps. Every frame is encoded at this slot's grid, and Gemma 4's
+    video processor budgets 70 soft tokens a frame against 280 for a still:
+    a slot meant for video wants the smaller grid (24x24 for 512x512 frames).
     """
     segments = []
     buf = "" if spec.text_encoder_adds_bos else "<bos>"
@@ -414,9 +424,17 @@ def gemma4_build_prompt_segments(system_text: str, parts: list,
             segments.append(("step", (value,)))
             buf = "<image|>"
         elif kind == "video":
-            raise ValueError(
-                "the gemma4 VLM spec does not take video_url parts; send "
-                "still images as image_url parts")
+            frames = list(value)
+            times = _frame_times(len(frames), video_meta)
+            for k, index in enumerate(frames):
+                if k:
+                    buf += " "
+                if times is not None:
+                    buf += _mmss(times[k]) + " "
+                buf += "<|image>"
+                segments.append(("text", buf))
+                segments.append(("step", (index,)))
+                buf = "<image|>"
         else:
             raise ValueError(f"unknown content part kind: {kind}")
 
