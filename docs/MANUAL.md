@@ -470,15 +470,22 @@ multi-CL  0.6B :  Allocated total size = 275120640 across 3 buffers  -> err 1002
 ```
 
 The VLM's own sequence is identical in both runs too (348,520,576 across 8
-buffers). So **whatever `err 1002` is counting, it is not allocated bytes** — it
-tracks something that scales with the number of context-length variants in the
-bundle, i.e. with how many QNN contexts get created (two graphs versus six here).
-That also means it is not something you can read off a bundle's size.
+buffers). So **whatever `err 1002` is counting, it is not the bytes that log
+line reports** — it grows with the number of context-length variants in the
+bundle (two graphs versus six here). That also means it is not something you
+can read off a bundle's size.
 
-**That reading has since been confirmed and given a mechanism**: the budget is
-charged **per QNN context**, in a fixed allocation unit, so more context-length
-variants cost more at the same total bytes. What the budget is, and why it is a
-property of how the board was integrated rather than of the SoC, is in
+**The mechanism has since been traced, and one step of the reading above was
+wrong** *(corrected)*: the multi-context-length bundle does not create more QNN
+contexts. It creates the same two, with more graphs inside them. What the
+graphs add is mapped memory that the log line leaves out — each graph's I/O
+tensors, spill-fill and op data, and, while a context loads, one I/O buffer as
+large as all of them together. The budgets `err 1002` runs into count exactly
+that: how much a slot maps, and where in the DSP's address space it has to go.
+So the same total in the log line can leave different room behind it. Which of
+the two budgets this particular pair ran into was not measured. What the
+budgets are, and why they are a property of how the board was integrated rather
+than of the SoC, is in
 [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
 
 > **Measure this only on the first startup after a power cycle.** A failed
@@ -539,9 +546,12 @@ awk '/dmabuf/ {split($1,a,"-"); t += strtonum("0x" a[2]) - strtonum("0x" a[1])}
      END {print t/1048576 " MB"}' /proc/$pid/maps
 ```
 
-For the bundle above that is **924 MB per slot**, in six mappings — and the
-`Allocated total size` the libGenie log prints (98,173,440 bytes here) is only
-*one* of those six. Do not read that log line as what a model costs.
+For the bundle above that is **924 MB per slot**, in six large mappings and a
+few small ones — and the `Allocated total size` the libGenie log prints
+(98,173,440 bytes here) covers only the I/O buffers libGenie allocates: three
+of them here, one 93 MiB mapping among those six and two small ones.
+*(Corrected: an earlier revision called it one of the six.)* Do not read that
+log line as what a model costs.
 
 Every size class scales strictly with the slot count (3 slots 2,773 MB, 4 slots
 3,698 MB, 6 slots 5,548 MB), so nothing is shared between slots, weights
@@ -551,11 +561,16 @@ This measures demand, not the budget. On its own it does not predict
 `err 1002` — load order changes the answer at a fixed byte total — but it does
 tell you what a candidate model will ask for before you try the combination.
 
-The budget itself is no longer invisible. On the bench these numbers come from
-it is a fixed pool charged **1 unit per QNN context**, which makes the six-slot
-ceiling above arithmetic rather than an empirical surprise, and it also explains
-the load-order reversal. Both are platform-integration properties, so they live
-in [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
+The budgets themselves are no longer invisible. On the bench these numbers come
+from there are two. A fixed page-table pool caps how much all slots map
+together — **2,048 KB per slot of this bundle**, which makes the six-slot
+ceiling above arithmetic rather than an empirical surprise. And each DSP
+protection domain has its own address space, which, together with the budget
+that spreads contexts over domains, explains the load-order reversal.
+*(Corrected: an earlier revision said the pool is charged 1 unit per QNN
+context. It is charged by how much is mapped; one unit per context held for
+this bundle only.)* Both are platform-integration properties, so they live in
+[Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
 
 > The sweep itself was run without power cycling between configurations, but six
 > of these rows were then re-measured **one power cycle per configuration**, the
@@ -588,12 +603,17 @@ in [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives
   that decides which protection domain a context lands on are in [Platform
   Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives). Turn
   `GENIE_LOG_LEVEL` to `"info"` to see the real error on your own board.
-- **Why a *smaller* first model helps is now partly explained.** Which
-  protection domain a context lands on follows only from how many contexts the
-  process has created so far, so whichever slot loads first fills one domain —
-  and a bigger first model fills it with fewer, larger mappings. The domain
-  assignment was observed directly; the step from there to model *size* is
-  still inference.
+- **Why load order matters is now explained, for the bundles measured.**
+  *(Corrected: an earlier revision said the protection domain follows only
+  from how many contexts the process has created. It follows a byte budget.)*
+  A context goes to the first protection domain whose budget still has room,
+  that budget is shared by both cores, and each domain's address space
+  fragments with how mappings are placed — so the order decides which domain a
+  context lands in, and whether a large mapping still finds room there. On the
+  reference bench the outcomes of four new orderings were predicted from these
+  rules before they were measured, and all four matched. Why a *smaller* first
+  model helps in general is still inference: the rules were fitted on Qwen3
+  0.6B bundles, and larger bundles have not been re-measured against them.
 - ~~**The context-length count's role is not isolated.**~~ **Now isolated, for
   the text + VLM pair.** The 0.6B was exported both ways and kept both bundles,
   which holds the toolchain version and everything else constant; the
@@ -602,10 +622,11 @@ in [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives
   were re-exported with a newer toolchain and no equivalent A/B exists.
 - **Whether the exact numbers transfer to another SoC, another memory size, or
   another QAIRT version is unknown.** They were measured on one board.
-- **Whether the caps count slots or bytes.** The sweep above used one bundle
-  size, so "four slots on the first core" and "six in total" cannot be
-  distinguished from the byte totals they correspond to. Sweeping a second
-  bundle size would separate them.
+- ~~**Whether the caps count slots or bytes.**~~ **Bytes.** The page-table
+  pool follows the address space a slot maps, and the domain budget follows
+  its weights, I/O tensors, spill-fill and op data; "four slots on the first
+  core" and "six in total" are what those come to for this one bundle. See
+  [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives).
 - **Whether the core that loads second stops at five.** The six-slot total cap
   binds first, so it cannot be pushed further.
 
@@ -652,7 +673,7 @@ in [Platform Notes](./PLATFORM_NOTES.md#where-the-err-1002-budget-actually-lives
   the slot count. Do **not** use RSS (the pages are never touched by the CPU),
   `MemFree` deltas (model files land in the page cache and swamp the signal — a
   0.6B can appear to cost more than a 1.7B), or the `Allocated total size` the
-  libGenie log prints (it is one mapping out of several). `MemAvailable` and
+  libGenie log prints (it covers only libGenie's I/O buffers). `MemAvailable` and
   `/proc/buddyinfo` still show what a large model does to the host, but they do
   not isolate one slot.
 

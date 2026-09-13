@@ -127,27 +127,67 @@ reported. Measured there:
 | Four slots | 8 | **11,524 KB** |
 | Six slots | 12 | **15,620 KB** |
 
-**1,024 KB per QNN context, exactly** — which is what a 4 KB-granule page table
-for the ~462 MB a context maps comes to, rounded up to the pool's 256 KB
-allocation unit. That makes the cap arithmetic rather than folklore:
-`(16,384 − 3,332) / 1,024 = 12` contexts, and the bundle in [the slot sweep](./MANUAL.md#how-many-slots-of-one-small-model-fit-and-what-each-costs)
-creates two per slot, so **six slots fit and a seventh needs 2,048 KB against
-the 764 KB left**. Both numbers match what that sweep measured from the outside.
+**2,048 KB per slot of the bundle in [the slot sweep](./MANUAL.md#how-many-slots-of-one-small-model-fit-and-what-each-costs)**,
+which makes the cap arithmetic rather than folklore: `(16,384 − 3,332) / 2,048
+= 6` slots, and **a seventh needs 2,048 KB against the 764 KB left**. Both
+numbers match what that sweep measured from the outside.
 
-A bundle with more context-length variants creates more QNN contexts, and each
-one is rounded up separately, so **the cap is per context, not per byte**. That
-is also why two bundles of the same model that allocate byte-identical amounts
-do not leave the same room behind them.
+> [!NOTE]
+> *(Corrected.)* An earlier revision said this pool is charged **1,024 KB per
+> QNN context**, so that the cap is per context rather than per byte. That held
+> for this one bundle only. The charge follows **the address space a slot
+> maps**: a 4 KB-granule page table takes 4 KB for every 2 MiB of DSP address
+> space mapped, and the pool hands it out in 256 KB units. The
+> multi-context-length export of the same 0.6B creates the same two QNN
+> contexts and costs **4,864–5,120 KB**, because its six graphs map more —
+> their I/O tensors, spill-fill and op data, and, while a context loads, one
+> I/O buffer as large as all of them together (732 MiB for its second
+> context). Counting 2 MiB regions in the address-space map below gives the
+> pool's usage to its 256 KB unit wherever the map could be read.
 
-**Which protection domain a context lands on depends only on how many contexts
-the process has already created** — not on which core the slot is on. Across
-seven configurations the assignment was identical: contexts 1–7 to pd 0, the
-8th to pd 2, the 9th back to pd 0, the 10th onwards to pd 2. So whichever core
-loads first collects contexts 1–7 in one domain, and its ninth context comes
-back to a domain that is already full. **That is the mechanism behind the
-load-order rule** in the manual: the same six slots pass or fail depending on
-the order alone. Four slots on one core plus two on the other passes with seven
-contexts in one domain, because the ninth goes to the other core.
+**There are two limits, not one.** The pool above caps how much can be mapped
+in total. Separately, **each DSP protection domain has its own 4 GiB address
+space**, and every mapping has to find a contiguous run in it:
+
+- A mapping starts on a multiple of the largest power of two not above its
+  size — a 298 MiB weights buffer on a 256 MiB boundary, a 732 MiB buffer on a
+  512 MiB one — at the lowest address where it fits.
+- That fragments. Two multi-context-length 0.6B slots on one core fail with
+  1,347 MiB of that domain's address space free, because no hole runs 732 MiB
+  from a 512 MiB boundary: the first slot's load-time buffer was freed, and
+  that slot's own 262 MiB I/O buffer took its place.
+- The pool had room at that moment. The hypervisor reports running out of
+  address space and running out of pool differently; the guest sees the same
+  `err 1002` for both.
+
+**Which protection domain a context lands on is decided by a budget, not by a
+count.** Contexts go to pd 0, pd 2, pd 4 … — each to the first domain whose
+budget still has room. The budget is **one per domain number, shared by both
+cores**, and a context is charged its shared weights plus its graphs' I/O
+tensors, spill-fill buffers and op data, as the context binary's metadata
+lists them. Across 24 start-ups every placement fits a budget between
+3,403,453,184 and 3,503,631,616 bytes, about 3.4–3.5 GB. For the CL1024 bundle
+alone this comes out as contexts 1–7 to pd 0, the 8th to pd 2, the 9th back to
+pd 0 and the 10th onwards to pd 2, which an earlier revision described as the
+rule itself. *(Corrected: that sequence breaks as soon as bundles are mixed —
+with two multi-context-length slots and one CL1024 slot, the 5th context goes
+to pd 2.)*
+
+**That is the mechanism behind the load-order rule** in the manual. With five
+CL1024 slots on one core listed first, contexts 1–7 fill that core's pd 0, and
+the 9th comes back to pd 0 by budget — but its 298 MiB weights find no free
+256 MiB boundary left in that domain's address space, while the pool still has
+4.6 MB free. List the other core's slot first and its two contexts take part of
+pd 0's budget, so the first core's pd 0 holds five contexts instead of seven and
+the 9th fits. Four slots on one core plus two on the other passes because the
+9th context goes to the other core. And since the budget is shared across
+cores, **a slot on one core moves contexts on the other**: two
+multi-context-length 0.6B slots that cannot share a core on their own do load
+there once a CL1024 slot on the other core has loaded first, because it pushes
+the second slot's larger context to pd 2. The same three slots on one core —
+two CL1024 and one multi-context-length — load in one order and fail in
+another. All four of those outcomes were predicted from these rules before they
+were measured.
 
 > [!WARNING]
 > **The pool is a high-water mark within one boot and does not come back.**
@@ -164,9 +204,10 @@ contexts in one domain, because the ninth goes to the other core.
 **None of this transfers to a differently integrated board.** The page-table
 pool is the hypervisor's, its size was set when that image was built, and on a
 platform without one the accounting will be somewhere else entirely. What
-should transfer is the shape of the problem: the budget `err 1002` runs into is
-a *mapping* budget, it is charged per QNN context, and it is not visible from
-the guest. Where to look on your own platform is Qualcomm's to answer.
+should transfer is the shape of the problem: the budgets `err 1002` runs into
+are *mapping* budgets — page tables and the DSP's address space — they follow
+how much is mapped rather than how many contexts there are, and they are not
+visible from the guest. Where to look on your own platform is Qualcomm's to answer.
 
 ## Reading the rest of this documentation
 
