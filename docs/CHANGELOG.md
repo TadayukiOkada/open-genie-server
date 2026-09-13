@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- **What the `err 1002` budgets count, corrected.** The reference bench's
+  page-table pool is not charged 1,024 KB per QNN context: it follows the
+  address space a slot maps, and 1,024 KB per context held for one bundle only.
+  A second limit is documented — each DSP protection domain's address space,
+  which fragments — and which domain a context lands on is decided by a byte
+  budget both cores share, not by counting contexts. `Allocated total size`
+  covers libGenie's I/O buffers rather than one mapping. The corrections are
+  marked in place in [MANUAL.md](MANUAL.md) and
+  [PLATFORM_NOTES.md](PLATFORM_NOTES.md) and their Japanese versions.
+
 ## 1.2.0 — Gemma 4 QAT bundles with image and video input, and the SDK's own log
 
 Gemma 4 E2B bundles exported from Google's QAT checkpoint now load and serve
