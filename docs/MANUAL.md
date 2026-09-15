@@ -851,16 +851,26 @@ tail, measure it rather than trusting this table.
 
 ## Starting the Server
 
-Install it first, or don't — both work:
+Install it first, or don't — both work, but **the dependencies have to be
+installed either way**:
 
 ```bash
 pip install .[logprobs,vlm]      # or -e . while developing
 ```
 
+> [!NOTE]
+> **On the device, use a virtualenv.** On our board's Linux guest the root
+> filesystem is read-only, the only persistent place for your files is
+> `/home/root` (the same directory as `/data/root`), and the system `python3`
+> has no pip. So the package and its dependencies go into
+> `python3 -m venv /home/root/.venv`, and the server runs from that venv. See
+> [Installing on the device](./PLATFORM_NOTES.md#installing-on-the-device) for
+> what is writable there and how to install without network access.
+
 The distribution is `open-genie-server`, the import package is `genie_server`,
 and the install adds a `genie-server` command. Without an install, the
 repository-root launcher puts `src/` on `sys.path` itself, so a plain checkout
-runs as-is; so does a deployment where `genie_server/` was copied next to
+runs without installing the package; so does a deployment where `genie_server/` was copied next to
 `genie-server.py`. The launcher looks in that order — installed package, then
 a sibling `genie_server/`, then `src/` — so a device set up either way keeps
 working. Our own board runs the released wheel in a virtualenv, started
@@ -870,7 +880,7 @@ package and you can no longer tell which one answered.
 
 ```bash
 genie-server                     # if installed
-python3 genie-server.py          # from a checkout, or on the device
+python3 genie-server.py          # from a checkout; on the device, the venv's python3
 # listens on 0.0.0.0:8080 by default
 python3 genie-server.py --config /path/to/env_config.json --host 0.0.0.0 --port 8080
 ```

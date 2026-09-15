@@ -13,6 +13,14 @@
   covers libGenie's I/O buffers rather than one mapping. The corrections are
   marked in place in [MANUAL.md](MANUAL.md) and
   [PLATFORM_NOTES.md](PLATFORM_NOTES.md) and their Japanese versions.
+- **Installing on the device needs a virtualenv, and the docs now say so.** On
+  the reference board's Linux guest the root filesystem is read-only and the
+  system `python3` has no pip, so the server and its dependencies go into a
+  venv under `/home/root` — including when `genie-server.py` runs without the
+  package installed. The README and [MANUAL.md](MANUAL.md) say this in a note;
+  [PLATFORM_NOTES.md](PLATFORM_NOTES.md#installing-on-the-device) lists what is
+  writable there and gives the commands, including an install from downloaded
+  wheels for a guest that cannot reach PyPI.
 
 ## 1.2.0 — Gemma 4 QAT bundles with image and video input, and the SDK's own log
 
