@@ -23,7 +23,8 @@ properties of the SoC, and how to find out what yours does instead.
 | Execution environment | A Linux guest under a hypervisor, not bare metal. A second guest (Android) runs on the same SoC |
 | RAM visible to the guest | **12.1 GiB** (`MemTotal: 12661020 kB`) |
 | CPUs visible to the guest | 8 |
-| Storage | 29.4 G filesystem holding the models |
+| Storage | 29.4 G filesystem holding the models, mounted at both `/home` and `/data`. The root filesystem is read-only — see [Installing on the device](#installing-on-the-device) |
+| System Python | 3.10.14, without pip |
 | Hexagon NSP cores in use | **2** — `/dsp/image/dsp/cdsp0` and `cdsp1`, addressed as `device_id` 0 and 1 |
 | Subsystem restart (SSR) | **Not available.** `/sys/class/remoteproc` is empty inside the guest, so a wedged cDSP is recovered by power-cycling the board, not by restarting the subsystem |
 | QAIRT | 2.49.40.260810, 2.49.1.260821 and 2.50.0.260828, `aarch64-oe-linux-gcc11.2` |
@@ -44,6 +45,7 @@ board, and different Qualcomm releases start from different numbers.
 |---|---|---|
 | **How many NSP cores you may use — 1 or 2** | Your SKU's licence (Qualcomm gates SoC features per SKU) | Everything in [Multi Text Slots](./MANUAL.md#multi-text-slots). With one usable core, a `TEXT_SLOTS` entry at `device_id: 1` has nothing to bind to, the 1.31× concurrency figure does not apply, and two models cannot be made co-resident — one core holds one model ([Loading two models at once](./MANUAL.md#loading-two-models-at-once)) |
 | **RAM and storage given to the guest** | Whoever built the image; changeable at build time | Which bundles load at all, whether a second one fits beside the first, and how much of the `err 1002` behaviour you will meet |
+| **Which filesystems are writable, and what the system Python ships with** | Whoever built the image | Where the server and its dependencies can be installed — [Installing on the device](#installing-on-the-device) |
 | **The SMMU page-table pool behind DSP mappings** | Board integration; on this bench it belongs to the hypervisor and is 16 MB, and it is not visible from the guest | The actual `err 1002` ceiling, and therefore how many slots co-reside — see [Where the `err 1002` budget actually lives](#where-the-err-1002-budget-actually-lives) |
 | **Guest vs. bare metal** | Board integration | Subsystem restart. Under a hypervisor the guest may not reach `/sys/class/remoteproc`, and then a wedged cDSP needs the board power-cycled |
 | **QAIRT version and ABI** | You | Which SDK defects you inherit — see [QAIRT Version Issues](./QAIRT_VERSIONS.md) — and which library directory the server loads from ([Running on Android](./MANUAL.md#running-on-android)) |
@@ -75,12 +77,74 @@ grep -E 'MemTotal|MemAvailable' /proc/meminfo
 df -h <the filesystem holding your models>
 ```
 
+**Where you can install.**
+
+```bash
+mount | grep -E ' on / | on /home | on /data '   # "ro" on / means the system site-packages is read-only
+python3 -m pip --version                         # "No module named pip" means use a venv
+```
+
 **Subsystem restart.** `ls /sys/class/remoteproc` — empty means you cannot
 restart the cDSP from inside the guest, and recovery is a power cycle.
 
 **Anything else — what the defaults are, what your SKU licenses, how the guests
 were sized.** Those are Qualcomm's to answer, and the answer depends on your
 board and your release. Ask them rather than inferring it from this page.
+
+## Installing on the device
+
+**On this bench, the server and its dependencies have to go into a virtualenv
+under `/home/root`.** That is not a style preference. The guest's root
+filesystem is mounted read-only and its system `python3` has no pip, so a venv
+on the writable filesystem is the one place pip can run at all.
+
+What the guest can write to:
+
+| Path | Writable | |
+|---|---|---|
+| `/`, including `/usr` and the system `site-packages` | **No** | ext4 mounted `ro`, 1.5 G |
+| `/home` and `/data` | **Yes** | **One** 29.4 G ext4 filesystem mounted at both, so `/home/root` and `/data/root` are the same directory. The models, the SDK and the venv all live here |
+| `/tmp`, `/var`, `/run` | Until the next boot | tmpfs: held in RAM and emptied by a reboot — and a wedged cDSP is recovered by power-cycling the board. Not a place for a venv |
+| `/persist` | Yes | The image's own settings (it backs `/etc/bluetooth`, `/etc/usb` and `/etc/build.prop`). Not for your files |
+
+The system interpreter is Python 3.10.14 at `/usr/bin/python3`.
+`python3 -m pip` fails with `No module named pip`, but `venv` and `ensurepip`
+are there, and that is all a venv needs:
+
+```bash
+cd /home/root
+python3 -m venv .venv                                    # ensurepip puts pip inside the venv
+.venv/bin/pip install 'open-genie-server[logprobs,vlm]'  # or '.[logprobs,vlm]' from a checkout
+.venv/bin/genie-server --config env_config.json
+```
+
+Running from a checkout without installing the package works the same way,
+with the venv's interpreter: `.venv/bin/python3 genie-server.py`. Call the
+venv's binaries by path rather than activating it — each `adb shell` invocation
+starts a new shell, so an activation does not carry over to the next command.
+
+**If the guest cannot reach PyPI.** This bench's guest reaches the network
+through its host, but that is a property of the bench. Without a route,
+download the wheels on any machine that has one — with `--platform`, pip picks
+wheels for the platform you name rather than the machine it runs on — copy the
+directory over, and install from it:
+
+```bash
+# On a machine with network access
+pip download 'open-genie-server[logprobs,vlm]' -d wheels \
+    --python-version 3.10 --only-binary=:all: \
+    --platform manylinux2014_aarch64 --platform manylinux_2_28_aarch64
+# On the device, after copying wheels/ to /home/root/wheels
+.venv/bin/pip install --no-index --find-links=/home/root/wheels 'open-genie-server[logprobs,vlm]'
+```
+
+Match `--python-version` to the guest's `python3 --version`, and list the
+manylinux tags its glibc accepts (`getconf GNU_LIBC_VERSION`; 2.35 here, so
+both of the above). **With `manylinux2014_aarch64` alone the download still
+succeeds, but quietly resolves to older releases** — when this was written,
+pillow 12.2.0 instead of 12.3.0, and a `huggingface_hub` (a dependency of
+`tokenizers`) old enough not to need `hf_xet`, which ships only
+`manylinux_2_28` wheels.
 
 ## Where the `err 1002` budget actually lives
 

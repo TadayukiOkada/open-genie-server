@@ -50,6 +50,14 @@ pip install .[logprobs,vlm]     # everything
 pip install .                   # server only: fastapi, uvicorn, tokenizers
 ```
 
+> [!NOTE]
+> **On the device, install into a virtualenv.** On our board's Linux guest the
+> root filesystem is read-only and the system `python3` has no pip, so the
+> dependencies go into a venv under the writable `/home/root`
+> (`python3 -m venv /home/root/.venv`, then that venv's `pip`). Running
+> `genie-server.py` without installing the package still needs them. See
+> [Installing on the device](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/PLATFORM_NOTES.md#installing-on-the-device).
+
 The distribution is named `open-genie-server`; the package you import is
 `genie_server`. `pip install -r requirements.txt` still works and is the same
 as the first line above.

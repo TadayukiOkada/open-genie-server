@@ -21,7 +21,8 @@
 | 実行環境 | ベアメタルではなく、**ハイパーバイザ上の Linux ゲスト**。同じ SoC 上でもう1つのゲスト(Android)が動いている |
 | ゲストから見える RAM | **12.1 GiB**(`MemTotal: 12661020 kB`) |
 | ゲストから見える CPU | 8 |
-| ストレージ | モデルを置いている 29.4 G のファイルシステム |
+| ストレージ | モデルを置いている 29.4 G のファイルシステム。`/home` と `/data` の両方にマウントされている。ルートファイルシステムは読み取り専用 — [デバイスへのインストール](#デバイスへのインストール) |
+| システムの Python | 3.10.14、pip なし |
 | 使用している Hexagon NSP コア | **2**(`/dsp/image/dsp/cdsp0` と `cdsp1`。`device_id` の 0 と 1 で指定) |
 | サブシステムリスタート(SSR) | **使えません。** ゲスト内では `/sys/class/remoteproc` が空なので、固まった cDSP の復旧はサブシステムの再起動ではなく**ボードの電源サイクル**になります |
 | QAIRT | 2.49.40.260810・2.49.1.260821・2.50.0.260828、`aarch64-oe-linux-gcc11.2` |
@@ -41,6 +42,7 @@ QAIRT 2.48.40 `aarch64-android`。[Androidで動かす](./MANUAL.ja.md#android�
 |---|---|---|
 | **使える NSP コアの本数(1本か2本か)** | **SKU のライセンス**(Qualcomm が SoC の機能を SKU 単位で制限します) | [マルチテキストスロット](./MANUAL.ja.md#マルチテキストスロット)の記述すべて。1本しか使えない場合、`TEXT_SLOTS` の `device_id: 1` は割り当て先が存在せず、1.31倍という並列性能の数値も当てはまらず、2モデルの同居もできません(1コアには1モデル。[2つのモデルを同時にロードする](./MANUAL.ja.md#2つのモデルを同時にロードする)) |
 | **ゲストに割り当てられる RAM・ストレージ** | イメージをビルドした人。ビルド時に変更可能 | そもそもどのバンドルがロードできるか、1本目の隣に2本目が入るか、`err 1002` にどれだけ出会うか |
+| **どのファイルシステムに書き込めるか、システムの Python に何が入っているか** | イメージをビルドした人 | サーバと依存パッケージをどこに入れられるか — [デバイスへのインストール](#デバイスへのインストール) |
 | **DSP のマッピングを支える SMMU ページテーブル用プール** | ボードの構成。この機体ではハイパーバイザが持ち、16 MB。**ゲストからは見えない** | **`err 1002` の実際の天井**、したがって何スロット同居できるか — [`err 1002` の予算はどこにあるのか](#err-1002-の予算はどこにあるのか) |
 | **ベアメタルかゲストか** | ボードの構成 | サブシステムリスタート。ハイパーバイザ上ではゲストから `/sys/class/remoteproc` に届かないことがあり、その場合、固まった cDSP の復旧はボードの電源サイクルだけになります |
 | **QAIRT のバージョンと ABI** | 利用者 | どの SDK 欠陥を抱えるか([QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md))、サーバがどのライブラリディレクトリから読むか([Androidで動かす](./MANUAL.ja.md#androidで動かす)) |
@@ -72,12 +74,68 @@ grep -E 'MemTotal|MemAvailable' /proc/meminfo
 df -h <モデルを置いているファイルシステム>
 ```
 
+**インストールできる場所。**
+
+```bash
+mount | grep -E ' on / | on /home | on /data '   # / に "ro" があれば、システムの site-packages は読み取り専用
+python3 -m pip --version                         # "No module named pip" なら venv を使う
+```
+
 **サブシステムリスタート。** `ls /sys/class/remoteproc` — 空であれば、ゲスト内から
 cDSP を再起動することはできず、復旧手段は電源サイクルです。
 
 **それ以外 — 既定値がいくつか、あなたの SKU が何を許可しているか、ゲストがどう
 サイジングされたか。** これらは **Qualcomm が答えるべきこと**で、答えはボードと
 リリースによって変わります。このページから推測せず、**問い合わせてください**。
+
+## デバイスへのインストール
+
+**この機体では、サーバと依存パッケージを `/home/root` の下の venv に入れる必要があります。**
+好みの問題ではありません。ゲストのルートファイルシステムは読み取り専用でマウントされ、
+システムの `python3` には pip が無いので、**pip が動けるのは、書き込めるファイルシステムに作った venv の中だけ**です。
+
+ゲストで書き込める場所:
+
+| パス | 書き込み | |
+|---|---|---|
+| `/`(`/usr` とシステムの `site-packages` を含む) | **不可** | ext4 を `ro` でマウント、1.5 G |
+| `/home` と `/data` | **可** | **1つ**の 29.4 G の ext4 を両方にマウントしているので、`/home/root` と `/data/root` は同じディレクトリです。モデル・SDK・venv はすべてここに置きます |
+| `/tmp`・`/var`・`/run` | 次の起動まで | tmpfs です。RAM 上にあって再起動で消え、固まった cDSP の復旧はボードの電源サイクルです。venv を置く場所ではありません |
+| `/persist` | 可 | イメージ自身の設定(`/etc/bluetooth`・`/etc/usb`・`/etc/build.prop` の実体)。自分のファイルを置く場所ではありません |
+
+システムのインタプリタは `/usr/bin/python3` の Python 3.10.14 です。`python3 -m pip` は
+`No module named pip` で失敗しますが、`venv` と `ensurepip` はあり、venv にはそれで足ります:
+
+```bash
+cd /home/root
+python3 -m venv .venv                                    # ensurepip が venv の中に pip を入れる
+.venv/bin/pip install 'open-genie-server[logprobs,vlm]'  # クローンからなら '.[logprobs,vlm]'
+.venv/bin/genie-server --config env_config.json
+```
+
+パッケージをインストールせずにクローンから動かす場合も、venv のインタプリタを使います:
+`.venv/bin/python3 genie-server.py`。venv は activate せず、venv の実行ファイルをパスで呼んでください —
+`adb shell` は呼ぶたびに新しいシェルを起動するので、activate は次のコマンドに引き継がれません。
+
+**ゲストが PyPI に出られない場合。** この機体のゲストはホスト経由でネットワークに出られますが、
+それはこの機体の性質です。経路が無ければ、出られるマシンで wheel を集め
+(`--platform` を付けると、pip は自分が動くマシンではなく指定したプラットフォーム向けの wheel を選びます)、
+ディレクトリごとコピーして、そこから入れます:
+
+```bash
+# ネットワークに出られるマシンで
+pip download 'open-genie-server[logprobs,vlm]' -d wheels \
+    --python-version 3.10 --only-binary=:all: \
+    --platform manylinux2014_aarch64 --platform manylinux_2_28_aarch64
+# wheels/ を /home/root/wheels にコピーしてから、デバイスで
+.venv/bin/pip install --no-index --find-links=/home/root/wheels 'open-genie-server[logprobs,vlm]'
+```
+
+`--python-version` はゲストの `python3 --version` に合わせ、manylinux のタグはゲストの glibc が
+受け付けるものを並べてください(`getconf GNU_LIBC_VERSION`。この機体は 2.35 なので上の2つとも)。
+**`manylinux2014_aarch64` だけでもダウンロードは成功しますが、黙って古い版に解決されます** —
+執筆時点では pillow が 12.3.0 ではなく 12.2.0 に、`huggingface_hub`(`tokenizers` の依存)が、
+`manylinux_2_28` の wheel しか無い `hf_xet` を必要としない古い版になりました。
 
 ## `err 1002` の予算はどこにあるのか
 

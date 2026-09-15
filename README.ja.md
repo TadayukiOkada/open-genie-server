@@ -50,6 +50,13 @@ pip install .[logprobs,vlm]     # 全部入り
 pip install .                   # サーバ本体のみ: fastapi, uvicorn, tokenizers
 ```
 
+> [!NOTE]
+> **デバイスでは venv に入れてください。** 当方のボードの Linux ゲストはルートファイルシステムが
+> 読み取り専用で、システムの `python3` には pip がありません。そのため依存パッケージは、
+> 書き込める `/home/root` の下の venv に入れます(`python3 -m venv /home/root/.venv` を作り、その venv の `pip` を使う)。
+> パッケージをインストールせずに `genie-server.py` で動かす場合も、依存パッケージは必要です。
+> 詳しくは [デバイスへのインストール](./docs/PLATFORM_NOTES.ja.md#デバイスへのインストール) を参照してください。
+
 配布名は `open-genie-server`、import するパッケージ名は `genie_server` です。
 `pip install -r requirements.txt` も従来どおり使えます(上の1行目と同じ内容)。
 

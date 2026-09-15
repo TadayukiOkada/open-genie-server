@@ -784,16 +784,24 @@ VLMスロットは参照しない。
 
 ## 起動方法
 
-インストールしてもしなくても動きます:
+インストールしてもしなくても動きます。ただし**依存パッケージはどちらの場合も必要です**:
 
 ```bash
 pip install .[logprobs,vlm]      # 開発中は -e . でも可
 ```
 
+> [!NOTE]
+> **デバイスでは venv を使ってください。** 当方のボードの Linux ゲストはルートファイルシステムが
+> 読み取り専用で、ファイルを残しておける場所は `/home/root`(`/data/root` と同じディレクトリ)だけ、
+> システムの `python3` には pip がありません。そのため本体と依存パッケージは
+> `python3 -m venv /home/root/.venv` で作った venv に入れ、サーバもその venv から起動します。
+> そこで何が書き込めるかと、ネットワークに出られない場合の入れ方は
+> [デバイスへのインストール](./PLATFORM_NOTES.ja.md#デバイスへのインストール) を参照してください。
+
 配布名は `open-genie-server`、import するパッケージ名は `genie_server` で、
 インストールすると `genie-server` コマンドが入ります。インストールしない場合も、
 リポジトリ直下のランチャーが自分で `src/` を `sys.path` に足すので、
-クローンしたままで動きます。`genie_server/` を `genie-server.py` の隣にコピーした
+パッケージ自体はインストールしなくてもクローンから動きます。`genie_server/` を `genie-server.py` の隣にコピーした
 配置でも同様です。ランチャーは「インストール済みパッケージ → 隣の `genie_server/`
 → `src/`」の順に探すので、どちらの配置でも動きます。当方のボードはリリース版の
 wheel を venv に入れ、`genie-server` コマンドで起動しています。**避けるべき配置は
@@ -803,7 +811,7 @@ wheel を venv に入れ、`genie-server` コマンドで起動しています�
 
 ```bash
 genie-server                     # インストール済みの場合
-python3 genie-server.py          # クローンから、または実機上で
+python3 genie-server.py          # クローンから。実機では venv の python3 で
 # 既定で 0.0.0.0:8080 で待受
 python3 genie-server.py --config /path/to/env_config.json --host 0.0.0.0 --port 8080
 ```
