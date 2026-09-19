@@ -93,7 +93,8 @@ The rest is Qualcomm's or ours:
 | `genie_server/engine.py` | the generation engine: lock, watchdog, SDK params, prefix cache, `finish_reason` |
 | `genie_server/vlm.py` | multimodal requests (`GenieNode`/`GeniePipeline`) |
 | `genie_server/genie_node.py` | ctypes bindings for the `GenieNode`/`GeniePipeline` composable pipeline API |
-| `genie_server/vlm_specs.py` | per-VLM-model specs (preprocessing, node topology, prompt template) |
+| `genie_server/vlm_layout.py` | VLM bundle layout auto-read (node configs, connections, static tensors) |
+| `genie_server/vlm_specs/` | per-VLM-family specs (preprocessing, node topology defaults, prompt template) |
 | `genie_server/logprobs.py` | token logprobs via the SDK's custom-sampler hook (sample + teacher-forcing modes) |
 | `genie_server/protocol.py` | OpenAI wire-format builders and the error envelope |
 | `genie_server/app.py` | all FastAPI routes (`create_app`) |
@@ -749,7 +750,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit — and that two slots sharing a `device_id` is allowed but does not run them concurrently. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
 | `POLL` | optional | (unset) | Default for every slot's `poll`: `true`/`false` overrides `dialog.engine.backend.QnnHtp.poll` in each model bundle, unset leaves each bundle as it is. **`false` is usually what you want** — polling costs ~260% CPU on SA8255P for latency indistinguishable from blocking (see [`QnnHtp.poll`](#qnnhtppoll-costs-260-cpu-and-buys-nothing-here)). A per-slot `poll` wins over this. Text slots only; VLM slots are unaffected. |
 | `SLOT_LOAD_ORDER` | optional | `"vlm-first"` | Which slot kind is created first when both `TEXT_SLOTS` and `VLM_SLOTS` are set: `"vlm-first"` or `"text-first"`. See [Slot creation order](#slot-creation-order-slot_load_order) and [Loading Two Models at Once](#loading-two-models-at-once). Any other value is rejected at startup. |
-| `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens"}, ...]`. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
+| `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens","pipeline_script","node_configs","static_tensors"}, ...]`. Only `model_root` is required — the bundle layout is read from the bundle itself and `spec` (the VLM family) is auto-detected when omitted; the last three are an escape hatch for a layout `vlm_layout.py` cannot read on its own. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
 | `PREFIX_CACHE_DIR` | optional | `"./prefix_cache"` | Directory for the prefix KV cache and HTP extension config copies (`.htp_ext_cache/`). A relative value is resolved against the server's working directory, so an absolute path is worth setting if the server may be started from anywhere but its own directory. |
 | `MODELS_BASE_DIR` | optional | (unset) | Base directory every **relative** model path resolves against: `TEXT_SLOTS`/`VLM_SLOTS` `model_root` at startup, and `POST /v1/models/switch`'s `model_dir`. An **absolute** path ignores it and is used as given. Unset, a relative path is resolved against the server's working directory. Set this and a config can name each model by bare directory name. Note it is a base, not a sandbox — an absolute `model_dir` still loads from outside the tree. |
 | `CHAT_TEMPLATE` | optional | (unset = auto-detect) | Pins the chat template to `"llama3"` / `"llama2"` / `"chatml"` / `"gemma"` / `"gemma4"`. Overrides for every slot. If unset, each slot auto-detects it from its model directory name (see [the relevant section](#chat-template-selection-rules)). |
@@ -1196,7 +1197,7 @@ client sees 3.017 s total against 0.185 + 2.816 = 3.001 s of SDK time — about
 
 ## VLM (Multimodal) Support
 
-Image-input models like Qwen3-VL are supported via `genie_server/genie_node.py` (the `GenieNode`/`GeniePipeline` ctypes bindings — the generic plumbing layer) and `genie_server/vlm_specs.py` (model-specific preprocessing, node topology, and prompt templates). This is **a completely separate subsystem from the text-only `Slot`/`GenieDialog` path**, and has zero effect on any existing text-only endpoint's behavior.
+Image-input models like Qwen3-VL are supported via `genie_server/genie_node.py` (the `GenieNode`/`GeniePipeline` ctypes bindings — the generic plumbing layer), `genie_server/vlm_layout.py` (reads which node configs to load, how they connect, and which static tensors to feed straight from the bundle's own genie-app script or `metadata.json` — see [Bundle layout auto-read](#bundle-layout-auto-read)), and `genie_server/vlm_specs/` (one module per model family: preprocessing, node-topology defaults, and the prompt template). This is **a completely separate subsystem from the text-only `Slot`/`GenieDialog` path**, and has zero effect on any existing text-only endpoint's behavior.
 
 Without `numpy`/`Pillow` installed, this is automatically disabled (a warning is logged at startup, `VLM_SLOTS` is ignored) and the server starts as text-only.
 
@@ -1207,18 +1208,26 @@ Add a `VLM_SLOTS` key alongside `TEXT_SLOTS` in `env_config.json`:
 ```json
 {
   "VLM_SLOTS": [
-    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl", "spec": "qwen3_vl"}
+    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl"}
   ]
 }
 ```
 
-Under `model_root`, in addition to the file set `genie-app-script.txt` expects (`img-enc-htp.json`, `text-encoder.json`, `text-generator.json`, `vision_encoder.bin`, each `ctx-bins`, `embedding_weights.raw`, `tokenizer.json`), you also need
-`sample_inputs/{position_ids_cos,position_ids_sin,full_attention_mask,window_attention_mask}.raw`
-for positional encoding/attention masks (loaded once at startup assuming a fixed resolution, then reused for every subsequent request — see `VLMSpec.static_tensor_files` in `genie_server/vlm_specs.py`). When `device_id` is given, each node's HTP extension config is rewritten for NSP pinning using the same mechanism as `Slot` (`slots.pin_htp_device`).
+`model_root` needs nothing beyond what the bundle itself ships: `vlm_layout.py` reads which node configs to load, how they connect, and which static tensors to feed from the bundle's own genie-app script (or `metadata.json`, when the export carries one) — see [Bundle layout auto-read](#bundle-layout-auto-read) for the exact rule and the escape hatch for a layout it cannot read. When `device_id` is given, each node's HTP extension config is rewritten for NSP pinning using the same mechanism as `Slot` (`slots.pin_htp_device`).
 
-`spec` is a key into `vlm_specs.VLM_SPECS`: `"qwen3_vl"` (the default) or `"gemma4"`. To support a different model or a different resolution export, register a new `VLMSpec` in `genie_server/vlm_specs.py` (the same idea as GenieX's `core/` vs `models/*.h` split — no other file needs to change).
+`spec` names the VLM family (`vlm_specs.FAMILIES`: `"qwen3_vl"` or `"gemma4"`) explicitly. **Omitted, it is auto-detected** from the bundle's own `tokenizer.json` and node configs (`vlm_specs.detect_family`) — most deployments need nothing else. Pass it explicitly only when a bundle's tokenizer is ambiguous between families, or to force one. To support a new model, add one module under `genie_server/vlm_specs/` and register it in `FAMILIES` (the same idea as GenieX's `core/` vs `models/*.h` split — no other file needs to change); a new **bundle layout** of an already-supported model needs no code change at all.
 
-**`"gemma4"`** takes the three node configs a Gemma 4 LMM bundle ships (`image-encoder.json`, `text-encoder.json`, `text-generator.json`) and no `sample_inputs/`: the encoder's position ids and pooling index are computed on the device from `vision-param` in `image-encoder.json`. That block is read once, when the node is created, so **the patch grid is fixed per slot, not per image**. Every image is resized to `height` × `width` patches of 16 px whatever its aspect ratio, where Gemma 4's own processor would pick a grid per image; set `vision-param` to the grid that suits your input (for 16:9, `36` × `63`). `height` × `width` must not exceed the 2,520 patches the encoder was exported with, and both must be multiples of `pooling-kernel-size`. One image or video frame costs `height` × `width` / `pooling-kernel-size`² tokens (260 for 39 × 60, 64 for 24 × 24). A `video_url` is encoded one frame per step at that same grid (see [Video input](#video-input)); Gemma 4's own processor budgets 70 soft tokens per video frame against 280 per still, so **a slot meant for video wants the smaller grid** (24 × 24 for 512 × 512 frames), and images and video each at their own budget take two slots. The per-layer embedding tables, and the per-channel scale/offset files of a QAT export, are resolved against `model_root` like every other path — for a text slot's `genie_config.json` as well. If the bundle's `text-encoder.json` names a `context.bos-token`, libGenie prepends it to **every text segment**, so a prompt with N images carries it N+1 times; the server leaves that as declared, writes no `<bos>` of its own, counts those tokens in `usage`, and logs a warning at startup. Omit `bos-token` there to get the single `<bos>` Gemma 4's chat format has.
+#### Bundle layout auto-read
+
+`vlm_layout.py` reads a bundle's node configs, connections, and static tensors in this order (first match wins):
+
+1. An explicit override in the `VLM_SLOTS[]` entry — `pipeline_script` (a script to parse instead of searching for one), `node_configs` (`{role: path}`, skips layout-reading entirely), `static_tensors` (`{IO name: path}`, always applied on top of whichever source produced the rest). The escape hatch for a layout this module cannot yet read on its own.
+2. The genie-app script: `metadata.json`'s `genie.pipeline` block first (with `genie.sample_inputs` as the static tensors), then a script file by name (`genie-app-script.txt`, `VLMScript*`, `LMMScript*`, `genie_app_image.txt`), then — failing those — any small text file directly under the bundle whose first line is `version` and that contains `pipeline create`.
+3. Legacy fallback: the fixed `img-enc-htp.json` / `image-encoder.json` filenames this server hard-coded before this module existed, for a bundle that ships neither a script nor a `metadata.json` pipeline.
+
+Each node's role (image-encoder / text-encoder / text-generator) is decided by its own config's top-level key, not by its name in the script — a missing or duplicate role is a startup error. A bundle that ships only a `dialog` config and no node configs (the GenieX pipeline format) is refused at startup with that reason; see [Platform Notes](./PLATFORM_NOTES.md#geniex-vlm-bundles-are-out-of-scope) for why.
+
+**`"gemma4"`** reads its patch grid from `vision-param` in the image-encoder config the layout points at: the encoder's position ids and pooling index are computed on the device from that block. It is read once, when the node is created, so **the patch grid is fixed per slot, not per image**. Every image is resized to `height` × `width` patches of 16 px whatever its aspect ratio, where Gemma 4's own processor would pick a grid per image; set `vision-param` to the grid that suits your input (for 16:9, `36` × `63`). `height` × `width` must not exceed the 2,520 patches the encoder was exported with, and both must be multiples of `pooling-kernel-size`. One image or video frame costs `height` × `width` / `pooling-kernel-size`² tokens (260 for 39 × 60, 64 for 24 × 24). A `video_url` is encoded one frame per step at that same grid (see [Video input](#video-input)); Gemma 4's own processor budgets 70 soft tokens per video frame against 280 per still, so **a slot meant for video wants the smaller grid** (24 × 24 for 512 × 512 frames), and images and video each at their own budget take two slots. The per-layer embedding tables, and the per-channel scale/offset files of a QAT export, are resolved against `model_root` like every other path — for a text slot's `genie_config.json` as well. If the bundle's `text-encoder.json` names a `context.bos-token`, libGenie prepends it to **every text segment**, so a prompt with N images carries it N+1 times; the server leaves that as declared, writes no `<bos>` of its own, counts those tokens in `usage`, and logs a warning at startup. Omit `bos-token` there to get the single `<bos>` Gemma 4's chat format has.
 
 ### Slot creation order (`SLOT_LOAD_ORDER`)
 
@@ -1354,7 +1363,7 @@ the SDK does expose is the text-generator node's `max-num-tokens`, which Genie r
 {
   "VLM_SLOTS": [
     {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl",
-     "spec": "qwen3_vl", "max_tokens": 1024}
+     "max_tokens": 1024}
   ]
 }
 ```
@@ -1368,10 +1377,11 @@ the SDK does expose is the text-generator node's `max-num-tokens`, which Genie r
 Because the value is baked into the node at creation time, changing it means editing
 `env_config.json` and **restarting the server**. There is no endpoint to change it at
 runtime, and it applies to every request on that slot. Confirm the value that took
-effect in the startup log:
+effect in the startup log, which also says which family was detected and where its
+layout came from:
 
 ```
-VLM slot 'vision' ready: model=qwen3-vl device_id=0 spec=qwen3_vl max-num-tokens=1024
+VLM slot 'vision' ready: model=qwen3-vl device_id=0 family=qwen3_vl (layout: metadata.json genie.pipeline) max-num-tokens=1024
 ```
 
 An uncapped slot logs `max-num-tokens=(uncapped)` instead.

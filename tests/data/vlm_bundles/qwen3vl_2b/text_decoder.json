@@ -1,0 +1,1 @@
+{"text-generator": {"engine": {"model": {"positional-encoding": {"rope-scaling": {"rope-type": "qwen3vl-mrope", "time-step": 1, "spatial-merge-size": 2}}}}}}

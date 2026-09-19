@@ -247,6 +247,36 @@ op data の合計**が課金されます。24回の起動で、すべての配�
 `err 1002` がぶつかる予算は**マッピングの予算**(ページテーブルと DSP のアドレス空間)であり、
 **コンテキストの本数ではなくマップする量に従い**、**ゲストからは見えない**。自分のプラットフォームでどこを見ればよいかは Qualcomm が答えるべきことです。
 
+## VLMバンドルのレイアウト
+
+`genie_server/vlm_layout.py`は、VLMバンドルのノード設定・接続・静的テンソルを、このサーバが
+モデルごとに固定で持つのではなく**バンドル自身**(そのgenie-appスクリプト、または`metadata.json`を
+持つならそちら)から読む — [バンドルレイアウトの自動読み取り](./MANUAL.ja.md#バンドルレイアウトの自動読み取り)参照。
+実際に確認したバンドルは、トポロジだけでは見えない差がある:
+
+| バンドル | ノード設定 | スクリプト | 静的テンソル | 解像度の出どころ |
+|---|---|---|---|---|
+| AI Hub Qwen3-VL-4B(genie / geniex_qcs9075) | `img-enc-htp.json` `text-encoder.json` `text-generator.json` | `genie-app-script.txt` | cos/sin/マスク2つ(`sample_inputs/`) | `metadata.json`の`genie.vision_preprocessing`(512²) |
+| Qwen3-VL-4B DeepStackチュートリアル(0.2.0.0) | `image_encoder.json` `text_encoder.json` `text_decoder_vlm_base.json` | `VLMScript_base` | 無し(位置ID・マスクはデバイス側で計算) | image-encoderの`vision-param`(パッチ単位) |
+| Qwen3-VL-2Bチュートリアル | `image_encoder.json` `text_encoder.json`(量子化しないFP32、bos無し) `text_decoder.json` | `LMMScript` | 無し | image-encoderの`vision-param` |
+| Gemma 4 E2B(qairt_convert / Qualcomm) | `image-encoder.json` `text-encoder.json` `text-generator.json` | `genie_app_image.txt` | 無し | image-encoderの`vision-param` + pooling |
+
+どれも`VLM_SLOTS[]`に`model_root`以外の上書きを一切書かずにロードできる —
+`spec`(ファミリー)は自動判定され、レイアウトは
+[バンドルレイアウトの自動読み取り](./MANUAL.ja.md#バンドルレイアウトの自動読み取り)の優先順で
+そのバンドルが最初に当てはまったものから読まれる。
+
+### GenieX VLMバンドルは対象外
+
+GenieX形式のマルチモーダルエクスポート(執筆時点でGemma 4 E4Bのみ確認)は、単一の`dialog`設定
+だけを持ち、`image-encoder`/`text-encoder`/`text-generator`のノード設定を**一切持たない**
+— パイプライン全体が、テキスト専用バンドルと同じ形の1個のdialogに畳み込まれている。
+`vlm_layout.py`にはこの形から読めるものが無い: スクリプトも`metadata.json`の`genie.pipeline`も
+無く、フォールバック先の固定ファイル名も無い。分かりにくい「ファイルが見つからない」エラーに
+するよりは、この形に見えるバンドルは理由を明示して起動時に拒否する。対応するには、この
+サブシステム全体の土台である`GenieNode`/`GeniePipeline` composable pipelineとは形の異なる
+第三の`GenieDialog`ベースの経路がVLMスロットに要ることになり、現時点では対象外とする。
+
 ## 本ドキュメントの他の記述をどう読むか
 
 以下はいずれも上記の機体での実測値です。**その機体については正直な数値ですが、

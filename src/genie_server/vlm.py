@@ -27,6 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import capi
+from . import vlm_layout
 from .config import ServerConfig
 from .slots import (resolve_and_verify, resolve_lut_paths, pin_htp_device,
                     load_tokenizer_file)
@@ -116,17 +117,17 @@ def _load_vlm_node_config(config_path: Path, device_id: int | None,
     return node_cfg
 
 
-def _load_pipeline_tokenizer(node_cfgs: dict):
-    """The tokenizer.json this pipeline's text nodes use, or None.
+def _pipeline_tokenizer_path(node_cfgs: dict) -> str | None:
+    """The tokenizer.json path this pipeline's text nodes use, or None.
 
     GenieNode exposes no tokenizer to the host, but every node config that
     tokenizes names the file it does it with, and _load_vlm_node_config has
-    already resolved that to an absolute path. Loading the same file here is
-    what puts a VLM slot's `usage` on the same basis as a text slot's.
+    already resolved that to an absolute path.
 
     The text-generator's is preferred: its ids are the ones the generation is
-    counted in. Every spec so far points both text nodes at one file, so the
-    text-encoder is only a fallback for a spec where the generator has none.
+    counted in. Every family so far points both text nodes at one file, so
+    the text-encoder is only a fallback for a bundle where the generator has
+    none.
     """
     for node_key in ("text_generator", "text_encoder"):
         cfg = node_cfgs.get(node_key)
@@ -134,8 +135,30 @@ def _load_pipeline_tokenizer(node_cfgs: dict):
             continue
         path = next(iter(cfg.values())).get("tokenizer", {}).get("path")
         if path:
-            return load_tokenizer_file(path)
+            return path
     return None
+
+
+def _load_pipeline_tokenizer(node_cfgs: dict):
+    """The tokenizer this pipeline's text nodes use, or None. Loading it is
+    what puts a VLM slot's `usage` on the same basis as a text slot's."""
+    path = _pipeline_tokenizer_path(node_cfgs)
+    return load_tokenizer_file(path) if path else None
+
+
+def _pipeline_tokenizer_json(node_cfgs: dict) -> dict:
+    """The raw parsed tokenizer.json (added_tokens and all), or {} — used
+    only for vlm_specs.detect_family, which needs the JSON's own fields
+    (added_tokens) rather than the loaded HF Tokenizer object."""
+    path = _pipeline_tokenizer_path(node_cfgs)
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _context_size(node_cfgs: dict) -> int:
@@ -168,26 +191,34 @@ def _text_encoder_bos(node_cfgs: dict) -> int | None:
 class VLMSlot:
     """One independent VLM pipeline: image-encoder + text-encoder +
     text-generator GenieNodes wired into a GeniePipeline, per a
-    vlm_specs.VLMSpec's topology. Optionally pinned to a single HTP device
-    the same way a text Slot is."""
+    vlm_layout.BundleLayout's topology and a vlm_specs.VLMFamily's
+    preprocessing. Optionally pinned to a single HTP device the same way a
+    text Slot is."""
 
     # The bos-token libGenie's LUT text-encoder prepends to every text
     # segment, or None; see __init__.
     text_encoder_bos = None
 
     def __init__(self, name: str, device_id: int | None, model_root: Path,
-                 spec_name: str, htp_ext_cache_dir: Path, max_tokens: int = 0,
-                 log_handle=None):
+                 spec_name: str | None, htp_ext_cache_dir: Path, max_tokens: int = 0,
+                 log_handle=None, pipeline_script: str | None = None,
+                 node_configs: dict | None = None, static_tensors: dict | None = None):
         self.name = name
         self.device_id = device_id
         self.model_root = model_root
         self.max_tokens = max_tokens
-        self.spec = vlm_specs.get_spec(spec_name)
         self.lock = threading.Lock()
         self.active_model_id = model_root.name
         # Filled in below from the text-generator node's tokenizer.json, the
         # same file the node itself tokenizes with — see count_tokens.
         self.tokenizer = None
+
+        # Read straight from the bundle (or an explicit VLM_SLOTS[]
+        # override) — see vlm_layout.py's module docstring for the priority
+        # order.
+        self.layout = vlm_layout.read_layout(
+            model_root, pipeline_script=pipeline_script,
+            node_configs=node_configs, static_tensors=static_tensors)
 
         # Create the text-generator FIRST, then everything else. On QAIRT
         # 2.49 the image-encoder's context reserves DSP memory in a way that
@@ -203,21 +234,32 @@ class VLMSlot:
         # 2.50.0.260828 does not need this -- genie-app runs that same script
         # in its own order there -- but which layer fixed it was not
         # established, and every 2.49.x still needs it, so it stays.
-        # Pipeline add/connect order still follows the spec.
-        node_keys = sorted(self.spec.node_config_files,
+        # Pipeline add/connect order still follows the layout.
+        node_keys = sorted(self.layout.node_config_files,
                            key=lambda k: k != "text_generator")
         node_cfgs = {}
         for node_key in node_keys:
             cfg_path = Path(resolve_and_verify(
-                self.spec.node_config_files[node_key], model_root))
+                self.layout.node_config_files[node_key], model_root))
             node_cfgs[node_key] = _load_vlm_node_config(
                 cfg_path, device_id, name, node_key, htp_ext_cache_dir, max_tokens)
-        # Before any node exists, so a spec can both read the bundle's own
-        # settings (Gemma 4's patch grid) and adjust the configs the nodes are
-        # built from. Reading configs allocates nothing on the device, so
-        # loading them all first leaves the creation order below unchanged.
-        if self.spec.bind is not None:
-            self.spec = self.spec.bind(self.spec, node_cfgs)
+
+        # Before any node exists, so a family's bind() can both read the
+        # bundle's own settings (Gemma 4's patch grid, Qwen3-VL's
+        # vision-param) and adjust the configs the nodes are built from.
+        # Reading configs allocates nothing on the device, so resolving the
+        # family here leaves the creation order below unchanged. spec_name
+        # absent means auto-detect from the bundle's tokenizer + node configs
+        # (config.py's VLMSlotSpec.spec — None = auto).
+        if spec_name:
+            family = vlm_specs.get_family(spec_name)
+        else:
+            family = vlm_specs.detect_family(
+                _pipeline_tokenizer_json(node_cfgs), node_cfgs)
+            logger.info(f"[{name}] VLM family auto-detected: {family.name} "
+                       f"(layout: {self.layout.source})")
+        self.spec = vlm_specs.resolve(family, self.layout, node_cfgs)
+
         # The LUT text-encoder prepends its configured bos-token on every
         # setData, and a prompt reaches it as one segment per stretch of text
         # around each image. That is left as the bundle declares it — the
@@ -233,7 +275,9 @@ class VLMSlot:
                 "declares it; drop bos-token from the text-encoder config to keep "
                 "only the BOS the model's chat format itself has, if any.")
         self.spec = replace(self.spec,
-                            text_encoder_adds_bos=self.text_encoder_bos is not None)
+                            text_encoder_adds_bos=self.text_encoder_bos is not None,
+                            static_tensor_files=vlm_layout.resolve_static_tensors(
+                                node_cfgs, self.spec.static_tensor_files, name))
         built = {}
         for node_key in node_keys:
             built[node_key] = genie_node.Node(node_cfgs[node_key], log_handle=log_handle)
@@ -308,12 +352,15 @@ def create_vlm_slots(config: ServerConfig, genie_cdll,
         vslot = VLMSlot(name=spec.name, device_id=spec.device_id,
                         model_root=spec.model_root, spec_name=spec.spec,
                         htp_ext_cache_dir=htp_ext_cache_dir,
-                        max_tokens=spec.max_tokens, log_handle=log_handle)
+                        max_tokens=spec.max_tokens, log_handle=log_handle,
+                        pipeline_script=spec.pipeline_script,
+                        node_configs=spec.node_configs,
+                        static_tensors=spec.static_tensors)
         out.append(vslot)
         logger.info(
             f"VLM slot '{vslot.name}' ready: model={vslot.active_model_id} "
             f"device_id={vslot.device_id if vslot.device_id is not None else '(unpinned)'} "
-            f"spec={vslot.spec.name} "
+            f"family={vslot.spec.name} (layout: {vslot.layout.source}) "
             f"max-num-tokens={vslot.max_tokens or '(uncapped)'}")
     return out
 
@@ -627,7 +674,7 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
         try:
             with vslot.lock:
                 vslot.text_generator.set_text_callback(
-                    vslot.spec.text_generator_text_output_io, on_text)
+                    vlm_layout.TEXT_GENERATOR_TEXT_OUTPUT_IO, on_text)
                 sampler_params = capi.make_sampler_params(
                     {}, params.temperature, params.top_p, params.top_k, params.seed)
                 if sampler_params:
@@ -642,11 +689,11 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                 for kind, value in segments:
                     if kind == "text":
                         vslot.text_encoder.set_text(
-                            spec.text_encoder_text_input_io, value)
+                            vlm_layout.TEXT_ENCODER_TEXT_INPUT_IO, value)
                     else:  # "step" — one image-encoder execution
                         pixel_values = spec.preprocess_step(images, value, spec)
                         vslot.image_encoder.set_buffer(
-                            spec.image_encoder_image_input_io, pixel_values)
+                            vlm_layout.IMAGE_ENCODER_IMAGE_INPUT_IO, pixel_values)
                         for io_name, static_bytes in vslot.static_tensors.items():
                             vslot.image_encoder.set_buffer(io_name, static_bytes)
                 vslot.pipeline.execute()

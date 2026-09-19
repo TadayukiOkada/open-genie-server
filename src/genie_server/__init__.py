@@ -10,7 +10,8 @@ Package layout:
     engine.py        the generation engine (lock, watchdog, prefix cache, SDK params)
     vlm.py           multimodal (image) request parsing + GenieNode pipeline driving
     genie_node.py    ctypes bindings for the GenieNode/GeniePipeline composable API
-    vlm_specs.py     per-VLM-model specs (preprocessing, topology, prompt template)
+    vlm_layout.py    VLM bundle layout auto-read (node configs, connections, static tensors)
+    vlm_specs/       per-VLM-family specs (preprocessing, topology defaults, prompt template)
     logprobs.py      token logprobs via the SDK's custom-sampler hook
     protocol.py      OpenAI wire-format builders and error shapes
     app.py           FastAPI application factory (all HTTP routes)

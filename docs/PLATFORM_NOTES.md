@@ -273,6 +273,41 @@ are *mapping* budgets — page tables and the DSP's address space — they follo
 how much is mapped rather than how many contexts there are, and they are not
 visible from the guest. Where to look on your own platform is Qualcomm's to answer.
 
+## VLM bundle layouts
+
+`genie_server/vlm_layout.py` reads a VLM bundle's node configs, connections,
+and static tensors from the bundle itself (its genie-app script, or
+`metadata.json`, when it ships one) instead of this server hard-coding them
+per model — see [Bundle layout auto-read](./MANUAL.md#bundle-layout-auto-read).
+The bundles this was verified against differ more than the topology alone
+suggests:
+
+| Bundle | Node configs | Script | Static tensors | Resolution comes from |
+|---|---|---|---|---|
+| AI Hub Qwen3-VL-4B (genie / geniex_qcs9075) | `img-enc-htp.json` `text-encoder.json` `text-generator.json` | `genie-app-script.txt` | cos/sin/2 masks (`sample_inputs/`) | `metadata.json` `genie.vision_preprocessing` (512²) |
+| Qwen3-VL-4B DeepStack tutorial (0.2.0.0) | `image_encoder.json` `text_encoder.json` `text_decoder_vlm_base.json` | `VLMScript_base` | none (position ids/masks computed on device) | image-encoder `vision-param` (in patches) |
+| Qwen3-VL-2B tutorial | `image_encoder.json` `text_encoder.json` (FP32 LUT, no bos) `text_decoder.json` | `LMMScript` | none | image-encoder `vision-param` |
+| Gemma 4 E2B (qairt_convert / Qualcomm) | `image-encoder.json` `text-encoder.json` `text-generator.json` | `genie_app_image.txt` | none | image-encoder `vision-param` + pooling |
+
+Every one of these loads with no `VLM_SLOTS[]` override beyond `model_root` —
+`spec` (the family) auto-detects, and the layout comes from whichever priority
+in [Bundle layout auto-read](./MANUAL.md#bundle-layout-auto-read) the bundle
+matches first.
+
+### GenieX VLM bundles are out of scope
+
+A GenieX-format multimodal export (as of this writing, only seen for Gemma 4
+E4B) ships a single `dialog` config and **no** `image-encoder`/`text-encoder`/
+`text-generator` node configs — the whole pipeline is folded into one dialog,
+the same shape a text-only bundle uses. `vlm_layout.py` has nothing to read in
+that shape: there is no script, no `metadata.json` `genie.pipeline`, and none
+of the fixed node-config filenames it falls back to. Rather than fail with a
+confusing "file not found", a bundle that looks like this is refused at
+startup with the reason stated plainly. Supporting it would mean a third,
+`GenieDialog`-based code path for VLM slots — a materially different shape
+from the `GenieNode`/`GeniePipeline` composable pipeline this whole subsystem
+is built on — which is out of scope for now.
+
 ## Reading the rest of this documentation
 
 These claims are measurements from the bench above. They are honest about that
