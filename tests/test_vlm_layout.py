@@ -232,6 +232,79 @@ def test_static_tensors_override_applies_regardless_of_source(tmp_path):
     assert layout.static_tensor_files == {"IMAGE_ENCODER_IMAGE_POS_COS": "cos.raw"}
 
 
+def test_static_tensors_override_strips_a_genie_node_prefix(tmp_path):
+    """An operator copying a name straight out of a genie-app script
+    ('node set embedding ... GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_COS ...')
+    still resolves to the right IO — matching what the script parser itself
+    does — instead of silently storing an unusable key."""
+    (tmp_path / "img.json").write_text(json.dumps({"image-encoder": {}}))
+    (tmp_path / "b.json").write_text(json.dumps({"text-encoder": {}}))
+    (tmp_path / "c.json").write_text(json.dumps({"text-generator": {}}))
+    layout = vlm_layout.read_layout(
+        tmp_path,
+        node_configs={"image_encoder": "img.json", "text_encoder": "b.json",
+                     "text_generator": "c.json"},
+        static_tensors={"GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_COS": "cos.raw"})
+    assert layout.static_tensor_files == {"IMAGE_ENCODER_IMAGE_POS_COS": "cos.raw"}
+
+
+def test_static_tensors_override_rejects_an_io_the_image_encoder_cannot_take(tmp_path):
+    """A name that is not a real image-encoder auxiliary IO (wrong node, a
+    typo, or an output name) must fail at startup — not with a KeyError from
+    genie_node.NODE_IO on the first request that reaches the image encoder."""
+    (tmp_path / "img.json").write_text(json.dumps({"image-encoder": {}}))
+    (tmp_path / "b.json").write_text(json.dumps({"text-encoder": {}}))
+    (tmp_path / "c.json").write_text(json.dumps({"text-generator": {}}))
+    for bad_io in ("TEXT_ENCODER_EMBEDDING_OUTPUT",   # belongs to the wrong node
+                  "IMAGE_ENCODER_EMBEDDING_OUTPUT",   # the node's own output
+                  "IMAGE_ENCODER_IMAGE_POS_CSO"):     # typo
+        with pytest.raises(vlm_layout.LayoutError, match="invalid static tensor"):
+            vlm_layout.read_layout(
+                tmp_path,
+                node_configs={"image_encoder": "img.json", "text_encoder": "b.json",
+                             "text_generator": "c.json"},
+                static_tensors={bad_io: "x.raw"})
+
+
+def test_metadata_sample_inputs_only_take_image_encoder_entries():
+    """A sample_inputs entry that names the text-encoder or text-generator
+    node must never end up in static_tensor_files — vlm.py only ever feeds
+    these to the image encoder, so a wrongly-attributed entry would be set
+    on the wrong node instead of being dropped."""
+    model_root = FIXTURES / "ai_hub"
+    metadata = json.loads((model_root / "metadata.json").read_text())
+    # Same IO name as the genuine imageEncoder entry, but attributed to
+    # lutEncoder and pointing at a different file — appended last, so
+    # without the node-role filter it would clobber the correct value.
+    metadata["genie"]["sample_inputs"].append({
+        "node": "lutEncoder", "node_io": "GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_SIN",
+        "file": "bogus.raw"})
+    from genie_server.vlm_layout import _layout_from_metadata_pipeline
+    layout = _layout_from_metadata_pipeline(model_root, metadata)
+    assert layout.static_tensor_files["IMAGE_ENCODER_IMAGE_POS_SIN"] == \
+        "sample_inputs/position_ids_sin.raw"
+    assert len(layout.static_tensor_files) == 4
+
+
+def test_script_embedding_lines_only_take_image_encoder_lines(tmp_path):
+    """A 'node set embedding' line naming the text-encoder or text-generator
+    alias must never end up in static_tensor_files, for the same reason as
+    the metadata.json case above."""
+    (tmp_path / "img.json").write_text(json.dumps({"image-encoder": {}}))
+    (tmp_path / "txt.json").write_text(json.dumps({"text-encoder": {}}))
+    (tmp_path / "gen.json").write_text(json.dumps({"text-generator": {}}))
+    (tmp_path / "s.txt").write_text(
+        "version\n"
+        "node config create c1 img.json\nnode create imageEncoder c1\n"
+        "node config create c2 txt.json\nnode create lutEncoder c2\n"
+        "node config create c3 gen.json\nnode create textGenerator c3\n"
+        "node set embedding imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_COS cos.raw\n"
+        "node set embedding lutEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_SIN sin.raw\n"
+        "pipeline create GeniePipeline pipelineConfig\n")
+    layout = vlm_layout.read_layout(tmp_path, pipeline_script="s.txt")
+    assert layout.static_tensor_files == {"IMAGE_ENCODER_IMAGE_POS_COS": "cos.raw"}
+
+
 def test_generic_script_sniff_finds_an_unconventionally_named_script(tmp_path):
     (tmp_path / "image-encoder.json").write_text(json.dumps({"image-encoder": {}}))
     (tmp_path / "text-encoder.json").write_text(json.dumps({"text-encoder": {}}))
@@ -330,6 +403,27 @@ def test_qwen3vl_bind_refuses_a_merge_size_that_does_not_divide_the_grid():
     }
     layout = vlm_layout.BundleLayout(node_config_files={}, connections=[],
                                      static_tensor_files={}, source="test")
+    with pytest.raises(ValueError, match="divisible"):
+        qwen3vl_bind(spec, node_cfgs, layout)
+
+
+def test_qwen3vl_bind_catches_a_lopsided_grid_the_product_check_would_miss():
+    """27x36 patches at merge 2: the product (972) is divisible by merge**2
+    (4), so a check on the product alone would wrongly accept it — but
+    _qwen3vl_patchify reshapes grid_h and grid_w separately, and grid_h=27
+    is not divisible by 2 on its own. Must fail."""
+    from genie_server.vlm_specs.qwen3_vl import qwen3vl_bind
+
+    spec = vlm_specs.get_spec("qwen3_vl")
+    node_cfgs = {
+        "image_encoder": {"image-encoder": {"engine": {"model": {
+            "vision-param": {"height": 27, "width": 36},
+            "positional-encoding": {"rope-scaling": {"spatial-merge-size": 2}}}}}},
+        "text_generator": {"text-generator": {}},
+    }
+    layout = vlm_layout.BundleLayout(node_config_files={}, connections=[],
+                                     static_tensor_files={}, source="test")
+    assert (27 * 16 * 36 * 16 // (16 * 16)) % (2 ** 2) == 0    # the product check would pass
     with pytest.raises(ValueError, match="divisible"):
         qwen3vl_bind(spec, node_cfgs, layout)
 

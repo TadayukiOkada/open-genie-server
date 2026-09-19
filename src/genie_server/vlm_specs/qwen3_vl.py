@@ -277,12 +277,19 @@ def qwen3vl_bind(spec: "VLMSpec", node_cfgs: dict, layout) -> "VLMSpec":
             "qwen3_vl: could not determine the image resolution from "
             "vision-param, metadata.json genie.vision_preprocessing, or the "
             "family defaults")
-    patches = (spec.image_height // spec.patch_size) * (spec.image_width // spec.patch_size)
-    if patches % (spec.spatial_merge_size ** 2):
+    grid_h = spec.image_height // spec.patch_size
+    grid_w = spec.image_width // spec.patch_size
+    # _qwen3vl_patchify reshapes each of grid_h and grid_w into
+    # (grid // merge, merge) separately, so each one — not just their
+    # product — must be divisible by merge. A product that happens to be
+    # divisible by merge**2 (e.g. grid_h=27, grid_w=36, merge=2: 972 % 4 == 0)
+    # can still fail the reshape if only one side carries the factor.
+    if grid_h % spec.spatial_merge_size or grid_w % spec.spatial_merge_size:
         raise ValueError(
-            f"qwen3_vl: {patches} patches ({spec.image_height}x{spec.image_width} "
-            f"at patch {spec.patch_size}) is not divisible by "
-            f"spatial_merge_size**2 ({spec.spatial_merge_size}**2)")
+            f"qwen3_vl: {grid_h}x{grid_w} patches ({spec.image_height}x"
+            f"{spec.image_width} at patch {spec.patch_size}) is not "
+            f"divisible by spatial_merge_size ({spec.spatial_merge_size}) "
+            "in both dimensions")
     return spec
 
 

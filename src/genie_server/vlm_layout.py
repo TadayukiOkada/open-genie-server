@@ -34,6 +34,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import genie_node
 from .slots import resolve_and_verify
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,20 @@ _REQUEST_DEPENDENT_IO = {"TEXT_ENCODER_TEXT_INPUT", "IMAGE_ENCODER_IMAGE_INPUT"}
 _IMAGE_AUX_IO = {
     "IMAGE_ENCODER_IMAGE_POS_COS", "IMAGE_ENCODER_IMAGE_POS_SIN",
     "IMAGE_ENCODER_IMAGE_FULL_ATTN_MASK", "IMAGE_ENCODER_IMAGE_WINDOW_ATTN_MASK",
+}
+
+# Every IO name a static tensor may legitimately target: vlm.py only ever
+# calls image_encoder.set_buffer(io_name, ...) for entries in
+# static_tensor_files (never text_encoder/text_generator), so anything else
+# — a name from the wrong node, a typo, or a GENIE_NODE_-prefixed string
+# copied straight out of a genie-app script — is a startup-time mistake, not
+# a request-time KeyError. Excludes IMAGE_ENCODER_IMAGE_INPUT (request-
+# dependent) and IMAGE_ENCODER_EMBEDDING_OUTPUT (the node's own output, never
+# something the host feeds in).
+_STATIC_TENSOR_ALLOWED_IO = {
+    io for io in genie_node.NODE_IO
+    if io.startswith("IMAGE_ENCODER_") and io not in _REQUEST_DEPENDENT_IO
+    and io != "IMAGE_ENCODER_EMBEDDING_OUTPUT"
 }
 
 # The standard 3-node topology every known bundle uses. WILDCARD is needed
@@ -128,6 +143,21 @@ def _top_level_key(path: Path) -> str | None:
 
 def _strip_io(io_name: str) -> str:
     return io_name.removeprefix("GENIE_NODE_")
+
+
+def _check_static_tensor_ios(static_tensor_files: dict, model_root: Path) -> None:
+    """Raises LayoutError on a static tensor IO name that is not one
+    vlm.py's image_encoder.set_buffer() call can actually use — see
+    _STATIC_TENSOR_ALLOWED_IO. Runs on the fully-resolved layout regardless
+    of source, so a bad name is a startup error rather than a KeyError
+    (genie_node.NODE_IO[io_name]) on every request that reaches the image
+    encoder."""
+    bad = sorted(set(static_tensor_files) - _STATIC_TENSOR_ALLOWED_IO)
+    if bad:
+        raise LayoutError(
+            f"{model_root}: invalid static tensor IO name(s) {bad} — expected "
+            f"one of {sorted(_STATIC_TENSOR_ALLOWED_IO)} (a GENIE_NODE_ prefix, "
+            "if any, is stripped automatically)")
 
 
 def _read_metadata_json(model_root: Path) -> dict:
@@ -264,9 +294,14 @@ def _layout_from_script(model_root: Path, script_path: Path) -> BundleLayout:
         for p, pio, c, cio in connections_alias
         if p in alias_to_role and c in alias_to_role
     ]
+    # Only the image-encoder's own "node set embedding" lines are static
+    # tensors — vlm.py never calls set_buffer on any other node for these
+    # (see _STATIC_TENSOR_ALLOWED_IO). A line naming another node's alias is
+    # dropped here rather than fed to the wrong node.
     static_tensor_files: dict = {}
-    for iomap in embeddings_alias.values():
-        static_tensor_files.update(iomap)
+    for node_alias, iomap in embeddings_alias.items():
+        if alias_to_role.get(node_alias) == "image_encoder":
+            static_tensor_files.update(iomap)
 
     return BundleLayout(node_config_files=node_config_files, connections=connections,
                         static_tensor_files=static_tensor_files,
@@ -298,8 +333,13 @@ def _layout_from_metadata_pipeline(model_root: Path, metadata: dict) -> BundleLa
             alias_to_role[consumer], _strip_io(c.get("consumer_node_io", "")),
         ))
 
+    # Only entries the metadata itself attributes to the image-encoder are
+    # static tensors — a sample_inputs entry naming another node is dropped
+    # here rather than fed to the wrong node's set_buffer.
     static_tensor_files = {}
     for entry in genie_block.get("sample_inputs") or []:
+        if alias_to_role.get(entry.get("node")) != "image_encoder":
+            continue
         io = _strip_io(entry.get("node_io", ""))
         if io and io not in _REQUEST_DEPENDENT_IO and entry.get("file"):
             static_tensor_files[io] = entry["file"]
@@ -390,9 +430,15 @@ def read_layout(model_root: Path, *, pipeline_script: str | None = None,
             _raise_no_layout(model_root)
 
     if static_tensors:
-        layout = replace(layout, static_tensor_files=dict(static_tensors))
+        # Normalize the same way a script/metadata line would (a GENIE_NODE_
+        # prefix copied verbatim from a genie-app script is a likely mistake
+        # here, and the fully-resolved check below only ever sees the
+        # stripped form).
+        layout = replace(layout, static_tensor_files={
+            _strip_io(io): path for io, path in static_tensors.items()})
     layout = replace(layout, metadata=metadata)
     _validate_role_top_keys(layout.node_config_files, model_root)
+    _check_static_tensor_ios(layout.static_tensor_files, model_root)
     logger.info(f"[{model_root.name}] VLM bundle layout: {layout.source}")
     return layout
 
