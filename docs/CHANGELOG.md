@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — VLM bundle layouts are read from the bundle, not hard-coded per model
+
+Every VLM bundle needed its own hard-coded node-config filenames, connections
+and static tensors in `vlm_specs.py`, and only the AI Hub Qwen3-VL-4B and
+Gemma 4 E2B bundles actually ran as shipped. `vlm_layout.py` now reads all of
+that straight from the bundle itself — its own genie-app script, or
+`metadata.json` when it has one — so `VLM_SLOTS[].spec` is optional too,
+auto-detected from the bundle's tokenizer and node configs. Verified on the
+board against four bundles that all differ in shape: the AI Hub export, the
+Qwen3-VL-4B DeepStack tutorial bundle, the Qwen3-VL-2B tutorial bundle, and
+Gemma 4 E2B LMM.
+
+Everything here is an addition. An existing `VLM_SLOTS` config with an
+explicit `spec` keeps working exactly as before. The other two changes since
+1.2.0 are documentation corrections with no code behind them.
 
 ### Added
 
