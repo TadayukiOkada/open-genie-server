@@ -1,0 +1,1 @@
+{"image-encoder": {"engine": {"model": {"vision-param": {"height": 30, "width": 40}, "positional-encoding": {"type": "rope", "rope-dim": 80, "rope-theta": 10000.0, "rope-scaling": {"rope-type": "qwen2vl", "spatial-merge-size": 2, "patch-size": 16}}}}}}

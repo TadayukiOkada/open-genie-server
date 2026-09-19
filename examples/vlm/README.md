@@ -3,17 +3,20 @@
 *English | [日本語](./README.ja.md)*
 
 Steps for trying out the VLM support (`genie_server/vlm.py`, with the ctypes
-bindings in `genie_node.py` and the per-model preprocessing in `vlm_specs.py`)
-against a real Qwen3-VL bundle. See the "VLM (multimodal) support" section of
-docs/MANUAL.md for the full reference.
+bindings in `genie_node.py`, the bundle-layout auto-read in `vlm_layout.py`,
+and the per-model preprocessing in `vlm_specs/`) against a real Qwen3-VL
+bundle. See the "VLM (multimodal) support" section of docs/MANUAL.md for the
+full reference.
 
 ## Prerequisites
 
 - `numpy`/`Pillow` installed (`pip install .[vlm]` from the repository root, or `pip install numpy pillow`).
-- A Qwen3-VL bundle with the full set of `img-enc-htp.json`, `text-encoder.json`,
-  `text-generator.json`, `vision_encoder.bin`, `part*_of_4.bin`,
-  `embedding_weights.raw`, `tokenizer.json` and `sample_inputs/*.raw`. No models
-  ship with this repository — see the note at the top of the main README.
+- A Qwen3-VL bundle, as it ships from the export tooling — no models ship
+  with this repository, see the note at the top of the main README.
+  `vlm_layout.py` reads which files to load straight from the bundle's own
+  genie-app script (or `metadata.json`), so nothing here needs listing by
+  name; see [Bundle layout auto-read](../../docs/MANUAL.md#bundle-layout-auto-read)
+  if you want the exact rule.
 
 ## 1. Point env_config.json at the VLM bundle
 
@@ -26,7 +29,6 @@ docs/MANUAL.md for the full reference.
       "name": "vision",
       "device_id": 0,
       "model_root": "/path/to/qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p",
-      "spec": "qwen3_vl",
       "max_tokens": 1024
     }
   ]
@@ -35,6 +37,9 @@ docs/MANUAL.md for the full reference.
 
 `VLM_SLOTS` is a separate, parallel setting to `TEXT_SLOTS`; a chat request
 carrying an `image_url` content part is routed to a VLM slot automatically.
+`spec` (the VLM family) is left out here — it auto-detects from the bundle's
+own tokenizer and node configs. Pass `"spec": "qwen3_vl"` explicitly if you
+ever need to force it.
 
 > **Leaving `TEXT_SLOTS` out keeps this sample to one thing.** A text model and
 > a VLM *can* be resident together on the SA8255P this was tested on, but only
@@ -94,7 +99,7 @@ non-streaming reply for the same request.
 
 - Whether the response actually matches the image content. This is the real test
   of the normalization constants and patch ordering — see the comments on
-  `_qwen3vl_normalize` / `_qwen3vl_patchify` in `genie_server/vlm_specs.py`. A
+  `_qwen3vl_normalize` / `_qwen3vl_patchify` in `genie_server/vlm_specs/qwen3_vl.py`. A
   wrong patch order does not error; it produces confident nonsense.
 - That several images in one message do not break anything.
 - That `stream: true` and the non-streaming call return the same text.

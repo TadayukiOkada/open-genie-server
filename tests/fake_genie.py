@@ -249,6 +249,66 @@ class FakeGenieLib:
         return self.performance_policy.get(handle.value, 40)
 
 
+class FakeVLMNode:
+    """Stands in for genie_node.Node so VLMSlot can be built and exercised
+    with no libGenie.so and no ctypes — records what vlm.py sends it
+    (set_buffer/set_text/set_text_callback) instead of touching the NPU."""
+
+    def __init__(self, config, log_handle=None):
+        self.config = config
+        self.log_handle = log_handle
+        self.buffers: dict = {}
+        self.texts: list = []
+        self.text_callback = None
+        self.freed = False
+
+    def set_text(self, io_name, text):
+        self.texts.append((io_name, text))
+
+    def set_buffer(self, io_name, buf):
+        self.buffers[io_name] = buf
+
+    def set_text_callback(self, io_name, fn):
+        self.text_callback = (io_name, fn)
+
+    def get_sampler(self):
+        return FakeHandle(1)
+
+    def reset(self):
+        pass
+
+    def free(self):
+        self.freed = True
+
+
+class FakeVLMPipeline:
+    """Stands in for genie_node.Pipeline — records add()/connect() calls so
+    a test can check a VLMSlot wired the nodes the way its BundleLayout
+    said to, without a real GeniePipeline handle."""
+
+    def __init__(self, config_json=None, log_handle=None):
+        self.log_handle = log_handle
+        self.nodes: list = []
+        self.connections: list = []
+        self.executed = 0
+        self.freed = False
+
+    def add(self, node):
+        self.nodes.append(node)
+
+    def connect(self, producer, producer_io, consumer, consumer_io):
+        self.connections.append((producer, producer_io, consumer, consumer_io))
+
+    def execute(self):
+        self.executed += 1
+
+    def reset(self):
+        pass
+
+    def free(self):
+        self.freed = True
+
+
 class FakeTokenizer:
     """Whitespace 'tokenizer' with the two methods the server uses."""
 

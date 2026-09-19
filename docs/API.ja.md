@@ -168,14 +168,15 @@ Function callingはQwen3系(chatml)モデルで最もよく機能します。lla
      "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0}
   ],
   "vlm_slots": [
-    {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl"}
+    {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl",
+     "layout": "metadata.json genie.pipeline"}
   ]
 }
 ```
 
 - 各スロットの `context_occupancy` は、そのスロットのロックが即時取得できた場合のみ `GenieDialog_getValue(GENIE_DIALOG_PARAM_CONTEXT_OCCUPANCY)` で取得(取得できなければ `null`)。推論中でも本エンドポイント自体はブロックしません。
 - **`loaded` は「モデルが載っていないスロット」と「単に待機中のスロット」を区別する手段です。** `/v1/models/switch` が旧モデルを解放した後に新モデルのロードに失敗すると、そのスロットは `"loaded": false` のまま残り、以後そのスロットに触る全エンドポイントが、次の切り替えが成功するまで `503` を返します。
-- `vlm_slots` は常に存在し、VLMスロットが無ければ空配列です。VLMスロットは `phase` と `context_occupancy` を持ちません(composable pipeline がどちらも公開していないため)。
+- `vlm_slots` は常に存在し、VLMスロットが無ければ空配列です。VLMスロットは `phase` と `context_occupancy` を持ちません(composable pipeline がどちらも公開していないため)。`spec` はVLMファミリー(`vlm_specs.FAMILIES`)で、`VLM_SLOTS[].spec` を指定しなければ自動判定されます。`layout` はそのノード設定・接続・静的テンソルをどこから読んだか(genie-appスクリプト、`metadata.json`、レガシーの固定ファイル名、または明示的な`VLM_SLOTS[]`の上書き)— [バンドルレイアウトの自動読み取り](./MANUAL.ja.md#バンドルレイアウトの自動読み取り)参照。
 
 ### GET /v1/server/idle
 

@@ -90,7 +90,8 @@ Qualcomm のスタックは1つのハードウェアに3通りの名前を付け
 | `genie_server/engine.py` | 生成エンジン: ロック、ウォッチドッグ、SDKパラメータ、prefixキャッシュ、`finish_reason` |
 | `genie_server/vlm.py` | マルチモーダルリクエスト(`GenieNode`/`GeniePipeline`) |
 | `genie_server/genie_node.py` | `GenieNode`/`GeniePipeline` composable pipeline APIのctypesバインディング |
-| `genie_server/vlm_specs.py` | VLMモデルごとの固有スペック(前処理・ノード構成・プロンプトテンプレート) |
+| `genie_server/vlm_layout.py` | VLMバンドルレイアウトの自動読み取り(ノード設定・接続・静的テンソル) |
+| `genie_server/vlm_specs/` | VLMファミリーごとの固有スペック(前処理・ノード構成の既定値・プロンプトテンプレート) |
 | `genie_server/logprobs.py` | SDKのカスタムサンプラーフック経由のトークンlogprobs(サンプリング/teacher forcingの2モード) |
 | `genie_server/protocol.py` | OpenAIワイヤーフォーマットビルダとエラーエンベロープ |
 | `genie_server/app.py` | 全FastAPIルート(`create_app`) |
@@ -1114,8 +1115,10 @@ ctypesのオーバーヘッド**という内訳になります。
 
 ## VLM(マルチモーダル)対応
 
-`genie_server/genie_node.py`(`GenieNode`/`GeniePipeline` ctypesバインディング、汎用プラミング層)と
-`genie_server/vlm_specs.py`(モデル固有の前処理・ノード構成・プロンプトテンプレート)を介して、
+`genie_server/genie_node.py`(`GenieNode`/`GeniePipeline` ctypesバインディング、汎用プラミング層)、
+`genie_server/vlm_layout.py`(どのノード設定を読み・どう繋ぎ・どの静的テンソルを渡すかを、バンドル自身の
+genie-appスクリプトや`metadata.json`から読む — [バンドルレイアウトの自動読み取り](#バンドルレイアウトの自動読み取り)参照)、
+`genie_server/vlm_specs/`(モデルファミリーごとに1モジュール: 前処理・ノード構成の既定値・プロンプトテンプレート)を介して、
 Qwen3-VLのような画像入力モデルに対応する。**テキスト専用の`Slot`/`GenieDialog`経路とは
 完全に別のサブシステム**であり、既存のテキスト専用エンドポイントの挙動には一切影響しない。
 
@@ -1129,26 +1132,47 @@ Qwen3-VLのような画像入力モデルに対応する。**テキスト専用�
 ```json
 {
   "VLM_SLOTS": [
-    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl", "spec": "qwen3_vl"}
+    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl"}
   ]
 }
 ```
 
-`model_root`直下には`genie-app-script.txt`が想定するファイル一式(`img-enc-htp.json`,
-`text-encoder.json`, `text-generator.json`, `vision_encoder.bin`, 各`ctx-bins`,
-`embedding_weights.raw`, `tokenizer.json`)に加えて、位置エンコーディング/attention mask用の
-`sample_inputs/{position_ids_cos,position_ids_sin,full_attention_mask,window_attention_mask}.raw`
-が必要(固定解像度前提で起動時に一度だけ読み込み、以後の全リクエストで使い回す — 詳細は
-`genie_server/vlm_specs.py`の`VLMSpec.static_tensor_files`)。`device_id`が指定されている場合、`Slot`と
-同じ仕組み(`slots.pin_htp_device`)で各ノードのHTP拡張設定を書き換えてNSPピン留めする。
+`model_root`はバンドルが元々持っているものだけで足りる。`vlm_layout.py`がバンドル自身の
+genie-appスクリプト(エクスポートが`metadata.json`を持つならそちらを優先)から、どのノード設定を
+読み・どう繋ぎ・どの静的テンソルを渡すかを読み取る — 正確な規則と、読み取れないレイアウトの
+エスケープハッチは[バンドルレイアウトの自動読み取り](#バンドルレイアウトの自動読み取り)を参照。
+`device_id`が指定されている場合、`Slot`と同じ仕組み(`slots.pin_htp_device`)で各ノードのHTP拡張設定を
+書き換えてNSPピン留めする。
 
-`spec`は`vlm_specs.VLM_SPECS`のキーで、`"qwen3_vl"`(既定)か`"gemma4"`。別モデル/別
-解像度エクスポートに対応する場合は`genie_server/vlm_specs.py`に新しい`VLMSpec`を追加登録する
-(GenieXの`core/` vs `models/*.h`分離と同じ発想 — このファイル以外は変更不要)。
+`spec`はVLMファミリーを明示指定するキー(`vlm_specs.FAMILIES`: `"qwen3_vl"`か`"gemma4"`)。
+**省略すると、バンドル自身の`tokenizer.json`とノード設定から自動判定される**
+(`vlm_specs.detect_family`)— 大抵の構成ではこれだけで足りる。ファミリー判定が曖昧なトークナイザの
+バンドルや、強制したい場合だけ明示する。新しいモデルに対応するには`genie_server/vlm_specs/`配下に
+モジュールを1つ追加して`FAMILIES`に登録するだけでよい(GenieXの`core/` vs `models/*.h`分離と同じ発想 —
+このファイル以外は変更不要)。すでに対応済みモデルの**新しいバンドルレイアウト**にはコード変更が一切不要。
 
-**`"gemma4"`**はGemma 4 のLMMバンドルが持つノード設定3つ(`image-encoder.json`、`text-encoder.json`、
-`text-generator.json`)を読み、`sample_inputs/`は要らない。エンコーダの位置IDとプーリングの
-インデックスは、`image-encoder.json`の`vision-param`からデバイス側で作られる。この設定はノード生成時に
+#### バンドルレイアウトの自動読み取り
+
+`vlm_layout.py`はバンドルのノード設定・接続・静的テンソルを次の順で読む(最初に見つかったものが勝つ):
+
+1. `VLM_SLOTS[]`エントリの明示的な上書き — `pipeline_script`(探索の代わりに解析するスクリプトを直接指定)、
+   `node_configs`(`{role: path}`、レイアウト読み取りを完全にスキップ)、`static_tensors`
+   (`{IO名: path}`、他のどの経路で決まったレイアウトにも常に上書きで適用)。このモジュールがまだ読めない
+   レイアウトのためのエスケープハッチ。
+2. genie-appスクリプト: まず`metadata.json`の`genie.pipeline`ブロック(`genie.sample_inputs`を静的テンソルとして)、
+   次にファイル名で見つかるスクリプト(`genie-app-script.txt`、`VLMScript*`、`LMMScript*`、`genie_app_image.txt`)、
+   それも無ければ、1行目が`version`で`pipeline create`を含む、バンドル直下の小さなテキストファイル。
+3. レガシーフォールバック: このモジュールが存在する前からこのサーバに固定で入っていた
+   `img-enc-htp.json` / `image-encoder.json`のファイル名(スクリプトも`metadata.json`のpipelineも
+   持たないバンドル向け)。
+
+各ノードの役割(image-encoder / text-encoder / text-generator)は、スクリプト中の名前ではなく**その設定
+自身のトップレベルキー**で決まる — 役割が足りない、または重複している場合は起動時エラー。`dialog`設定だけで
+ノード設定が無いバンドル(GenieXのpipeline形式)は、その理由付きで起動時に拒否される。理由は
+[Platform Notes](./PLATFORM_NOTES.ja.md#geniex-vlmバンドルは対象外)参照。
+
+**`"gemma4"`**はレイアウトが指す image-encoder 設定の`vision-param`からパッチ格子を読む。エンコーダの
+位置IDとプーリングのインデックスは、その`vision-param`からデバイス側で作られる。この設定はノード生成時に
 1回だけ読まれるので、**パッチの格子は画像ごとではなくスロットごとに固定**になる。Gemma 4 自身の
 プロセッサは画像ごとに格子を選ぶが、ここではどの画像も縦横比に関係なく`height` × `width`パッチ
 (1パッチ16 px)に拡縮する。入力に合う格子を`vision-param`に書くこと(16:9 なら`36` × `63`)。

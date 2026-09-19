@@ -938,7 +938,8 @@ def create_app(state: ServerState) -> FastAPI:
             "slots": slot_reports,
             "vlm_slots": [
                 {"name": v.name, "device_id": v.device_id,
-                 "active_model": v.active_model_id, "spec": v.spec.name}
+                 "active_model": v.active_model_id, "spec": v.spec.name,
+                 "layout": v.layout.source}
                 for v in manager.vlm_slots
             ],
         }

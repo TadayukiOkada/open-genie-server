@@ -1,0 +1,31 @@
+version
+profile create genieProfile
+pipeline config create pipelineConfig
+pipeline config bind profile pipelineConfig genieProfile
+pipeline create GeniePipeline pipelineConfig
+node config create textGeneratorConfig text_decoder.json
+node config bind profile textGeneratorConfig genieProfile
+node create textGenerator textGeneratorConfig
+node config create imageEncoderConfig image_encoder.json
+node config bind profile imageEncoderConfig genieProfile
+node create imageEncoder imageEncoderConfig
+node config create lutEncoderConfig text_encoder.json
+node config bind profile lutEncoderConfig genieProfile
+node create lutEncoder lutEncoderConfig
+node set textCallback textGenerator GENIE_NODE_TEXT_GENERATOR_TEXT_OUTPUT
+pipeline add GeniePipeline imageEncoder
+pipeline add GeniePipeline lutEncoder
+pipeline add GeniePipeline textGenerator
+pipeline connect GeniePipeline imageEncoder GENIE_NODE_IMAGE_ENCODER_EMBEDDING_OUTPUT textGenerator GENIE_NODE_TEXT_GENERATOR_EMBEDDING_INPUT
+pipeline connect GeniePipeline imageEncoder GENIE_NODE_WILDCARD textGenerator GENIE_NODE_WILDCARD
+pipeline connect GeniePipeline lutEncoder GENIE_NODE_TEXT_ENCODER_EMBEDDING_OUTPUT textGenerator GENIE_NODE_TEXT_GENERATOR_EMBEDDING_INPUT
+node set textFile lutEncoder GENIE_NODE_TEXT_ENCODER_TEXT_INPUT prompt.prefix.txt
+node set image imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_INPUT inputs/pixel_values.raw
+node set textFile lutEncoder GENIE_NODE_TEXT_ENCODER_TEXT_INPUT prompt.suffix.txt
+pipeline execute GeniePipeline
+profile save genieProfile genie_profiling_stats.json
+node free imageEncoder
+node free lutEncoder
+node free textGenerator
+pipeline free GeniePipeline
+profile free genieProfile

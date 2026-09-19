@@ -1,0 +1,37 @@
+version
+pipeline config create pipelineConfig
+pipeline create GeniePipeline pipelineConfig
+
+node config create imageEncoderConfig img-enc-htp.json
+node create imageEncoder imageEncoderConfig
+
+node config create lutEncoderConfig text-encoder.json
+node create lutEncoder lutEncoderConfig
+
+node config create textGeneratorConfig text-generator.json
+node create textGenerator textGeneratorConfig
+node set textCallback textGenerator GENIE_NODE_TEXT_GENERATOR_TEXT_OUTPUT
+
+#Pipeline add and connect calls
+pipeline add GeniePipeline imageEncoder
+pipeline add GeniePipeline lutEncoder
+pipeline add GeniePipeline textGenerator
+
+pipeline connect GeniePipeline imageEncoder GENIE_NODE_IMAGE_ENCODER_EMBEDDING_OUTPUT textGenerator GENIE_NODE_TEXT_GENERATOR_EMBEDDING_INPUT
+pipeline connect GeniePipeline lutEncoder GENIE_NODE_TEXT_ENCODER_EMBEDDING_OUTPUT textGenerator GENIE_NODE_TEXT_GENERATOR_EMBEDDING_INPUT
+pipeline connect GeniePipeline imageEncoder GENIE_NODE_WILDCARD textGenerator GENIE_NODE_WILDCARD
+
+node set textFile lutEncoder GENIE_NODE_TEXT_ENCODER_TEXT_INPUT sample_inputs/prompt_prefix.txt
+node set image imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_INPUT sample_inputs/pixel_values.raw
+node set embedding imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_COS sample_inputs/position_ids_cos.raw
+node set embedding imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_POS_SIN sample_inputs/position_ids_sin.raw
+node set embedding imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_WINDOW_ATTN_MASK sample_inputs/window_attention_mask.raw
+node set embedding imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_FULL_ATTN_MASK sample_inputs/full_attention_mask.raw
+node set textFile lutEncoder GENIE_NODE_TEXT_ENCODER_TEXT_INPUT sample_inputs/prompt_suffix.txt
+
+pipeline execute GeniePipeline
+
+node free imageEncoder
+node free lutEncoder
+node free textGenerator
+pipeline free GeniePipeline

@@ -1,0 +1,1 @@
+{"text-generator": {"tokenizer": {"path": "tokenizer.json"}, "engine": {"model": {"positional-encoding": {"rope-scaling": {"rope-type": "qwen3vl-mrope", "spatial-merge-size": 2}}}}}}

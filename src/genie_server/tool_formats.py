@@ -11,7 +11,7 @@ The second is not JSON: strings are wrapped in a `<|"|>` delimiter, keys come
 in dictsort order, and type names are Gemini-flavoured (OBJECT, NUMBER). A
 configuration file can pick between dialects; it cannot describe one, which is
 why this is a registry of implementations rather than a schema. Adding a family
-means writing a class here — the same shape `vlm_specs.py` uses for VLMs.
+means writing a class here — the same shape `vlm_specs/` uses for VLMs.
 
 Each dialect supplies four things:
 

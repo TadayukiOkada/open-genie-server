@@ -102,13 +102,26 @@ class VLMSlotSpec:
     name: str
     device_id: int | None
     model_root: Path
-    spec: str
+    # The VLM family (vlm_specs.FAMILIES) to use. None = auto-detect it from
+    # the bundle's own tokenizer.json and node configs — see
+    # vlm_specs.detect_family. An explicit value always wins.
+    spec: str | None = None
     # Hard cap on generated tokens, baked into the text-generator node config
     # as "max-num-tokens". The composable-pipeline API exposes no per-request
     # token limit and no abort, so without a cap a generation that never emits
     # EOS runs until the context is exhausted, which permanently wedges the
     # slot (see vlm.VLMSlot). 0 disables the cap (the SDK default, UINT32_MAX).
     max_tokens: int = DEFAULT_VLM_MAX_TOKENS
+    # Escape hatch for a bundle layout vlm_layout.py cannot yet read on its
+    # own — see vlm_layout.py's module docstring. pipeline_script names a
+    # genie-app script to parse instead of searching for one by name;
+    # node_configs ({role: path}) skips layout-reading entirely; static_tensors
+    # ({IO name: path}) overrides whatever static tensors were otherwise found.
+    # All three are relative to model_root. None (the default) reads the
+    # bundle's own layout with no override.
+    pipeline_script: str | None = None
+    node_configs: dict | None = None
+    static_tensors: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -412,10 +425,17 @@ def _parse_vlm_slots(raw_cfg: dict,
     """VLM_SLOTS — a separate, parallel key to TEXT_SLOTS (VLM slots use a
     completely different handle type and are never mixed into text slots):
         "VLM_SLOTS": [
-          {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl",
-           "spec": "qwen3_vl"}
+          {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl"}
         ]
     model_root follows the same MODELS_BASE_DIR rule as TEXT_SLOTS.
+
+    "spec" names the VLM family explicitly (vlm_specs.FAMILIES); omitted, it
+    is auto-detected from the bundle (vlm_specs.detect_family). Most
+    deployments need nothing else — vlm_layout.py reads the rest (which node
+    configs, how they connect, which static tensors) from the bundle's own
+    genie-app script or metadata.json. "pipeline_script" / "node_configs" /
+    "static_tensors" are the escape hatch for a layout it cannot yet read on
+    its own; see VLMSlotSpec and vlm_layout.py's module docstring.
     """
     raw = raw_cfg.get("VLM_SLOTS") or []
     return tuple(
@@ -423,8 +443,11 @@ def _parse_vlm_slots(raw_cfg: dict,
             name=s.get("name", f"vlm{i}"),
             device_id=_parse_device_id(s.get("device_id"), s.get("name", f"vlm{i}")),
             model_root=resolve_model_path(s["model_root"], models_base_dir),
-            spec=s.get("spec", "qwen3_vl"),
+            spec=s.get("spec") or None,
             max_tokens=int(s.get("max_tokens", DEFAULT_VLM_MAX_TOKENS)),
+            pipeline_script=s.get("pipeline_script") or None,
+            node_configs=s.get("node_configs") or None,
+            static_tensors=s.get("static_tensors") or None,
         )
         for i, s in enumerate(raw)
     )

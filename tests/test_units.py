@@ -863,9 +863,10 @@ def _gemma4_node_cfgs(height=39, width=60, pool=3):
 
 def _gemma4(**grid):
     from genie_server import vlm_specs
+    family = vlm_specs.get_family("gemma4")
     spec = vlm_specs.get_spec("gemma4")
     cfgs = _gemma4_node_cfgs(**grid)
-    return spec.bind(spec, cfgs), cfgs
+    return family.bind(spec, cfgs, layout=None), cfgs
 
 
 def test_gemma4_grid_comes_from_the_bundle():
@@ -987,7 +988,7 @@ def test_gemma4_video_without_fps_writes_no_timestamps():
 
 
 def test_gemma4_timestamps_are_minutes_and_whole_seconds():
-    from genie_server.vlm_specs import _mmss
+    from genie_server.vlm_specs.gemma4 import _mmss
     assert [_mmss(t) for t in (0.0, 0.5, 1.0, 59.9, 61.9, 600.0)] == \
         ["00:00", "00:00", "00:01", "00:59", "01:01", "10:00"]
 
@@ -1992,7 +1993,7 @@ def test_a_step_is_dated_at_the_midpoint_of_its_frames():
     _calculate_timestamps averages the group's first and last frame times.
     Taking the first would label every step half a sampling interval early,
     and an unevenly sampled pair arbitrarily so."""
-    from genie_server.vlm_specs import _qwen3vl_step_time
+    from genie_server.vlm_specs.qwen3_vl import _qwen3vl_step_time
     assert _qwen3vl_step_time([0.0, 0.5, 1.0, 1.5], 0, 2) == 0.25
     assert _qwen3vl_step_time([0.0, 0.5, 1.0, 1.5], 2, 2) == 1.25
     # Uneven sampling: a pair spanning 0s to 10s is dated between them.
@@ -2003,7 +2004,7 @@ def test_the_odd_tail_is_dated_by_its_only_real_frame():
     """The last step repeats the final frame to fill itself, so its midpoint
     is that frame's own time — the same padding vLLM applies to the index
     list before pairing."""
-    from genie_server.vlm_specs import _qwen3vl_step_time
+    from genie_server.vlm_specs.qwen3_vl import _qwen3vl_step_time
     assert _qwen3vl_step_time([0.0, 0.5, 1.0], 2, 2) == 1.0
 
 

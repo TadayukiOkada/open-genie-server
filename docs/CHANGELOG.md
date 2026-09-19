@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Added
+
+- **VLM bundle layouts are read from the bundle, not hard-coded per model.**
+  `genie_server/vlm_layout.py` reads which node configs to load, how they
+  connect, and which static tensors to feed straight from the bundle's own
+  genie-app script (or `metadata.json`'s `genie.pipeline`, when it ships one),
+  falling back to the fixed filenames this server used before this module
+  existed. Verified against four layouts that all differ in shape: the AI Hub
+  Qwen3-VL-4B export, the Qwen3-VL-4B DeepStack tutorial bundle, the Qwen3-VL-2B
+  tutorial bundle, and Gemma 4 E2B — none of them need anything in
+  `VLM_SLOTS[]` beyond `model_root`. See [Bundle layout auto-read in
+  MANUAL.md](MANUAL.md#bundle-layout-auto-read) and [the per-bundle table in
+  PLATFORM_NOTES.md](PLATFORM_NOTES.md#vlm-bundle-layouts).
+- **`VLM_SLOTS[].spec` is now optional.** Left out, the VLM family is
+  auto-detected from the bundle's own `tokenizer.json` and node configs
+  (`vlm_specs.detect_family`); an explicit value still wins and still works
+  exactly as before. Zero or several families matching is a startup error
+  that says what to pass explicitly.
+- **`VLM_SLOTS[].pipeline_script` / `.node_configs` / `.static_tensors`**: an
+  escape hatch for a bundle layout `vlm_layout.py` cannot yet read on its own
+  — see MANUAL.md.
+- A bundle that ships only a `dialog` config and no node configs (the GenieX
+  pipeline format) is now refused at startup with that reason, instead of
+  failing later with a confusing "file not found" once layout auto-read
+  cannot find the fixed legacy filenames either. Out of scope for now — see
+  [PLATFORM_NOTES.md](PLATFORM_NOTES.md#geniex-vlm-bundles-are-out-of-scope).
+
+### For `VLMFamily`/`VLMSpec` authors
+
+`genie_server/vlm_specs.py` is now the package `genie_server/vlm_specs/`, and
+`VLMSpec` is split in two: `VLMFamily` (one module per model — preprocessing,
+node-topology *defaults*, chat template, `bind`, `detect`) and the resolved
+`VLMSpec` a family + a bundle's `vlm_layout.BundleLayout` combine into
+(`vlm_specs.resolve`). `bind` gains a third argument, the `BundleLayout`
+(including its parsed `metadata.json`, if any), so it can read whatever the
+bundle states beyond its node configs. `VLMSpec`'s six `*_io` fields
+(`text_encoder_text_input_io` and friends) are gone — they were GenieNode API
+constants, not per-model values, and now live as module constants in
+`vlm_layout.py`. Adding a new model is one file under `vlm_specs/` and one
+line in `vlm_specs.FAMILIES`, unchanged from before; a new **bundle layout**
+of an already-supported model now needs no code change at all.
+
+`qwen3_vl_deepstack` (previously its own hard-coded `VLMSpec` for the
+DeepStack tutorial bundle, added on a local branch that this absorbs) is now
+a compatibility alias for `qwen3_vl` — the layout comes from the bundle
+either way, so the two names select the same family.
+
 ### Documentation
 
 - **What the `err 1002` budgets count, corrected.** The reference bench's

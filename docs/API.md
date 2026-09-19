@@ -169,14 +169,15 @@ A non-blocking snapshot of current state. Since `bench_ttft.py` and similar tool
      "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0}
   ],
   "vlm_slots": [
-    {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl"}
+    {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl",
+     "layout": "metadata.json genie.pipeline"}
   ]
 }
 ```
 
 - Each slot's `context_occupancy` is fetched via `GenieDialog_getValue(GENIE_DIALOG_PARAM_CONTEXT_OCCUPANCY)` only if that slot's lock can be acquired immediately (`null` if it can't). This endpoint itself never blocks, even during inference.
 - **`loaded` is how you tell a slot that has no model from one that is merely idle.** A `/v1/models/switch` that frees the old model and then fails to load the new one leaves that slot `"loaded": false`, and every endpoint touching it answers `503` until a later switch succeeds.
-- `vlm_slots` is always present, empty when none are configured. VLM slots report no `phase` or `context_occupancy`: the composable pipeline exposes neither.
+- `vlm_slots` is always present, empty when none are configured. VLM slots report no `phase` or `context_occupancy`: the composable pipeline exposes neither. `spec` is the VLM family (`vlm_specs.FAMILIES`), auto-detected when `VLM_SLOTS[].spec` was not given; `layout` says where its node configs/connections/static tensors were read from (a genie-app script, `metadata.json`, a legacy fixed filename, or an explicit `VLM_SLOTS[]` override) — see [Bundle layout auto-read](./MANUAL.md#bundle-layout-auto-read).
 
 ### GET /v1/server/idle
 

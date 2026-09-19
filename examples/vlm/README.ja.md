@@ -3,16 +3,19 @@
 *[English](./README.md) | 日本語*
 
 VLM 対応(`genie_server/vlm.py`。ctypes バインディングは `genie_node.py`、
-モデルごとの前処理は `vlm_specs.py`)を実際の Qwen3-VL バンドルで試す手順です。
+バンドルレイアウトの自動読み取りは `vlm_layout.py`、モデルごとの前処理は
+`vlm_specs/`)を実際の Qwen3-VL バンドルで試す手順です。
 詳細なリファレンスは docs/MANUAL.ja.md の「VLM(マルチモーダル)対応」節を参照してください。
 
 ## 前提
 
 - `numpy`/`Pillow` がインストール済みであること(リポジトリ直下で `pip install .[vlm]`、または `pip install numpy pillow`)。
-- Qwen3-VL バンドル一式(`img-enc-htp.json`、`text-encoder.json`、
-  `text-generator.json`、`vision_encoder.bin`、`part*_of_4.bin`、
-  `embedding_weights.raw`、`tokenizer.json`、`sample_inputs/*.raw`)。
-  **モデルはこのリポジトリには含まれていません** — メインREADME冒頭の注記を参照してください。
+- Qwen3-VL バンドル(エクスポートツールが出したそのままの形)。**モデルはこの
+  リポジトリには含まれていません** — メインREADME冒頭の注記を参照してください。
+  どのファイルを読むかは`vlm_layout.py`がバンドル自身のgenie-appスクリプト
+  (または`metadata.json`)から読むので、ここで名前を列挙する必要はありません。
+  正確な規則は
+  [バンドルレイアウトの自動読み取り](../../docs/MANUAL.ja.md#バンドルレイアウトの自動読み取り)参照。
 
 ## 1. env_config.json を VLM バンドルに向ける
 
@@ -25,7 +28,6 @@ VLM 対応(`genie_server/vlm.py`。ctypes バインディングは `genie_node.p
       "name": "vision",
       "device_id": 0,
       "model_root": "/path/to/qwen3_vl_4b_instruct-genie-w4a16-qualcomm_sa8775p",
-      "spec": "qwen3_vl",
       "max_tokens": 1024
     }
   ]
@@ -33,7 +35,9 @@ VLM 対応(`genie_server/vlm.py`。ctypes バインディングは `genie_node.p
 ```
 
 `VLM_SLOTS` は `TEXT_SLOTS` と並列の独立した設定です。`image_url` パートを含む
-チャットリクエストは自動的に VLM スロットへ振り分けられます。
+チャットリクエストは自動的に VLM スロットへ振り分けられます。`spec`(VLMファミリー)は
+ここでは省略している — バンドル自身のトークナイザとノード設定から自動判定される。
+強制したいときだけ `"spec": "qwen3_vl"` と明示すればよい。
 
 > **`TEXT_SLOTS` を書いていないのは、このサンプルを1つの話題に絞るためです。**
 > 検証した SA8255P では、テキストモデルと VLM を**同時に常駐させられます**。
@@ -92,7 +96,7 @@ PYEOF
 ## 確認すべきこと
 
 - **応答が実際に画像の内容と合っているか。** これが正規化定数とパッチ順序の
-  本当のテストです(`genie_server/vlm_specs.py` の `_qwen3vl_normalize` /
+  本当のテストです(`genie_server/vlm_specs/qwen3_vl.py` の `_qwen3vl_normalize` /
   `_qwen3vl_patchify` のコメント参照)。**パッチ順序が誤っていてもエラーにはならず、
   自信たっぷりの出鱈目が返ります。**
 - 1つのメッセージに複数画像を入れても壊れないこと。
