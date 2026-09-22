@@ -5,7 +5,7 @@
 Qualcomm Genie C API (`libGenie.so`) を OpenAI互換のREST APIとして公開する、単一プロセスのFastAPIサーバです。[Hexagon NPU](./docs/MANUAL.ja.md#用語集)(本サーバが QNN HTP バックエンド経由で使うアクセラレータの、Qualcomm での呼び名)上で動くLLMを、`lm_eval`・`curl`・OpenAI SDK・[Open WebUI](https://github.com/open-webui/open-webui)等、一般的なOpenAI互換HTTPクライアントから叩けるようにします。実装本体は `genie_server` パッケージ(`src/genie_server/`)にあり、`genie-server.py` はランチャーです。
 
 > [!IMPORTANT]
-> このリポジトリは open-genie-server 自体のソースのみを含みます。動作させるには別途、Qualcomm から **QAIRT SDK**(`libGenie.so` を含む、Qualcomm の proprietary licenseで配布されるツールチェーン)と、Hexagon NPU向けにコンパイル済みのモデル一式(`genie_config.json` を含むモデルディレクトリ)を用意する必要があります。SDK・モデルはこのリポジトリには含まれておらず、[Qualcomm AI Hub](https://aihub.qualcomm.com/) 等から別途取得してください。
+> このリポジトリは open-genie-server 自体のソースのみを含みます。動作させるには別途、QualcommのSDKまたはターゲットの配布パッケージから **QAIRTのライブラリ**(`libGenie.so` と依存ライブラリ)と、Hexagon NPU向けにコンパイル済みのモデル一式(`genie_config.json` を含むモデルディレクトリ)を用意する必要があります。ライブラリ・モデルはこのリポジトリには含まれていません。モデルは[Qualcomm AI Hub](https://aihub.qualcomm.com/)等から取得してください。QCS9075のUbuntuパッケージについては[UbuntuのQAIRTパッケージ](./docs/MANUAL.ja.md#ubuntuのqairtパッケージ)を参照。
 
 設定と挙動は [MANUAL.ja.md](./docs/MANUAL.ja.md)、エンドポイントのリファレンスは [API.ja.md](./docs/API.ja.md)、そして**本ドキュメントの実測値がデバイスについて何を前提にしているか**は [プラットフォーム別の注意点](./docs/PLATFORM_NOTES.ja.md) を参照してください。
 

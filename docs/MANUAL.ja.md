@@ -679,9 +679,9 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 
 | キー | 必須 | 既定値 | 説明 |
 |---|---|---|---|
-| `QAIRT_SDK_ROOT` | 実質必須 | `""` | QAIRT SDKのルートパス。`QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH` にも使われる。 |
+| `QAIRT_SDK_ROOT` | SDK配置を使う場合は必須 | `""` | QAIRT SDKのルートパス。Ubuntuの`qairt-*`パッケージを使う場合は省略する。指定すると`QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH` にも使われる。 |
 | `HEXAGON_VERSION` | 任意 | `"v73"` | `ADSP_LIBRARY_PATH` に使うHexagonバージョン(例: `hexagon-v73`)。 |
-| `TARGET_PLATFORM` | 任意 | `"auto"` | `"linux-oe"` / `"android"` / 自動判定の `"auto"`。QAIRTのABIディレクトリ(`aarch64-oe-linux-gcc11.2` か `aarch64-android`)と `ADSP_LIBRARY_PATH` の構成を選びます — [Androidで動かす](#androidで動かす)参照。実行中のOSと異なるターゲット向けのSDKを指しているとき以外、明示指定は不要です。 |
+| `TARGET_PLATFORM` | 任意 | `"auto"` | `"linux-oe"` / `"linux-ubuntu"` / `"android"` / 自動判定の `"auto"`。ライブラリと`ADSP_LIBRARY_PATH`の構成を選ぶ — [UbuntuのQAIRTパッケージ](#ubuntuのqairtパッケージ)と[Androidで動かす](#androidで動かす)参照。 |
 | `TEXT_SLOTS` | `VLM_SLOTS`未設定なら必須 | (未設定) | 常駐させるテキストモデルごとに1エントリ: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`。必須なのは`model_root`だけで、`name`は`slot<i>`、`device_id`未設定ならモデル自身のHTP設定が指定するコアに載るため、単一モデルなら`[{"model_root": "..."}]`で済む([マルチテキストスロット](#マルチテキストスロット)参照。2本目が必ず載るとは限らない点と、2つのスロットが同じ `device_id` を共有すること自体は可能だがそれで同時実行にはならない点に注意)。`poll`はそのスロットで使うモデルの`QnnHtp.poll`を上書きする(下の`POLL`参照)。`config_file`は`model_root`内のダイアログ設定ファイル名で、既定は`genie_config.json`。genie-appが設定パスをコマンドラインで受け取る以上、エクスポート側がモデル名にちなんだ名前(`acme-7b-htp.json`など)を付けることがあり、**コピーを作るよりスロットからそのファイルを指す方がよい**。`poll`と`config_file`はどちらも**モデルではなくスロットに属する**ので、`/v1/models/switch`をまたいでも残る。`TEXT_SLOTS`と`VLM_SLOTS`のどちらも無い設定は起動時に拒否される。 |
 | `POLL` | 任意 | (未設定) | 各スロットの`poll`の既定値。`true`/`false`で各モデルバンドルの`dialog.engine.backend.QnnHtp.poll`を上書きし、未設定ならバンドルの値をそのまま使う。**通常は`false`が正解** — SA8255Pではポーリングに約260%のCPUを使う一方、レイテンシはブロッキングと区別がつかない(後述の`QnnHtp.poll`の節)。スロット個別の`poll`が優先される。テキストスロット専用でVLMスロットには影響しない。 |
 | `SLOT_LOAD_ORDER` | 任意 | `"vlm-first"` | `TEXT_SLOTS`と`VLM_SLOTS`の両方を設定した場合に、どちらを先に生成するか: `"vlm-first"` または `"text-first"`。[スロット生成順](#スロット生成順slot_load_order)および[2つのモデルを同時にロードする](#2つのモデルを同時にロードする)を参照。それ以外の値は起動時にエラー。 |
@@ -693,7 +693,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `DEFAULT_MAX_TOKENS` | 任意 | `0`(無効) | `/v1/completions`/`/v1/chat/completions`で`max_tokens`/`max_completion_tokens`が未指定の場合に、モデル自身の残りコンテキスト容量に加えて適用される追加の上限([APIリファレンス](./API.ja.md)の`max_tokens`項目参照)。`0`は追加上限なし(コンテキストサイズのみで制限 — Qualcomm自身のqai-appbuilderリファレンスサーバと同じ挙動)を意味する。特定のモデル/構成が暴走しやすいと分かっていて、より小さい安全マージンが欲しい場合に正の値を設定する([トラブルシューティング](#トラブルシューティング)参照)。クライアントが明示的に`max_tokens`を指定した場合は常にそちらが優先される。 |
 | `INFERENCE_TIMEOUT` | 任意 | `120` | 1回の`GenieDialog_query`に対するウォッチドッグ制限(秒)。遅いターゲットでの長い生成にはこの値を上げる。`GET /v1/server/idle`や同期パスの全体待ち時間(この2倍)にも使われる。 |
 | `HOST` / `PORT` | 任意 | `"0.0.0.0"` / `8080` | 待受アドレス/ポート。CLIの`--host`/`--port`が優先。 |
-| `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は解決後の `TARGET_PLATFORM` に応じた `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。 |
+| `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は`<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。SDKルートなしの`linux-ubuntu`ではシステムの`libGenie.so`。 |
 | `GENIE_PROFILE` | 任意 | `false` | 各テキストスロットに `GenieProfile` をバインドし、SDK自身が計測したTTFT/プレフィル/デコードのKPIを `GET /v1/server/profile` で取得できるようにする([プロファイリング](#プロファイリングsdk側のkpi)参照)。変更には再起動が必要。 |
 | `GENIE_LOG_LEVEL` | 任意 | `""`(無効) | libGenie 自身のログを `"error"` / `"warn"` / `"info"` / `"verbose"` で有効化します。`GenieLog` を1つ作り、本サーバが作る全ての dialog / node / pipeline のコンフィグにバインドします。**無効は「静か」ではなく「無音」です**: SDK 内の `__INFO`/`__ERROR` はロガーがバインドされているかで完全に止まるため、未設定だと SDK 自身の診断は1行も見えません(ロード失敗の理由すら見えません)。`"error"` は安価で、`"info"` にするとエンジンの構成判断(そのバンドルがどの推論経路に乗るか等)も出ます。ただし `"info"` は多く、0.6B の4スロット構成の起動1回で **1,836 行**が出ました(大半はバッファ単位のメモリ登録)。有用な行は少数かつ先頭付近にあり、例えば `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128` はエンジンがそのバンドルに対してどう構成されたかを教えてくれます。行を書くのは SDK 自身で、Linux では本プロセスの stdout(`Genie:  <ms> [ LEVEL ] ...`)、Android では logcat に出ます — Python の logging を通らないので、サーバ自身のログ書式にはなりません。コンフィグにバインドするため、変更には再起動が必要です。 |
 | `PROMPT_LOGPROBS` | 任意 | `false` | プロンプトスコアリング(`echo`+`logprobs`のteacher forcing、lm_evalのloglikelihoodタスクが使用)を起動時から有効化。実行時は`POST /v1/server/prompt_logprobs`でも切り替え可([Logprobs](#logprobs)参照)。 |
@@ -825,6 +825,36 @@ GENIE_SERVER_CONFIG=env_config.json uvicorn genie_server.asgi:app --host 0.0.0.0
 
 **`--workers` は必ず1にしてください。** 各スロットの `GenieDialog` ハンドルはプロセス内グローバル状態であり、複数ワーカープロセスに分割すると別々のNPUコンテキストの取り合いになり破綻します。
 
+## UbuntuのQAIRTパッケージ
+
+`qairt-*`パッケージを導入したQCS9075のUbuntuでは、`TARGET_PLATFORM`を
+`"linux-ubuntu"`にする。`/lib/dsp/cdsp`と`/usr/lib/rfsa/adsp`があれば
+`"auto"`でも検出する。パッケージ版の`libGenie.so`はシステムのローダーから
+見つかるので、`QAIRT_SDK_ROOT`と`GENIE_LIB_PATH`は不要:
+
+```json
+{
+  "TARGET_PLATFORM": "linux-ubuntu",
+  "HEXAGON_VERSION": "v73",
+  "TEXT_SLOTS": [{"model_root": "/path/to/compatible/model"}]
+}
+```
+
+この設定では`ADSP_LIBRARY_PATH`に`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`、
+`/lib/dsp/cdsp1`を入れる。後者2つにcDSP用のライブラリがある。
+モデルバンドルは導入済みQAIRT版に合うものを使う。新しい版で作った
+バイナリはダイアログ生成時に拒否される可能性がある。
+QCS9075のUbuntu 24.04、`qairt-libs` 2.46.0と
+[IQ-9075向けQwen3-0.6BのGENIEバンドル](https://aihub.qualcomm.com/models/qwen3_0_6b)
+(QAIRT 2.45で作成)で、起動、`/health`、`/v1/models`、チャット生成を確認した。
+
+別のSDKを使う場合は`QAIRT_SDK_ROOT`にそのルートを指定する。QCS9075の
+UbuntuではSDKの`aarch64-oe-linux-gcc11.2`版を使い、DSP側の探索では
+`lib/hexagon-v73/unsigned`をシステムのパスより先に置く。依存ライブラリも
+同じSDK版から読むよう、**Python起動前**にそのABIディレクトリを
+`LD_LIBRARY_PATH`に設定する。Python内で設定してもプロセスのローダーには
+間に合わない。配布パッケージ版とは起動環境を分ける。
+
 ## Androidで動かす
 
 本サーバはAndroidターゲットでもそのまま動きます。プラットフォームを意識する必要が
@@ -839,11 +869,11 @@ SA8255PのAndroidゲスト(Android 15、arm64-v8a、root shell)で、素のQAIRT
 
 ### プラットフォームで変わるもの
 
-| | `linux-oe` | `android` |
-|---|---|---|
-| QAIRT ABIディレクトリ | `lib/aarch64-oe-linux-gcc11.2`(glibc) | `lib/aarch64-android`(bionic) |
-| `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
-| `LD_LIBRARY_PATH` | サーバは設定しない | SDKのABIディレクトリ + `/vendor/lib64` |
+| | `linux-oe` | `linux-ubuntu` | `android` |
+|---|---|---|---|
+| `libGenie.so` | SDKの`lib/aarch64-oe-linux-gcc11.2` | システムのパッケージ、またはSDKの`lib/aarch64-oe-linux-gcc11.2` | SDKの`lib/aarch64-android` |
+| `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | SDK指定時はそのskel群、`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`、`/lib/dsp/cdsp1` | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
+| `LD_LIBRARY_PATH` | サーバは設定しない | 別SDKを使うときは起動前に設定 | SDKのABIディレクトリ + `/vendor/lib64` |
 
 一方のABI向けにビルドしたライブラリはもう一方では読み込めません。OE Linux用に
 リビルドした `libGenie.so` をAndroidで使うことはできず、逆も同様です。

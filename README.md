@@ -5,7 +5,7 @@
 A single-process FastAPI server that exposes the Qualcomm Genie C API (`libGenie.so`) as an OpenAI-compatible REST API. It lets you drive LLMs running on a [Hexagon NPU](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md#glossary) — Qualcomm's name for the accelerator this server talks to through the QNN HTP backend — from ordinary OpenAI-compatible HTTP clients — `lm_eval`, `curl`, the OpenAI SDK, [Open WebUI](https://github.com/open-webui/open-webui), and so on. The implementation lives in the `genie_server` package (`src/genie_server/`); `genie-server.py` is the launcher.
 
 > [!IMPORTANT]
-> This repository contains only the open-genie-server source itself. To run it you also need the **QAIRT SDK** from Qualcomm (a toolchain distributed under Qualcomm's proprietary license, containing `libGenie.so`) and a model compiled for a Hexagon NPU (a model directory containing `genie_config.json`). Neither the SDK nor any models are included in this repository — obtain them separately from [Qualcomm AI Hub](https://aihub.qualcomm.com/) or similar.
+> This repository contains only the open-genie-server source itself. To run it you also need **QAIRT libraries** (`libGenie.so` and its dependencies), supplied by Qualcomm's SDK or target distribution packages, and a model compiled for a Hexagon NPU (a model directory containing `genie_config.json`). Neither the libraries nor any models are included in this repository — obtain them separately from [Qualcomm AI Hub](https://aihub.qualcomm.com/) or similar. For QCS9075 Ubuntu packages, see [Ubuntu with QAIRT packages](./docs/MANUAL.md#ubuntu-with-qairt-packages).
 
 See [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/MANUAL.md) for configuration and behaviour, [API.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/API.md) for the endpoint reference, and [Platform Notes](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/PLATFORM_NOTES.md) for what every measured number here assumes about the device it was measured on.
 
@@ -43,7 +43,7 @@ See [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/d
 ## Requirements
 
 - Python 3.10+ (uses `int | None`-style type syntax)
-- The QAIRT SDK (`libGenie.so` and its dependencies) and a model that runs on the Hexagon NPU (see the note above)
+- QAIRT libraries (`libGenie.so` and its dependencies) and a model that runs on the Hexagon NPU (see the note above)
 
 ```bash
 pip install .[logprobs,vlm]     # everything

@@ -1756,6 +1756,36 @@ def test_linux_oe_adsp_lists_every_device_id_in_use():
         "/dsp/image/dsp/cdsp0;/dsp/image/dsp/cdsp1")
 
 
+def test_ubuntu_uses_system_qairt_package_without_sdk_root(monkeypatch):
+    import os
+    from genie_server.config import ServerConfig
+    c = ServerConfig(sdk_root="", target_platform="linux-ubuntu")
+    assert c.resolved_genie_lib_path() == "libGenie.so"
+    assert c._adsp_library_path() == (
+        "/usr/lib/rfsa/adsp;/lib/dsp/cdsp;/lib/dsp/cdsp1;")
+    monkeypatch.setenv("QAIRT_SDK_ROOT", "/old/sdk")
+    monkeypatch.setenv("QNN_SDK_ROOT", "/old/sdk")
+    c.apply_process_env()
+    assert "QAIRT_SDK_ROOT" not in os.environ
+    assert "QNN_SDK_ROOT" not in os.environ
+
+
+def test_ubuntu_sdk_path_uses_oe_abi_and_prefers_sdk_skels():
+    c = _cfg(target_platform="linux-ubuntu")
+    assert c.resolved_genie_lib_path() == \
+        "/opt/qairt/X/lib/aarch64-oe-linux-gcc11.2/libGenie.so"
+    assert c._adsp_library_path() == (
+        "/opt/qairt/X/lib/hexagon-v73/unsigned;/usr/lib/rfsa/adsp;"
+        "/lib/dsp/cdsp;/lib/dsp/cdsp1;")
+
+
+def test_auto_detects_ubuntu_dsp_layout(monkeypatch):
+    from genie_server.config import detect_platform
+    monkeypatch.setattr("genie_server.config.os.path.isdir",
+                        lambda p: p in ("/lib/dsp/cdsp", "/usr/lib/rfsa/adsp"))
+    assert detect_platform() == "linux-ubuntu"
+
+
 def test_android_uses_the_bionic_abi_and_vendor_first_adsp_path():
     """Verbatim the layout that brought a dialog up on the Android guest:
     vendor skels first, SDK skels second, and no cdspN entries (the guest
