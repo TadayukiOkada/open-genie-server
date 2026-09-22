@@ -365,25 +365,6 @@ class ServerConfig:
                 parts.append(existing)
             os.environ["LD_LIBRARY_PATH"] = ":".join(parts)
 
-    def library_path_warning(self) -> str | None:
-        """Why the backends libGenie loads may not come from the configured
-        SDK, or None. Only linux-ubuntu needs this: its qairt-libs package
-        registers libQnnHtp.so and friends with the system loader, and
-        libGenie finds them by name. The loader reads LD_LIBRARY_PATH once at
-        process start, so setting it here would be too late; the launcher
-        has to."""
-        if self.platform != PLATFORM_LINUX_UBUNTU or not self.sdk_root:
-            return None
-        sdk_lib = os.path.normpath(
-            os.path.join(self.sdk_root, "lib", self.qairt_abi_dir))
-        entries = os.environ.get("LD_LIBRARY_PATH", "").split(":")
-        if sdk_lib in {os.path.normpath(e) for e in entries if e}:
-            return None
-        return (f"QAIRT_SDK_ROOT is set but {sdk_lib} is not on LD_LIBRARY_PATH: "
-                f"libGenie may load the QNN backends of the system qairt-libs "
-                f"package instead, mixing QAIRT versions. Start the server with "
-                f"LD_LIBRARY_PATH={sdk_lib}.")
-
 
 def _parse_target_platform(raw) -> str:
     value = raw.get("TARGET_PLATFORM", "auto")

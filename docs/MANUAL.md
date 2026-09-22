@@ -927,13 +927,12 @@ completion succeeded.
 To use a separate SDK, set `QAIRT_SDK_ROOT` to its root. On the QCS9075 Ubuntu
 target the SDK's `aarch64-oe-linux-gcc11.2` libraries are used, and its
 `lib/hexagon-v73/unsigned` directory is searched before the system DSP paths.
-Start Python with that SDK's host-library directory in `LD_LIBRARY_PATH` so
-its dependencies come from the same version; setting `LD_LIBRARY_PATH` inside
-the Python process is too late for the process loader. The server logs a
-warning at startup when that directory is missing from `LD_LIBRARY_PATH`,
-because libGenie would otherwise load the QNN backends of the `qairt-libs`
-package and mix two QAIRT versions. Keep this launch environment separate
-from the distribution packages.
+`LD_LIBRARY_PATH` is not needed for this: the SDK's `libGenie.so` carries
+`RPATH=$ORIGIN` (checked in 2.45.41, 2.48.40, 2.49.x and 2.50.x), so the QNN backends it
+loads (`libQnnHtp.so`, `libQnnSystem.so`, the stub) come from its own
+directory even with the `qairt-libs` package installed. With QAIRT 2.50.40 on
+the QCS9075 Ubuntu target, the libraries mapped into the process were the
+same with and without the SDK directory on `LD_LIBRARY_PATH`.
 
 ## Running on Android
 
@@ -954,7 +953,7 @@ installed (see [What is missing](#what-is-missing-on-android)).
 |---|---|---|---|
 | `libGenie.so` | SDK `lib/aarch64-oe-linux-gcc11.2` | System package, or SDK `lib/aarch64-oe-linux-gcc11.2` | SDK `lib/aarch64-android` |
 | `ADSP_LIBRARY_PATH` | SDK skels, `/usr/lib/rfsa/adsp`, one `/dsp/image/dsp/cdspN` per `device_id` in use | SDK skels if selected, `/usr/lib/rfsa/adsp`, `/lib/dsp/cdsp` (device 0) and one `/lib/dsp/cdspN` per other `device_id` in use; both cores for an unpinned slot | `/vendor/lib/rfsa/adsp` **first**, then the SDK skels. No `cdspN` entries |
-| `LD_LIBRARY_PATH` | not set by the server | Set before launch when using a separate SDK | SDK ABI directory + `/vendor/lib64` |
+| `LD_LIBRARY_PATH` | not set by the server | not set by the server (not needed: `libGenie.so` loads its backends through `RPATH=$ORIGIN`) | SDK ABI directory + `/vendor/lib64` |
 
 A library built for one ABI will not load on the other, so a `libGenie.so` you
 rebuilt for OE Linux cannot be used on Android and vice versa.

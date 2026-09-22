@@ -855,12 +855,13 @@ QCS9075のUbuntu 24.04、`qairt-libs` 2.46.0と
 
 別のSDKを使う場合は`QAIRT_SDK_ROOT`にそのルートを指定する。QCS9075の
 UbuntuではSDKの`aarch64-oe-linux-gcc11.2`版を使い、DSP側の探索では
-`lib/hexagon-v73/unsigned`をシステムのパスより先に置く。依存ライブラリも
-同じSDK版から読むよう、**Python起動前**にそのABIディレクトリを
-`LD_LIBRARY_PATH`に設定する。Python内で設定してもプロセスのローダーには
-間に合わない。このディレクトリが`LD_LIBRARY_PATH`に無いと、起動時に警告を出す
-(libGenieが`qairt-libs`パッケージのQNNバックエンドを読み、2つのQAIRT版が
-混ざるため)。配布パッケージ版とは起動環境を分ける。
+`lib/hexagon-v73/unsigned`をシステムのパスより先に置く。このために
+`LD_LIBRARY_PATH`を設定する必要はない。SDKの`libGenie.so`は`RPATH=$ORIGIN`を
+持つ(2.45.41、2.48.40、2.49.x、2.50.xで確認)ので、読み込むQNNバックエンド(`libQnnHtp.so`、
+`libQnnSystem.so`、stub)は`qairt-libs`パッケージがあっても同じディレクトリから
+読まれる。QCS9075のUbuntuでQAIRT 2.50.40を使い、SDKのディレクトリを
+`LD_LIBRARY_PATH`に入れた場合と入れない場合で、プロセスに読み込まれた
+ライブラリが同じであることを確かめた。
 
 ## Androidで動かす
 
@@ -880,7 +881,7 @@ SA8255PのAndroidゲスト(Android 15、arm64-v8a、root shell)で、素のQAIRT
 |---|---|---|---|
 | `libGenie.so` | SDKの`lib/aarch64-oe-linux-gcc11.2` | システムのパッケージ、またはSDKの`lib/aarch64-oe-linux-gcc11.2` | SDKの`lib/aarch64-android` |
 | `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | SDK指定時はそのskel群、`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`(device 0)と使用中の他の`device_id`ごとの`/lib/dsp/cdspN`。`device_id`未指定のスロットがあれば両コア | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
-| `LD_LIBRARY_PATH` | サーバは設定しない | 別SDKを使うときは起動前に設定 | SDKのABIディレクトリ + `/vendor/lib64` |
+| `LD_LIBRARY_PATH` | サーバは設定しない | サーバは設定しない(不要。`libGenie.so`は`RPATH=$ORIGIN`でバックエンドを読む) | SDKのABIディレクトリ + `/vendor/lib64` |
 
 一方のABI向けにビルドしたライブラリはもう一方では読み込めません。OE Linux用に
 リビルドした `libGenie.so` をAndroidで使うことはできず、逆も同様です。

@@ -589,8 +589,6 @@ def _run_build_order(monkeypatch, order):
         def apply_process_env(self):
             pass
 
-        def library_path_warning(self):
-            return None
 
         def resolved_genie_lib_path(self):
             return "libGenie.so"
@@ -1834,21 +1832,6 @@ def test_ubuntu_adsp_path_follows_pinned_device_ids():
                     SlotSpec(name="b", device_id=2, model_root="/m")])
     assert c._adsp_library_path() == (
         "/usr/lib/rfsa/adsp;/lib/dsp/cdsp;/lib/dsp/cdsp2;")
-
-
-def test_ubuntu_warns_when_sdk_lib_is_not_on_ld_library_path(monkeypatch):
-    c = _cfg(target_platform="linux-ubuntu")
-    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/lib")
-    assert "/opt/qairt/X/lib/aarch64-oe-linux-gcc11.2" in c.library_path_warning()
-    monkeypatch.setenv("LD_LIBRARY_PATH",
-                       "/opt/qairt/X/lib/aarch64-oe-linux-gcc11.2/:/usr/lib")
-    assert c.library_path_warning() is None
-    # Nothing to mix without an SDK, and other platforms do not use qairt-libs.
-    from genie_server.config import ServerConfig
-    monkeypatch.setenv("LD_LIBRARY_PATH", "")
-    assert ServerConfig(sdk_root="", target_platform="linux-ubuntu") \
-        .library_path_warning() is None
-    assert _cfg(target_platform="linux-oe").library_path_warning() is None
 
 
 def test_empty_sdk_root_clears_inherited_sdk_variables(monkeypatch):

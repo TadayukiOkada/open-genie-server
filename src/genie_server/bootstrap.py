@@ -24,9 +24,6 @@ def build_state(config_path: str = "env_config.json") -> ServerState:
     logger.info(f"Target platform: {config.platform} "
                 f"(TARGET_PLATFORM={config.target_platform})")
     config.apply_process_env()
-    warning = config.library_path_warning()
-    if warning:
-        logger.warning(warning)
 
     from .capi import GenieLib
     so_path = config.resolved_genie_lib_path()
