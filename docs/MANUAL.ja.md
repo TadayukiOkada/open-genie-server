@@ -1552,7 +1552,9 @@ VLM経路では以下がサポートされない:
 
 Genie SDKは`GenieDialog`経由でlogitsを公開しませんが、SDKの**カスタムサンプラー**フック(`GenieSampler_registerUserDataCallback` + サンプラー設定`{"type": "custom"}`)が、生成1ステップごとにデクォンタイズ済みfloat32のlogitsベクトル全体をサーバに渡し、出力トークンの選択も委ねます。logprobsはこの仕組みで実装されています(`genie_server/logprobs.py`)。
 
-**生成トークンのlogprobs**(常時利用可): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応(またgrammar制約モデルではマスク後のlogitsに対する値になる点に注意)。
+**生成トークンのlogprobs**(QAIRTランタイムがlogitsを渡す場合): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応(またgrammar制約モデルではマスク後のlogitsに対する値になる点に注意)。
+
+カスタムサンプラーの設定を受け付けても、logits callbackを呼ばないランタイムがあります。QCS9075 UbuntuのQAIRT 2.46パッケージで、Qwen3-0.6Bバンドルを使って確認しました。生成テキストがあるのにcallbackが来ない場合、生成トークンのlogprobsとプロンプトスコアリングは、空や誤った値を返す代わりにHTTP 400の`error.code: "logprobs_not_supported"`を返します。同じバンドルでQAIRT 2.50.40のcallbackは動きましたが、無修正版では長い生成後のreset経路で失敗しました。詳しくは[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照してください。
 
 **プロンプトスコアリング**(`echo: true` + `logprobs` — lm_evalのloglikelihoodタスクが送る形状): プロンプトの先頭1トークンのみをprefillし、以降の各プロンプトトークンをデコードループで**teacher forcing**して、各位置の P(token_i | tokens_<i) を記録します — 正確なloglikelihoodと`is_greedy`が得られ、`token_logprobs[0] = null`(先頭トークンの確率は定義不能。OpenAIの`echo`と同じ)。トークンID形式のプロンプト(lm_evalが`tokenizer_backend=huggingface`で送る形式)はID単位で正確に整合します。**各リクエストはプロンプト全体をデコード速度で処理する**(20 tok/sで500トークン文書 ≈ 25秒)ため、以下のゲートがあります:
 

@@ -302,7 +302,8 @@ async def _sse_body(
 
 
 async def _collect_or_raise(gen: Generation, state: ServerState,
-                            timeout_s: float | None = None) -> str:
+                            timeout_s: float | None = None,
+                            collector: LogprobsCollector | None = None) -> str:
     """Sync path: waits for the full completion; maps failures to HTTP."""
     try:
         text = await gen.collect_text((timeout_s or state.config.inference_timeout_s) * 2)
@@ -312,6 +313,12 @@ async def _collect_or_raise(gen: Generation, state: ServerState,
             detail=f"Inference timed out on Hexagon NPU [{gen.request_id}]")
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if (collector is not None and not gen.error and gen.completion_tokens
+            and not collector.results):
+        raise InvalidRequestError(
+            "logprobs are not supported by this QAIRT runtime: the logits "
+            "callback was not invoked during generation.",
+            "logprobs", code="logprobs_not_supported")
     return text
 
 
@@ -521,7 +528,8 @@ def create_app(state: ServerState) -> FastAPI:
             state.lib, slot, QueryPlan(full_prompt=first_text), score_params,
             gen, None, timeout_s, collector=collector)
         try:
-            await _collect_or_raise(gen, state, timeout_s=timeout_s)
+            await _collect_or_raise(gen, state, timeout_s=timeout_s,
+                                    collector=collector)
         finally:
             manager.status[slot.name] = {"phase": "idle", "detail": ""}
         lp = logprobs_mod.completions_logprobs(
@@ -652,7 +660,7 @@ def create_app(state: ServerState) -> FastAPI:
             engine.start_generation(
                 state.lib, slot, QueryPlan(full_prompt=prompt), req_params, gen,
                 None, cfg.inference_timeout_s, collector=collector)
-            text = await _collect_or_raise(gen, state)
+            text = await _collect_or_raise(gen, state, collector=collector)
             total_pt += slot.count_prompt_tokens(prompt)
             total_ct += gen.completion_tokens
             choices.append({
@@ -859,7 +867,7 @@ def create_app(state: ServerState) -> FastAPI:
                 ),
                 media_type="text/event-stream")
 
-        text = await _collect_or_raise(gen, state)
+        text = await _collect_or_raise(gen, state, collector=collector)
         tool_calls = None
         finish_reason = gen.finish_reason
         if tools:

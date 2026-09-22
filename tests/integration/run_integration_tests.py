@@ -483,6 +483,8 @@ def t_completions_logprobs(ctx):
     if not lp:
         raise CheckFailure("no logprobs object")
     n = len(lp["tokens"])
+    if n == 0:
+        raise CheckFailure("generated text has no token logprobs")
     if not (n == len(lp["token_logprobs"]) == len(lp["top_logprobs"])
             == len(lp["text_offset"])):
         raise CheckFailure(f"array length mismatch: {[len(lp[k]) for k in lp]}")

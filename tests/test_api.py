@@ -260,6 +260,34 @@ def test_completions_logprobs_sync(client):
     assert lp["text_offset"] == sorted(lp["text_offset"])
 
 
+def test_logprobs_runtime_without_logits_callback(client, state):
+    """Some runtimes accept custom sampling but never call its logits hook."""
+    from genie_server import capi
+
+    def no_logits(handle, text, cb_name, on_token):
+        on_token("Hello", capi.SENTENCE_CONTINUE)
+        on_token("", capi.SENTENCE_END)
+        return 0
+
+    state.lib._query_custom = no_logits
+    requests = [
+        ("/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "hi"}],
+            "logprobs": True}),
+        ("/v1/completions", {"prompt": "hi", "logprobs": 1}),
+    ]
+    client.post("/v1/server/prompt_logprobs", json={"enabled": True})
+    requests.append(("/v1/completions", {
+        "prompt": "a b c", "echo": True, "logprobs": 1, "max_tokens": 0}))
+    for path, body in requests:
+        response = client.post(path, json=body)
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "logprobs_not_supported"
+        assert error["param"] == "logprobs"
+        assert "logits callback" in error["message"]
+
+
 def test_completions_logprobs_rejected_with_stream(client):
     r = client.post("/v1/completions", json={
         "prompt": "hi", "logprobs": 1, "stream": True})
