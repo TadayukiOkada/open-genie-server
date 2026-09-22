@@ -279,6 +279,7 @@ def test_logprobs_runtime_without_logits_callback(client, state):
     client.post("/v1/server/prompt_logprobs", json={"enabled": True})
     requests.append(("/v1/completions", {
         "prompt": "a b c", "echo": True, "logprobs": 1, "max_tokens": 0}))
+    queries_before = len(state.lib.queries)
     for path, body in requests:
         response = client.post(path, json=body)
         assert response.status_code == 400
@@ -286,6 +287,49 @@ def test_logprobs_runtime_without_logits_callback(client, state):
         assert error["code"] == "logprobs_not_supported"
         assert error["param"] == "logprobs"
         assert "logits callback" in error["message"]
+    # The first request stops at its first token; the slot remembers the
+    # result, so the later requests never reach the runtime.
+    assert len(state.lib.queries) == queries_before + 1
+    assert state.lib.abort_signals == 1
+
+
+def test_logprobs_missing_callback_with_failing_query(client, state):
+    """A query that fails after emitting tokens must not return 200 with
+    empty logprobs arrays."""
+    from genie_server import capi
+
+    def no_logits_then_fail(handle, text, cb_name, on_token):
+        on_token("Hello", capi.SENTENCE_CONTINUE)
+        return -1
+
+    state.lib._query_custom = no_logits_then_fail
+    response = client.post("/v1/completions", json={
+        "prompt": "hi", "logprobs": 1})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "logprobs_not_supported"
+
+
+def test_prompt_scoring_rejects_partial_logits_callbacks(client, state):
+    """Scores pair with prompt tokens by position, so a runtime that calls the
+    logits callback for only some steps must fail rather than shift them."""
+    import ctypes
+    from genie_server import capi
+
+    def partial_logits(handle, text, cb_name, on_token):
+        handler = state.lib.custom_samplers[cb_name]
+        logits = (ctypes.c_float * state.lib.N_VOCAB)()
+        tok = int(handler(ctypes.addressof(logits), state.lib.N_VOCAB, 1)[0])
+        on_token(state.lib.tokenizer.decode([tok]), capi.SENTENCE_CONTINUE)
+        on_token("x", capi.SENTENCE_CONTINUE)   # sampled without the hook
+        on_token("", capi.SENTENCE_END)
+        return 0
+
+    state.lib._query_custom = partial_logits
+    client.post("/v1/server/prompt_logprobs", json={"enabled": True})
+    response = client.post("/v1/completions", json={
+        "prompt": "a b c d", "echo": True, "logprobs": 1, "max_tokens": 0})
+    assert response.status_code == 500
+    assert "prompt scoring stopped after 1 of" in response.json()["error"]["message"]
 
 
 def test_completions_logprobs_rejected_with_stream(client):

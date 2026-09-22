@@ -4,6 +4,7 @@ All keys are read once at startup into an immutable ServerConfig. Unknown keys
 are ignored so a config written for a newer server version still loads.
 """
 
+import functools
 import json
 import logging
 import os
@@ -63,9 +64,25 @@ def detect_platform() -> str:
         return PLATFORM_ANDROID
     if os.path.isdir("/system/bin") and os.path.exists("/system/build.prop"):
         return PLATFORM_ANDROID
-    if os.path.isdir("/lib/dsp/cdsp") and os.path.isdir("/usr/lib/rfsa/adsp"):
+    # The DSP layout alone is not enough: an OE image with usrmerge has the
+    # same directories, and must keep the per-device /dsp/image entries.
+    if (_is_ubuntu() and os.path.isdir("/lib/dsp/cdsp")
+            and os.path.isdir("/usr/lib/rfsa/adsp")):
         return PLATFORM_LINUX_UBUNTU
     return PLATFORM_LINUX_OE
+
+
+def _is_ubuntu(os_release: str = "/etc/os-release") -> bool:
+    """True when os-release names Ubuntu as the distribution or its base."""
+    try:
+        with open(os_release, encoding="utf-8") as f:
+            fields = dict(line.rstrip("\n").split("=", 1)
+                          for line in f if "=" in line)
+    except OSError:
+        return False
+    ids = {fields.get("ID", "").strip('"')}
+    ids.update(fields.get("ID_LIKE", "").strip('"').split())
+    return "ubuntu" in ids
 
 
 def resolve_model_path(value, base: Path | None) -> Path:
@@ -258,9 +275,10 @@ class ServerConfig:
     def warmup_join_timeout_s(self) -> float:
         return 600.0
 
-    @property
+    @functools.cached_property
     def platform(self) -> str:
-        """The resolved target platform — never "auto"."""
+        """The resolved target platform — never "auto". Detected once, so
+        every path built from it agrees even if a mount appears later."""
         if self.target_platform == "auto":
             return detect_platform()
         return self.target_platform
@@ -308,19 +326,18 @@ class ServerConfig:
         """
         if self.platform == PLATFORM_ANDROID:
             return f"/vendor/lib/rfsa/adsp;{self._skel_dir()};"
+        slots = (*self.text_slots, *self.vlm_slots)
+        device_ids = sorted({s.device_id for s in slots if s.device_id is not None})
         if self.platform == PLATFORM_LINUX_UBUNTU:
-            # Ubuntu's cdsp and cdsp1 directories expose the DSP firmware
-            # libraries for device 0 and 1. Keep both in the search path even
-            # for an unpinned slot, whose device is chosen by the bundle.
-            paths = []
-            if self.sdk_root:
-                paths.append(self._skel_dir())
-            paths.extend(("/usr/lib/rfsa/adsp", "/lib/dsp/cdsp", "/lib/dsp/cdsp1"))
+            # Ubuntu names device 0's DSP library directory cdsp and the rest
+            # cdspN. An unpinned slot runs wherever its bundle says, so keep
+            # both cores of the QCS9075 in the path for it.
+            if not slots or any(s.device_id is None for s in slots):
+                device_ids = sorted({0, 1, *device_ids})
+            paths = [self._skel_dir()] if self.sdk_root else []
+            paths.append("/usr/lib/rfsa/adsp")
+            paths.extend(f"/lib/dsp/cdsp{d or ''}" for d in device_ids)
             return ";".join(paths) + ";"
-        device_ids = sorted({
-            s.device_id for s in (*self.text_slots, *self.vlm_slots)
-            if s.device_id is not None
-        })
         cdsp_paths = ";".join(f"/dsp/image/dsp/cdsp{d}" for d in device_ids) \
             or "/dsp/image/dsp/cdsp0"
         return f"{self._skel_dir()};/usr/lib/rfsa/adsp;{cdsp_paths}"
@@ -330,8 +347,9 @@ class ServerConfig:
         if self.sdk_root:
             os.environ["QAIRT_SDK_ROOT"] = self.sdk_root
             os.environ["QNN_SDK_ROOT"] = self.sdk_root
-        elif self.platform == PLATFORM_LINUX_UBUNTU:
-            # Avoid pointing system-package libGenie at an unrelated SDK.
+        else:
+            # Never let libGenie pick up an SDK the config does not name,
+            # e.g. one exported by the shell that launched the server.
             os.environ.pop("QAIRT_SDK_ROOT", None)
             os.environ.pop("QNN_SDK_ROOT", None)
         os.environ["ADSP_LIBRARY_PATH"] = self._adsp_library_path()
@@ -346,6 +364,25 @@ class ServerConfig:
             if existing:
                 parts.append(existing)
             os.environ["LD_LIBRARY_PATH"] = ":".join(parts)
+
+    def library_path_warning(self) -> str | None:
+        """Why the backends libGenie loads may not come from the configured
+        SDK, or None. Only linux-ubuntu needs this: its qairt-libs package
+        registers libQnnHtp.so and friends with the system loader, and
+        libGenie finds them by name. The loader reads LD_LIBRARY_PATH once at
+        process start, so setting it here would be too late; the launcher
+        has to."""
+        if self.platform != PLATFORM_LINUX_UBUNTU or not self.sdk_root:
+            return None
+        sdk_lib = os.path.normpath(
+            os.path.join(self.sdk_root, "lib", self.qairt_abi_dir))
+        entries = os.environ.get("LD_LIBRARY_PATH", "").split(":")
+        if sdk_lib in {os.path.normpath(e) for e in entries if e}:
+            return None
+        return (f"QAIRT_SDK_ROOT is set but {sdk_lib} is not on LD_LIBRARY_PATH: "
+                f"libGenie may load the QNN backends of the system qairt-libs "
+                f"package instead, mixing QAIRT versions. Start the server with "
+                f"LD_LIBRARY_PATH={sdk_lib}.")
 
 
 def _parse_target_platform(raw) -> str:

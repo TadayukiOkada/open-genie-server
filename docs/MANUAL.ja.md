@@ -828,20 +828,25 @@ GENIE_SERVER_CONFIG=env_config.json uvicorn genie_server.asgi:app --host 0.0.0.0
 ## UbuntuのQAIRTパッケージ
 
 `qairt-*`パッケージを導入したQCS9075のUbuntuでは、`TARGET_PLATFORM`を
-`"linux-ubuntu"`にする。`/lib/dsp/cdsp`と`/usr/lib/rfsa/adsp`があれば
-`"auto"`でも検出する。パッケージ版の`libGenie.so`はシステムのローダーから
-見つかるので、`QAIRT_SDK_ROOT`と`GENIE_LIB_PATH`は不要:
+`"linux-ubuntu"`にする。`"auto"`のままでも、`/etc/os-release`がUbuntuを示し、
+`/lib/dsp/cdsp`と`/usr/lib/rfsa/adsp`があればこれを選ぶ(選んだ結果は起動ログに出る)。
+パッケージ版の`libGenie.so`はシステムのローダーから見つかるので、
+`QAIRT_SDK_ROOT`と`GENIE_LIB_PATH`は不要。シェルから引き継いだ
+`QAIRT_SDK_ROOT`/`QNN_SDK_ROOT`は消す。ローダーが実際に選んだファイルは起動ログに出る:
 
 ```json
 {
   "TARGET_PLATFORM": "linux-ubuntu",
-  "HEXAGON_VERSION": "v73",
   "TEXT_SLOTS": [{"model_root": "/path/to/compatible/model"}]
 }
 ```
 
-この設定では`ADSP_LIBRARY_PATH`に`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`、
-`/lib/dsp/cdsp1`を入れる。後者2つにcDSP用のライブラリがある。
+この設定では`ADSP_LIBRARY_PATH`に`/usr/lib/rfsa/adsp`と、使うcDSPごとの
+DSP側ライブラリのディレクトリを入れる。`device_id` 0は`/lib/dsp/cdsp`、
+それ以外は`/lib/dsp/cdspN`。`device_id`を指定しないスロットはバンドルが指す
+コアで動くので、その場合は`/lib/dsp/cdsp`と`/lib/dsp/cdsp1`の両方を入れる。
+`HEXAGON_VERSION`は`QAIRT_SDK_ROOT`と組み合わせたときだけ意味を持つ
+(SDKのskelディレクトリ名に使う)。
 モデルバンドルは導入済みQAIRT版に合うものを使う。新しい版で作った
 バイナリはダイアログ生成時に拒否される可能性がある。
 QCS9075のUbuntu 24.04、`qairt-libs` 2.46.0と
@@ -853,7 +858,9 @@ UbuntuではSDKの`aarch64-oe-linux-gcc11.2`版を使い、DSP側の探索では
 `lib/hexagon-v73/unsigned`をシステムのパスより先に置く。依存ライブラリも
 同じSDK版から読むよう、**Python起動前**にそのABIディレクトリを
 `LD_LIBRARY_PATH`に設定する。Python内で設定してもプロセスのローダーには
-間に合わない。配布パッケージ版とは起動環境を分ける。
+間に合わない。このディレクトリが`LD_LIBRARY_PATH`に無いと、起動時に警告を出す
+(libGenieが`qairt-libs`パッケージのQNNバックエンドを読み、2つのQAIRT版が
+混ざるため)。配布パッケージ版とは起動環境を分ける。
 
 ## Androidで動かす
 
@@ -872,7 +879,7 @@ SA8255PのAndroidゲスト(Android 15、arm64-v8a、root shell)で、素のQAIRT
 | | `linux-oe` | `linux-ubuntu` | `android` |
 |---|---|---|---|
 | `libGenie.so` | SDKの`lib/aarch64-oe-linux-gcc11.2` | システムのパッケージ、またはSDKの`lib/aarch64-oe-linux-gcc11.2` | SDKの`lib/aarch64-android` |
-| `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | SDK指定時はそのskel群、`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`、`/lib/dsp/cdsp1` | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
+| `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | SDK指定時はそのskel群、`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`(device 0)と使用中の他の`device_id`ごとの`/lib/dsp/cdspN`。`device_id`未指定のスロットがあれば両コア | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
 | `LD_LIBRARY_PATH` | サーバは設定しない | 別SDKを使うときは起動前に設定 | SDKのABIディレクトリ + `/vendor/lib64` |
 
 一方のABI向けにビルドしたライブラリはもう一方では読み込めません。OE Linux用に
@@ -1554,7 +1561,7 @@ Genie SDKは`GenieDialog`経由でlogitsを公開しませんが、SDKの**カ�
 
 **生成トークンのlogprobs**(QAIRTランタイムがlogitsを渡す場合): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応(またgrammar制約モデルではマスク後のlogitsに対する値になる点に注意)。
 
-カスタムサンプラーの設定を受け付けても、logits callbackを呼ばないランタイムがあります。QCS9075 UbuntuのQAIRT 2.46パッケージで、Qwen3-0.6Bバンドルを使って確認しました。生成テキストがあるのにcallbackが来ない場合、生成トークンのlogprobsとプロンプトスコアリングは、空や誤った値を返す代わりにHTTP 400の`error.code: "logprobs_not_supported"`を返します。同じバンドルでQAIRT 2.50.40のcallbackは動きましたが、無修正版では長い生成後のreset経路で失敗しました。詳しくは[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照してください。
+カスタムサンプラーの設定を受け付けても、logits callbackを呼ばないランタイムがあります。QCS9075 UbuntuのQAIRT 2.46パッケージで、Qwen3-0.6Bバンドルを使って確認しました。最初の生成トークンがcallbackより先に届いた場合、サーバはそのクエリを止め、生成トークンのlogprobsとプロンプトスコアリングは、空や誤った値を返す代わりにHTTP 400の`error.code: "logprobs_not_supported"`を返します。スロットはこの結果を覚えるので、以降のlogprobsリクエストは生成を走らせずにすぐ同じ400を返します。プロンプトスコアリングはプロンプトトークンごとに1つずつスコアが揃ったかも確かめ、callbackが途中で止まった場合はHTTP 500を返します(足りないと全スコアが位置ずれするため)。同じバンドルでQAIRT 2.50.40のcallbackは動きましたが、無修正版では長い生成後のreset経路で失敗しました。詳しくは[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照してください。
 
 **プロンプトスコアリング**(`echo: true` + `logprobs` — lm_evalのloglikelihoodタスクが送る形状): プロンプトの先頭1トークンのみをprefillし、以降の各プロンプトトークンをデコードループで**teacher forcing**して、各位置の P(token_i | tokens_<i) を記録します — 正確なloglikelihoodと`is_greedy`が得られ、`token_logprobs[0] = null`(先頭トークンの確率は定義不能。OpenAIの`echo`と同じ)。トークンID形式のプロンプト(lm_evalが`tokenizer_backend=huggingface`で送る形式)はID単位で正確に整合します。**各リクエストはプロンプト全体をデコード速度で処理する**(20 tok/sで500トークン文書 ≈ 25秒)ため、以下のゲートがあります:
 

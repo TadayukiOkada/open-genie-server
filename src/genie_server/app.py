@@ -162,6 +162,15 @@ def _require_logprobs_support(slot) -> None:
             "logprobs require the model tokenizer, which is not loaded on "
             "this server (install 'tokenizers' and ensure genie_config.json "
             "points at tokenizer.json).", "logprobs")
+    if getattr(slot, "logits_callback_unsupported", False):
+        raise _logprobs_unsupported_error()
+
+
+def _logprobs_unsupported_error() -> InvalidRequestError:
+    return InvalidRequestError(
+        "logprobs are not supported by this QAIRT runtime: the logits "
+        "callback was not invoked during generation.",
+        "logprobs", code="logprobs_not_supported")
 
 
 def _completions_top_n(body: dict) -> int | None:
@@ -312,13 +321,15 @@ async def _collect_or_raise(gen: Generation, state: ServerState,
             status_code=504,
             detail=f"Inference timed out on Hexagon NPU [{gen.request_id}]")
     except RuntimeError as e:
+        if collector is not None and gen.logprobs_unsupported:
+            raise _logprobs_unsupported_error() from None
         raise HTTPException(status_code=500, detail=str(e))
-    if (collector is not None and not gen.error and gen.completion_tokens
-            and not collector.results):
-        raise InvalidRequestError(
-            "logprobs are not supported by this QAIRT runtime: the logits "
-            "callback was not invoked during generation.",
-            "logprobs", code="logprobs_not_supported")
+    # The engine stops the query at the first token that arrives without a
+    # logits callback. The second test is a backstop for a runtime that emits
+    # nothing through the token callback yet still returns partial text.
+    if collector is not None and (gen.logprobs_unsupported or (
+            gen.completion_tokens and not collector.results)):
+        raise _logprobs_unsupported_error()
     return text
 
 
@@ -532,6 +543,16 @@ def create_app(state: ServerState) -> FastAPI:
                                     collector=collector)
         finally:
             manager.status[slot.name] = {"phase": "idle", "detail": ""}
+        if len(collector.results) != n_steps:
+            # Every entry is paired with ids[i + 1] by position, so a short
+            # list would shift every score. Fail instead of returning them.
+            reason = f": {gen.error}" if gen.error else ""
+            raise HTTPException(
+                status_code=500,
+                detail=f"prompt scoring stopped after {len(collector.results)} "
+                       f"of {n_steps} steps{reason} (the runtime stopped calling "
+                       f"the logits callback, or a forced prompt token ended "
+                       f"generation) [{request_id}]")
         lp = logprobs_mod.completions_logprobs(
             slot.tokenizer, collector.results, first_token_id=ids[0])
         echoed = text

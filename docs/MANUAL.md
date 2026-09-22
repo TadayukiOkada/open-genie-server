@@ -897,22 +897,27 @@ GENIE_SERVER_CONFIG=env_config.json uvicorn genie_server.asgi:app --host 0.0.0.0
 ## Ubuntu with QAIRT packages
 
 On a QCS9075 Ubuntu target with the `qairt-*` packages installed, set
-`TARGET_PLATFORM` to `"linux-ubuntu"` (or leave it at `"auto"` when
-`/lib/dsp/cdsp` and `/usr/lib/rfsa/adsp` exist). The packaged `libGenie.so`
-is found through the system loader, so `QAIRT_SDK_ROOT` and `GENIE_LIB_PATH`
-are unnecessary:
+`TARGET_PLATFORM` to `"linux-ubuntu"` (or leave it at `"auto"`, which picks
+it when `/etc/os-release` names Ubuntu and `/lib/dsp/cdsp` and
+`/usr/lib/rfsa/adsp` exist; the startup log prints the platform it chose).
+The packaged `libGenie.so` is found through the system loader, so
+`QAIRT_SDK_ROOT` and `GENIE_LIB_PATH` are unnecessary, and any
+`QAIRT_SDK_ROOT`/`QNN_SDK_ROOT` inherited from the shell is cleared. The
+startup log prints the file the loader actually picked:
 
 ```json
 {
   "TARGET_PLATFORM": "linux-ubuntu",
-  "HEXAGON_VERSION": "v73",
   "TEXT_SLOTS": [{"model_root": "/path/to/compatible/model"}]
 }
 ```
 
-This profile sets `ADSP_LIBRARY_PATH` to `/usr/lib/rfsa/adsp`,
-`/lib/dsp/cdsp`, and `/lib/dsp/cdsp1`. The last two directories contain the
-DSP-side libraries for the two cDSP devices. Use a model bundle built for the
+This profile sets `ADSP_LIBRARY_PATH` to `/usr/lib/rfsa/adsp` and the DSP-side
+library directory of each cDSP in use: `/lib/dsp/cdsp` for `device_id` 0 and
+`/lib/dsp/cdspN` for the others. An unpinned slot runs on whichever core its
+bundle names, so with one both `/lib/dsp/cdsp` and `/lib/dsp/cdsp1` are
+listed. `HEXAGON_VERSION` only matters together with `QAIRT_SDK_ROOT`, where
+it names the SDK skel directory. Use a model bundle built for the
 installed QAIRT version; a newer binary may be rejected at dialog creation.
 Verified on a QCS9075 Ubuntu 24.04 target with `qairt-libs` 2.46.0 and the
 [Qwen3-0.6B GENIE bundle for IQ-9075](https://aihub.qualcomm.com/models/qwen3_0_6b)
@@ -924,8 +929,11 @@ target the SDK's `aarch64-oe-linux-gcc11.2` libraries are used, and its
 `lib/hexagon-v73/unsigned` directory is searched before the system DSP paths.
 Start Python with that SDK's host-library directory in `LD_LIBRARY_PATH` so
 its dependencies come from the same version; setting `LD_LIBRARY_PATH` inside
-the Python process is too late for the process loader. Keep this launch
-environment separate from the distribution packages.
+the Python process is too late for the process loader. The server logs a
+warning at startup when that directory is missing from `LD_LIBRARY_PATH`,
+because libGenie would otherwise load the QNN backends of the `qairt-libs`
+package and mix two QAIRT versions. Keep this launch environment separate
+from the distribution packages.
 
 ## Running on Android
 
@@ -945,7 +953,7 @@ installed (see [What is missing](#what-is-missing-on-android)).
 | | `linux-oe` | `linux-ubuntu` | `android` |
 |---|---|---|---|
 | `libGenie.so` | SDK `lib/aarch64-oe-linux-gcc11.2` | System package, or SDK `lib/aarch64-oe-linux-gcc11.2` | SDK `lib/aarch64-android` |
-| `ADSP_LIBRARY_PATH` | SDK skels, `/usr/lib/rfsa/adsp`, one `/dsp/image/dsp/cdspN` per `device_id` in use | SDK skels if selected, `/usr/lib/rfsa/adsp`, `/lib/dsp/cdsp`, `/lib/dsp/cdsp1` | `/vendor/lib/rfsa/adsp` **first**, then the SDK skels. No `cdspN` entries |
+| `ADSP_LIBRARY_PATH` | SDK skels, `/usr/lib/rfsa/adsp`, one `/dsp/image/dsp/cdspN` per `device_id` in use | SDK skels if selected, `/usr/lib/rfsa/adsp`, `/lib/dsp/cdsp` (device 0) and one `/lib/dsp/cdspN` per other `device_id` in use; both cores for an unpinned slot | `/vendor/lib/rfsa/adsp` **first**, then the SDK skels. No `cdspN` entries |
 | `LD_LIBRARY_PATH` | not set by the server | Set before launch when using a separate SDK | SDK ABI directory + `/vendor/lib64` |
 
 A library built for one ABI will not load on the other, so a `libGenie.so` you
@@ -1532,7 +1540,7 @@ The Genie SDK exposes no logits through `GenieDialog` — logprobs are implement
 
 **Generated-token logprobs** (when the QAIRT runtime provides logits): `logprobs` on `/v1/completions` (int) or `logprobs`/`top_logprobs` on `/v1/chat/completions` (bool/int) record each generated token's logprob and top-N alternatives. Sampling moves into the server for these requests (greedy / temperature / top-k / top-p over the same logits — `temperature=0` matches the SDK's greedy exactly); the SDK's basic sampler with the model's defaults is restored afterwards. Overhead is one log-softmax over the vocab per token (~1-2 ms) versus tens of ms of NPU decode — and exactly zero for requests that don't ask for logprobs. Requires `numpy` and the model tokenizer. Not supported with `stream: true`, on VLM slots, or with grammar-constrained models' masked-out semantics in mind (logprobs are post-grammar-mask).
 
-Some runtimes accept the custom sampler setting but never invoke its logits callback. On Ubuntu with the QCS9075 QAIRT 2.46 packages, this was measured with a Qwen3-0.6B bundle. If generation produces text without a logits callback, the server returns HTTP 400 with `error.code: "logprobs_not_supported"` for generated-token logprobs and prompt scoring, rather than returning empty or misleading scores. QAIRT 2.50.40 invoked the callback with the same bundle, but its unpatched reset path failed after longer generation; see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
+Some runtimes accept the custom sampler setting but never invoke its logits callback. On Ubuntu with the QCS9075 QAIRT 2.46 packages, this was measured with a Qwen3-0.6B bundle. If the first generated token arrives without a logits callback, the server stops that query and returns HTTP 400 with `error.code: "logprobs_not_supported"` for generated-token logprobs and prompt scoring, rather than returning empty or misleading scores. The slot remembers the result, so later logprobs requests get the same 400 at once instead of running a generation first. Prompt scoring also checks that it got one score per prompt token and returns HTTP 500 if the callback stopped partway, since a short list would shift every score. QAIRT 2.50.40 invoked the callback with the same bundle, but its unpatched reset path failed after longer generation; see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
 
 **Prompt scoring** (`echo: true` + `logprobs`, the shape lm_eval's loglikelihood tasks send): the server prefills only the first prompt token, then **teacher-forces** every following prompt token through the decode loop, recording P(token_i | tokens_<i) at each position — exact loglikelihood and `is_greedy`, with `token_logprobs[0] = null` (the first token's probability is undefined, same as OpenAI's `echo`). Token-id prompts (what lm_eval sends with `tokenizer_backend=huggingface`) are scored with exact id alignment. **Each request runs its whole prompt at decode speed** (a 500-token document at 20 tok/s ≈ 25 s), so it is gated:
 

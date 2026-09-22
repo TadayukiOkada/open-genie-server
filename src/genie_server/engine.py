@@ -81,6 +81,9 @@ class Generation:
         self.query_active = threading.Event()
         self.finish_reason = "stop"
         self.error: str | None = None
+        # Set when a logprobs request emitted a token without the custom
+        # sampler's logits callback having run (see _locked_query).
+        self.logprobs_unsupported = False
         self.completion_tokens = 0
         self.cache_state = "NONE"
         self.query_started_at: float | None = None
@@ -222,10 +225,14 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
         if generation.aborted.is_set():
             return  # client disconnected while we were setting up
 
+        on_token = generation.on_token
+        if collector is not None:
+            on_token = _logits_checked_on_token(lib, slot, generation, collector)
+
         generation.query_started_at = time.perf_counter()
         generation.query_active.set()
         try:
-            ret = lib.query(slot.handle, actual, sentence_code, generation.on_token)
+            ret = lib.query(slot.handle, actual, sentence_code, on_token)
         finally:
             generation.query_active.clear()
 
@@ -254,6 +261,38 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
                 slot.handle, make_sampler_params(slot.sampler_defaults))
         watchdog.cancel()
         watchdog.join()
+
+
+def _logits_checked_on_token(lib: GenieLib, slot: Slot, generation: Generation,
+                             collector):
+    """Token callback for a logprobs request that stops the query as soon as
+    a token arrives without the logits callback having run.
+
+    Some QAIRT runtimes (2.46 on the IQ-9075 Ubuntu packages) accept the
+    custom sampler config but never call its hook, and the SDK samples on its
+    own. Waiting for the whole generation to learn that would hold the slot
+    for up to max_tokens steps, so the first token decides. The result is
+    remembered on the slot, and later requests fail before they queue."""
+
+    def on_token(token: str, code: int) -> None:
+        if generation.logprobs_unsupported:
+            return
+        if token and code != capi.SENTENCE_ABORT and collector.step == 0:
+            logger.error(f"[{slot.name}] logits callback was not invoked before "
+                         f"the first token; logprobs are unsupported by this "
+                         f"runtime [{generation.request_id}]")
+            generation.logprobs_unsupported = True
+            slot.logits_callback_unsupported = True
+            # GenieDialog_signal(ABORT) only sets a flag, so it is safe to
+            # call from inside the query's own callback.
+            ret = lib.signal_abort(slot.handle)
+            if ret != capi.STATUS_SUCCESS:
+                logger.warning(f"GenieDialog_signal failed "
+                               f"[{generation.request_id}]: {ret}")
+            return
+        generation.on_token(token, code)
+
+    return on_token
 
 
 def warm_up_prefix(lib: GenieLib, slot: Slot, prefix_prompt: str, cache_key: str,

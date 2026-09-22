@@ -57,7 +57,7 @@ curl $base_url/v1/models
 | `stop` | string \| string[] | 停止シーケンス。マッチングはSDK内で行われ、ストリーミング中は部分一致テキストをホールドバックし、一致した停止シーケンス自体は出力からトリムされる(OpenAIセマンティクス)。 |
 | `temperature` / `top_p` / `top_k` | number | サンプリングパラメータ。リクエストごとに再適用され、省略したパラメータは**モデル自身の`genie_config.json`既定値**に戻る(直前のリクエストの設定が漏れない)。`temperature=0` で貪欲デコード(SDKのランタイムサンプラ設定はtemp=0を受け付けないため、`top-k=1`として実装)。 |
 | `seed` | int | ベストエフォートのサンプリングシード。SDKサンプラに転送される。 |
-| `logprobs` | int (0-20) | **生成**トークンのトークン単位logprobsと、各位置の上位N候補を返す([Logprobs](./MANUAL.ja.md#logprobs)参照)。非ストリーミングのみ。`echo`と組み合わせると**プロンプトスコアリング**(lm_eval loglikelihood)に切り替わる — `POST /v1/server/prompt_logprobs`によるゲートあり。 |
+| `logprobs` | int (0-20) | **生成**トークンのトークン単位logprobsと、各位置の上位N候補を返す([Logprobs](./MANUAL.ja.md#logprobs)参照)。非ストリーミングのみ。`echo`と組み合わせると**プロンプトスコアリング**(lm_eval loglikelihood)に切り替わる — `POST /v1/server/prompt_logprobs`によるゲートあり。logits callbackを呼ばないQAIRTランタイムではHTTP 400 `logprobs_not_supported`。 |
 | `suffix` / `best_of` | — | 非対応 → `400`。 |
 | `echo` | bool | trueならプロンプトを応答に前置(ストリーミング時は最初のchunkとして送出)。 |
 | `n` | int | `1` のみサポート。`>1` は `400`。 |
@@ -97,7 +97,7 @@ curl $base_url/v1/completions \
 | `enable_thinking` / `chat_template_kwargs.enable_thinking` | bool | 既定 `true`。OpenAI標準フィールドではなく、Qwen3向けの独自拡張。トップレベルの`enable_thinking`、または`chat_template_kwargs`にネストした形式(vLLM/SGLangの流儀 — このdictをそのままHFの`apply_chat_template()`に渡す実装で、`enable_thinking`はQwen3自身のチャットテンプレートが読むkwarg名そのもの。両方指定時は`chat_template_kwargs`側が優先)のどちらでも受け付ける。`false`を指定すると、systemプロンプトに文字列`/no_think`をそのまま追記する(systemメッセージが無ければ新規作成する) — Qwen3自身が公式にドキュメント化しているチャットテンプレート向けのソフトスイッチで、モデルは自前の推論をスキップして直接回答する。**空の`<think>\n\n</think>\n\n`ブロックを事前に埋め込む方式(HuggingFaceのチャットテンプレートの仕組み)では実装していない** — Qualcommの公式リファレンスサーバ(`qai-appbuilder/samples/genie/c++/Service`)が実機検証で、この方式だと短いプロンプトでQwen3が退化する(直前のターンをそのまま繰り返した直後に終了する)ことを確認しているため、本サーバは彼らが検証済みの`/no_think`方式に合わせている。Qwen3系以外のテンプレート/モデルには影響しない(単なるプロンプト文字列であり、SDK側に推論ON/OFFの切り替え機能自体が存在しないため)。 |
 | `tools` | array | OpenAI function callingのツール定義 — 後述の[Function calling](#function-calling-tools)参照。 |
 | `tool_choice` | string | `"auto"`(既定)と`"none"`(ツール注入を無効化)のみ。`"required"` および `{"type":"function", ...}` の関数指定形式は**`400`で拒否**する — どちらもOpenAIのセマンティクスでは呼び出しを保証するもので、本サーバが実装していない制約付きデコーディングを要するため。`"auto"`を使い、応答に実際に`tool_calls`が入っているかを確認すること。 |
-| `logprobs` / `top_logprobs` | bool / int (0-20) | 生成トークンのOpenAI chat形式logprobs(`choices[0].logprobs.content[...]`)。非ストリーミングのみ。[Logprobs](./MANUAL.ja.md#logprobs)参照。 |
+| `logprobs` / `top_logprobs` | bool / int (0-20) | 生成トークンのOpenAI chat形式logprobs(`choices[0].logprobs.content[...]`)。非ストリーミングのみ。logits callbackを呼ばないQAIRTランタイムではHTTP 400 `logprobs_not_supported`。[Logprobs](./MANUAL.ja.md#logprobs)参照。 |
 
 ```bash
 curl $base_url/v1/chat/completions \

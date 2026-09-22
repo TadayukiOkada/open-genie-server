@@ -116,6 +116,10 @@ class Slot:
         # swapped under self.lock.
         self.logprobs_registered = False
         self.active_collector = None
+        # Set once a logprobs request shows that this runtime never calls the
+        # custom sampler's logits hook (engine._logits_checked_on_token). It
+        # is a property of the loaded libGenie, so it survives hot-swaps.
+        self.logits_callback_unsupported = False
 
     @property
     def sampler_callback_name(self) -> str:
