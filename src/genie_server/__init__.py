@@ -22,4 +22,4 @@ Run it either way — both call genie_server.cli.main():
     python3 genie-server.py       (repository-root launcher; needs no install)
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"

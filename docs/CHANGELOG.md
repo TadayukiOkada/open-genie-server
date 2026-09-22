@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.4.0 — Ubuntu QAIRT-package targets, and an explicit error when logprobs can't be scored
+
+Adds a third target platform, `linux-ubuntu`, alongside `linux-oe` and
+`android`: a QCS9075 EVK running Ubuntu with the distro's `qairt-*` packages
+instead of a QAIRT SDK tree. Detected automatically from `/etc/os-release`
+and the DSP library layout, or set explicitly with `target_platform`. On
+this platform `libGenie.so` loads from the system loader (`qairt-libs`
+registers it) unless an SDK root is configured, and the DSP search path
+covers both QCS9075 cores since an unpinned slot can land on either one.
+
+The other change is unrelated to Ubuntu specifically: QAIRT 2.46 on the
+QCS9075 packages accepts the custom-sampler logprobs setting but never
+invokes its callback for some bundles, which previously left generated-token
+logprobs and prompt scoring silently empty or wrong. The server now detects
+a missing callback at the first generated token, stops that query, and
+returns HTTP 400 `error.code: "logprobs_not_supported"` instead — for
+chat/completion logprobs and prompt scoring alike. A slot remembers the
+result, so later logprobs requests on it fail fast without a wasted
+generation. Prompt scoring also now checks it got exactly one score per
+prompt token, and returns HTTP 500 if the callback stopped partway through
+rather than silently shifting every score by one.
+
+### Added
+
+- **`linux-ubuntu` target platform** (`config.py`): autodetected from
+  `/etc/os-release` (`ID`/`ID_LIKE` naming Ubuntu) plus `/lib/dsp/cdsp` and
+  `/usr/lib/rfsa/adsp`, or set explicitly via `target_platform`.
+  `resolved_genie_lib_path` falls back to the bare `libGenie.so` name (the
+  system loader's copy) when no `sdk_root` is configured; `apply_process_env`
+  no longer exports `QAIRT_SDK_ROOT`/`QNN_SDK_ROOT` when `sdk_root` is unset,
+  so a stray SDK exported by the launching shell cannot leak in. See [Ubuntu
+  with QAIRT packages in MANUAL.md](MANUAL.md#ubuntu-with-qairt-packages).
+- **Explicit `logprobs_not_supported` error** (`engine.py`, `app.py`): a
+  generation that completes without the SDK ever invoking the logits
+  callback now returns HTTP 400 instead of empty or misleading logprobs, for
+  both generated-token logprobs and prompt scoring. See [Logprobs in
+  MANUAL.md](MANUAL.md#logprobs).
+
+Verified on a QCS9075 Ubuntu EVK (QAIRT 2.46 distro packages): 272 offline
+API/unit tests, core text integration tests, model hot-swap, and VLM
+integration (image, video, streaming, disconnect recovery, vision budget
+guard) all passed; grammar was rejected by that runtime, as expected for
+2.46. Re-verified after merge on both the EVK and the SA8255P board
+(`server-verification/results/20260922_iq9075_ubuntu/README.md`).
+
 ## 1.3.0 — VLM bundle layouts are read from the bundle, not hard-coded per model
 
 Every VLM bundle needed its own hard-coded node-config filenames, connections
