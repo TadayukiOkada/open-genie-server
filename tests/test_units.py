@@ -584,9 +584,11 @@ def _run_build_order(monkeypatch, order):
     class Cfg:
         slot_load_order = order
         prefix_cache_dir = "."
+        platform = target_platform = "linux-oe"
 
         def apply_process_env(self):
             pass
+
 
         def resolved_genie_lib_path(self):
             return "libGenie.so"
@@ -1756,6 +1758,107 @@ def test_linux_oe_adsp_lists_every_device_id_in_use():
         "/dsp/image/dsp/cdsp0;/dsp/image/dsp/cdsp1")
 
 
+def test_ubuntu_uses_system_qairt_package_without_sdk_root(monkeypatch):
+    import os
+    from genie_server.config import ServerConfig
+    c = ServerConfig(sdk_root="", target_platform="linux-ubuntu")
+    assert c.resolved_genie_lib_path() == "libGenie.so"
+    assert c._adsp_library_path() == (
+        "/usr/lib/rfsa/adsp;/lib/dsp/cdsp;/lib/dsp/cdsp1;")
+    monkeypatch.setenv("QAIRT_SDK_ROOT", "/old/sdk")
+    monkeypatch.setenv("QNN_SDK_ROOT", "/old/sdk")
+    c.apply_process_env()
+    assert "QAIRT_SDK_ROOT" not in os.environ
+    assert "QNN_SDK_ROOT" not in os.environ
+
+
+def test_ubuntu_sdk_path_uses_oe_abi_and_prefers_sdk_skels():
+    c = _cfg(target_platform="linux-ubuntu")
+    assert c.resolved_genie_lib_path() == \
+        "/opt/qairt/X/lib/aarch64-oe-linux-gcc11.2/libGenie.so"
+    assert c._adsp_library_path() == (
+        "/opt/qairt/X/lib/hexagon-v73/unsigned;/usr/lib/rfsa/adsp;"
+        "/lib/dsp/cdsp;/lib/dsp/cdsp1;")
+
+
+def test_auto_detects_ubuntu_dsp_layout(monkeypatch):
+    from genie_server.config import detect_platform
+    monkeypatch.setattr("genie_server.config.os.path.isdir",
+                        lambda p: p in ("/lib/dsp/cdsp", "/usr/lib/rfsa/adsp"))
+    monkeypatch.setattr("genie_server.config._is_ubuntu", lambda: True)
+    assert detect_platform() == "linux-ubuntu"
+
+
+def test_auto_keeps_oe_with_the_ubuntu_dsp_layout(monkeypatch):
+    """A usrmerge OE image has the same directories; only os-release tells
+    them apart."""
+    from genie_server.config import detect_platform
+    monkeypatch.setattr("genie_server.config.os.path.isdir",
+                        lambda p: p in ("/lib/dsp/cdsp", "/usr/lib/rfsa/adsp"))
+    monkeypatch.setattr("genie_server.config._is_ubuntu", lambda: False)
+    assert detect_platform() == "linux-oe"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\n', True),
+    ('ID=pop\nID_LIKE="ubuntu debian"\n', True),
+    ('ID=qcom-wayland\nID_LIKE=""\n', False),
+    ('garbage\n', False),
+])
+def test_is_ubuntu_reads_os_release(tmp_path, text, expected):
+    from genie_server.config import _is_ubuntu
+    p = tmp_path / "os-release"
+    p.write_text(text)
+    assert _is_ubuntu(str(p)) is expected
+    assert _is_ubuntu(str(tmp_path / "missing")) is False
+
+
+def test_platform_is_detected_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr("genie_server.config.detect_platform",
+                        lambda: calls.append(1) or "linux-oe")
+    c = _cfg(target_platform="auto")
+    c.resolved_genie_lib_path()
+    c._adsp_library_path()
+    c.apply_process_env()
+    assert len(calls) == 1
+
+
+def test_ubuntu_adsp_path_follows_pinned_device_ids():
+    from genie_server.config import ServerConfig, SlotSpec
+    c = ServerConfig(
+        sdk_root="", target_platform="linux-ubuntu", vlm_slots=[],
+        text_slots=[SlotSpec(name="a", device_id=0, model_root="/m"),
+                    SlotSpec(name="b", device_id=2, model_root="/m")])
+    assert c._adsp_library_path() == (
+        "/usr/lib/rfsa/adsp;/lib/dsp/cdsp;/lib/dsp/cdsp2;")
+
+
+def test_empty_sdk_root_clears_inherited_sdk_variables(monkeypatch):
+    import os
+    monkeypatch.setenv("QAIRT_SDK_ROOT", "/opt/qairt/2.48")
+    monkeypatch.setenv("QNN_SDK_ROOT", "/opt/qairt/2.48")
+    from genie_server.config import ServerConfig
+    ServerConfig(sdk_root="", target_platform="linux-oe",
+                 genie_lib_path="/custom/libGenie.so").apply_process_env()
+    assert "QAIRT_SDK_ROOT" not in os.environ
+    assert "QNN_SDK_ROOT" not in os.environ
+
+
+def test_mapped_path_reports_the_file_the_loader_chose(tmp_path, monkeypatch):
+    from genie_server import bootstrap
+    maps = tmp_path / "maps"
+    maps.write_text(
+        "7f00-7f01 r-xp 00000000 08:01 12 /usr/lib/aarch64-linux-gnu/libGenie.so\n")
+    real_open = open
+    monkeypatch.setattr("builtins.open", lambda p, *a, **k: real_open(
+        maps if p == "/proc/self/maps" else p, *a, **k))
+    assert bootstrap._mapped_path("libGenie.so") == \
+        "/usr/lib/aarch64-linux-gnu/libGenie.so (requested libGenie.so)"
+    assert bootstrap._mapped_path("/usr/lib/aarch64-linux-gnu/libGenie.so") == \
+        "/usr/lib/aarch64-linux-gnu/libGenie.so"
+
+
 def test_android_uses_the_bionic_abi_and_vendor_first_adsp_path():
     """Verbatim the layout that brought a dialog up on the Android guest:
     vendor skels first, SDK skels second, and no cdspN entries (the guest
@@ -1798,9 +1901,15 @@ def test_linux_oe_does_not_touch_ld_library_path(monkeypatch):
 
 
 def test_explicit_genie_lib_path_wins_on_every_platform():
-    for plat in ("linux-oe", "android"):
+    from genie_server.config import KNOWN_PLATFORMS, ServerConfig
+    for plat in KNOWN_PLATFORMS:
         c = _cfg(target_platform=plat, genie_lib_path="/custom/libGenie.so")
         assert c.resolved_genie_lib_path() == "/custom/libGenie.so"
+    # ...including over the system-package fallback of an Ubuntu config
+    # without an SDK.
+    c = ServerConfig(sdk_root="", target_platform="linux-ubuntu",
+                     genie_lib_path="/custom/libGenie.so")
+    assert c.resolved_genie_lib_path() == "/custom/libGenie.so"
 
 
 def test_auto_resolves_to_a_known_platform():

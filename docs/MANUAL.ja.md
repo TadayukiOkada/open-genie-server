@@ -679,9 +679,9 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 
 | キー | 必須 | 既定値 | 説明 |
 |---|---|---|---|
-| `QAIRT_SDK_ROOT` | 実質必須 | `""` | QAIRT SDKのルートパス。`QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH` にも使われる。 |
+| `QAIRT_SDK_ROOT` | SDK配置を使う場合は必須 | `""` | QAIRT SDKのルートパス。Ubuntuの`qairt-*`パッケージを使う場合は省略する。指定すると`QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH` にも使われる。 |
 | `HEXAGON_VERSION` | 任意 | `"v73"` | `ADSP_LIBRARY_PATH` に使うHexagonバージョン(例: `hexagon-v73`)。 |
-| `TARGET_PLATFORM` | 任意 | `"auto"` | `"linux-oe"` / `"android"` / 自動判定の `"auto"`。QAIRTのABIディレクトリ(`aarch64-oe-linux-gcc11.2` か `aarch64-android`)と `ADSP_LIBRARY_PATH` の構成を選びます — [Androidで動かす](#androidで動かす)参照。実行中のOSと異なるターゲット向けのSDKを指しているとき以外、明示指定は不要です。 |
+| `TARGET_PLATFORM` | 任意 | `"auto"` | `"linux-oe"` / `"linux-ubuntu"` / `"android"` / 自動判定の `"auto"`。ライブラリと`ADSP_LIBRARY_PATH`の構成を選ぶ — [UbuntuのQAIRTパッケージ](#ubuntuのqairtパッケージ)と[Androidで動かす](#androidで動かす)参照。 |
 | `TEXT_SLOTS` | `VLM_SLOTS`未設定なら必須 | (未設定) | 常駐させるテキストモデルごとに1エントリ: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`。必須なのは`model_root`だけで、`name`は`slot<i>`、`device_id`未設定ならモデル自身のHTP設定が指定するコアに載るため、単一モデルなら`[{"model_root": "..."}]`で済む([マルチテキストスロット](#マルチテキストスロット)参照。2本目が必ず載るとは限らない点と、2つのスロットが同じ `device_id` を共有すること自体は可能だがそれで同時実行にはならない点に注意)。`poll`はそのスロットで使うモデルの`QnnHtp.poll`を上書きする(下の`POLL`参照)。`config_file`は`model_root`内のダイアログ設定ファイル名で、既定は`genie_config.json`。genie-appが設定パスをコマンドラインで受け取る以上、エクスポート側がモデル名にちなんだ名前(`acme-7b-htp.json`など)を付けることがあり、**コピーを作るよりスロットからそのファイルを指す方がよい**。`poll`と`config_file`はどちらも**モデルではなくスロットに属する**ので、`/v1/models/switch`をまたいでも残る。`TEXT_SLOTS`と`VLM_SLOTS`のどちらも無い設定は起動時に拒否される。 |
 | `POLL` | 任意 | (未設定) | 各スロットの`poll`の既定値。`true`/`false`で各モデルバンドルの`dialog.engine.backend.QnnHtp.poll`を上書きし、未設定ならバンドルの値をそのまま使う。**通常は`false`が正解** — SA8255Pではポーリングに約260%のCPUを使う一方、レイテンシはブロッキングと区別がつかない(後述の`QnnHtp.poll`の節)。スロット個別の`poll`が優先される。テキストスロット専用でVLMスロットには影響しない。 |
 | `SLOT_LOAD_ORDER` | 任意 | `"vlm-first"` | `TEXT_SLOTS`と`VLM_SLOTS`の両方を設定した場合に、どちらを先に生成するか: `"vlm-first"` または `"text-first"`。[スロット生成順](#スロット生成順slot_load_order)および[2つのモデルを同時にロードする](#2つのモデルを同時にロードする)を参照。それ以外の値は起動時にエラー。 |
@@ -693,7 +693,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `DEFAULT_MAX_TOKENS` | 任意 | `0`(無効) | `/v1/completions`/`/v1/chat/completions`で`max_tokens`/`max_completion_tokens`が未指定の場合に、モデル自身の残りコンテキスト容量に加えて適用される追加の上限([APIリファレンス](./API.ja.md)の`max_tokens`項目参照)。`0`は追加上限なし(コンテキストサイズのみで制限 — Qualcomm自身のqai-appbuilderリファレンスサーバと同じ挙動)を意味する。特定のモデル/構成が暴走しやすいと分かっていて、より小さい安全マージンが欲しい場合に正の値を設定する([トラブルシューティング](#トラブルシューティング)参照)。クライアントが明示的に`max_tokens`を指定した場合は常にそちらが優先される。 |
 | `INFERENCE_TIMEOUT` | 任意 | `120` | 1回の`GenieDialog_query`に対するウォッチドッグ制限(秒)。遅いターゲットでの長い生成にはこの値を上げる。`GET /v1/server/idle`や同期パスの全体待ち時間(この2倍)にも使われる。 |
 | `HOST` / `PORT` | 任意 | `"0.0.0.0"` / `8080` | 待受アドレス/ポート。CLIの`--host`/`--port`が優先。 |
-| `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は解決後の `TARGET_PLATFORM` に応じた `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。 |
+| `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は`<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。SDKルートなしの`linux-ubuntu`ではシステムの`libGenie.so`。 |
 | `GENIE_PROFILE` | 任意 | `false` | 各テキストスロットに `GenieProfile` をバインドし、SDK自身が計測したTTFT/プレフィル/デコードのKPIを `GET /v1/server/profile` で取得できるようにする([プロファイリング](#プロファイリングsdk側のkpi)参照)。変更には再起動が必要。 |
 | `GENIE_LOG_LEVEL` | 任意 | `""`(無効) | libGenie 自身のログを `"error"` / `"warn"` / `"info"` / `"verbose"` で有効化します。`GenieLog` を1つ作り、本サーバが作る全ての dialog / node / pipeline のコンフィグにバインドします。**無効は「静か」ではなく「無音」です**: SDK 内の `__INFO`/`__ERROR` はロガーがバインドされているかで完全に止まるため、未設定だと SDK 自身の診断は1行も見えません(ロード失敗の理由すら見えません)。`"error"` は安価で、`"info"` にするとエンジンの構成判断(そのバンドルがどの推論経路に乗るか等)も出ます。ただし `"info"` は多く、0.6B の4スロット構成の起動1回で **1,836 行**が出ました(大半はバッファ単位のメモリ登録)。有用な行は少数かつ先頭付近にあり、例えば `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128` はエンジンがそのバンドルに対してどう構成されたかを教えてくれます。行を書くのは SDK 自身で、Linux では本プロセスの stdout(`Genie:  <ms> [ LEVEL ] ...`)、Android では logcat に出ます — Python の logging を通らないので、サーバ自身のログ書式にはなりません。コンフィグにバインドするため、変更には再起動が必要です。 |
 | `PROMPT_LOGPROBS` | 任意 | `false` | プロンプトスコアリング(`echo`+`logprobs`のteacher forcing、lm_evalのloglikelihoodタスクが使用)を起動時から有効化。実行時は`POST /v1/server/prompt_logprobs`でも切り替え可([Logprobs](#logprobs)参照)。 |
@@ -825,6 +825,44 @@ GENIE_SERVER_CONFIG=env_config.json uvicorn genie_server.asgi:app --host 0.0.0.0
 
 **`--workers` は必ず1にしてください。** 各スロットの `GenieDialog` ハンドルはプロセス内グローバル状態であり、複数ワーカープロセスに分割すると別々のNPUコンテキストの取り合いになり破綻します。
 
+## UbuntuのQAIRTパッケージ
+
+`qairt-*`パッケージを導入したQCS9075のUbuntuでは、`TARGET_PLATFORM`を
+`"linux-ubuntu"`にする。`"auto"`のままでも、`/etc/os-release`がUbuntuを示し、
+`/lib/dsp/cdsp`と`/usr/lib/rfsa/adsp`があればこれを選ぶ(選んだ結果は起動ログに出る)。
+パッケージ版の`libGenie.so`はシステムのローダーから見つかるので、
+`QAIRT_SDK_ROOT`と`GENIE_LIB_PATH`は不要。シェルから引き継いだ
+`QAIRT_SDK_ROOT`/`QNN_SDK_ROOT`は消す。ローダーが実際に選んだファイルは起動ログに出る:
+
+```json
+{
+  "TARGET_PLATFORM": "linux-ubuntu",
+  "TEXT_SLOTS": [{"model_root": "/path/to/compatible/model"}]
+}
+```
+
+この設定では`ADSP_LIBRARY_PATH`に`/usr/lib/rfsa/adsp`と、使うcDSPごとの
+DSP側ライブラリのディレクトリを入れる。`device_id` 0は`/lib/dsp/cdsp`、
+それ以外は`/lib/dsp/cdspN`。`device_id`を指定しないスロットはバンドルが指す
+コアで動くので、その場合は`/lib/dsp/cdsp`と`/lib/dsp/cdsp1`の両方を入れる。
+`HEXAGON_VERSION`は`QAIRT_SDK_ROOT`と組み合わせたときだけ意味を持つ
+(SDKのskelディレクトリ名に使う)。
+モデルバンドルは導入済みQAIRT版に合うものを使う。新しい版で作った
+バイナリはダイアログ生成時に拒否される可能性がある。
+QCS9075のUbuntu 24.04、`qairt-libs` 2.46.0と
+[IQ-9075向けQwen3-0.6BのGENIEバンドル](https://aihub.qualcomm.com/models/qwen3_0_6b)
+(QAIRT 2.45で作成)で、起動、`/health`、`/v1/models`、チャット生成を確認した。
+
+別のSDKを使う場合は`QAIRT_SDK_ROOT`にそのルートを指定する。QCS9075の
+UbuntuではSDKの`aarch64-oe-linux-gcc11.2`版を使い、DSP側の探索では
+`lib/hexagon-v73/unsigned`をシステムのパスより先に置く。このために
+`LD_LIBRARY_PATH`を設定する必要はない。SDKの`libGenie.so`は`RPATH=$ORIGIN`を
+持つ(2.45.41、2.48.40、2.49.x、2.50.xで確認)ので、読み込むQNNバックエンド(`libQnnHtp.so`、
+`libQnnSystem.so`、stub)は`qairt-libs`パッケージがあっても同じディレクトリから
+読まれる。QCS9075のUbuntuでQAIRT 2.50.40を使い、SDKのディレクトリを
+`LD_LIBRARY_PATH`に入れた場合と入れない場合で、プロセスに読み込まれた
+ライブラリが同じであることを確かめた。
+
 ## Androidで動かす
 
 本サーバはAndroidターゲットでもそのまま動きます。プラットフォームを意識する必要が
@@ -839,11 +877,11 @@ SA8255PのAndroidゲスト(Android 15、arm64-v8a、root shell)で、素のQAIRT
 
 ### プラットフォームで変わるもの
 
-| | `linux-oe` | `android` |
-|---|---|---|
-| QAIRT ABIディレクトリ | `lib/aarch64-oe-linux-gcc11.2`(glibc) | `lib/aarch64-android`(bionic) |
-| `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
-| `LD_LIBRARY_PATH` | サーバは設定しない | SDKのABIディレクトリ + `/vendor/lib64` |
+| | `linux-oe` | `linux-ubuntu` | `android` |
+|---|---|---|---|
+| `libGenie.so` | SDKの`lib/aarch64-oe-linux-gcc11.2` | システムのパッケージ、またはSDKの`lib/aarch64-oe-linux-gcc11.2` | SDKの`lib/aarch64-android` |
+| `ADSP_LIBRARY_PATH` | SDKのskel群、`/usr/lib/rfsa/adsp`、使用中の`device_id`ごとの`/dsp/image/dsp/cdspN` | SDK指定時はそのskel群、`/usr/lib/rfsa/adsp`、`/lib/dsp/cdsp`(device 0)と使用中の他の`device_id`ごとの`/lib/dsp/cdspN`。`device_id`未指定のスロットがあれば両コア | `/vendor/lib/rfsa/adsp` を**先頭**に、続いてSDKのskel群。`cdspN` は付けない |
+| `LD_LIBRARY_PATH` | サーバは設定しない | サーバは設定しない(不要。`libGenie.so`は`RPATH=$ORIGIN`でバックエンドを読む) | SDKのABIディレクトリ + `/vendor/lib64` |
 
 一方のABI向けにビルドしたライブラリはもう一方では読み込めません。OE Linux用に
 リビルドした `libGenie.so` をAndroidで使うことはできず、逆も同様です。
@@ -1522,7 +1560,9 @@ VLM経路では以下がサポートされない:
 
 Genie SDKは`GenieDialog`経由でlogitsを公開しませんが、SDKの**カスタムサンプラー**フック(`GenieSampler_registerUserDataCallback` + サンプラー設定`{"type": "custom"}`)が、生成1ステップごとにデクォンタイズ済みfloat32のlogitsベクトル全体をサーバに渡し、出力トークンの選択も委ねます。logprobsはこの仕組みで実装されています(`genie_server/logprobs.py`)。
 
-**生成トークンのlogprobs**(常時利用可): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応(またgrammar制約モデルではマスク後のlogitsに対する値になる点に注意)。
+**生成トークンのlogprobs**(QAIRTランタイムがlogitsを渡す場合): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応(またgrammar制約モデルではマスク後のlogitsに対する値になる点に注意)。
+
+カスタムサンプラーの設定を受け付けても、logits callbackを呼ばないランタイムがあります。QCS9075 UbuntuのQAIRT 2.46パッケージで、Qwen3-0.6Bバンドルを使って確認しました。最初の生成トークンがcallbackより先に届いた場合、サーバはそのクエリを止め、生成トークンのlogprobsとプロンプトスコアリングは、空や誤った値を返す代わりにHTTP 400の`error.code: "logprobs_not_supported"`を返します。スロットはこの結果を覚えるので、以降のlogprobsリクエストは生成を走らせずにすぐ同じ400を返します。プロンプトスコアリングはプロンプトトークンごとに1つずつスコアが揃ったかも確かめ、callbackが途中で止まった場合はHTTP 500を返します(足りないと全スコアが位置ずれするため)。同じバンドルでQAIRT 2.50.40のcallbackは動きましたが、無修正版では長い生成後のreset経路で失敗しました。詳しくは[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照してください。
 
 **プロンプトスコアリング**(`echo: true` + `logprobs` — lm_evalのloglikelihoodタスクが送る形状): プロンプトの先頭1トークンのみをprefillし、以降の各プロンプトトークンをデコードループで**teacher forcing**して、各位置の P(token_i | tokens_<i) を記録します — 正確なloglikelihoodと`is_greedy`が得られ、`token_logprobs[0] = null`(先頭トークンの確率は定義不能。OpenAIの`echo`と同じ)。トークンID形式のプロンプト(lm_evalが`tokenizer_backend=huggingface`で送る形式)はID単位で正確に整合します。**各リクエストはプロンプト全体をデコード速度で処理する**(20 tok/sで500トークン文書 ≈ 25秒)ため、以下のゲートがあります:
 

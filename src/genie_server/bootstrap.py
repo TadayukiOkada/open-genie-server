@@ -6,6 +6,7 @@ Raises on failure — the caller decides whether that is fatal.
 """
 
 import logging
+import os
 
 from fastapi import FastAPI
 
@@ -20,12 +21,14 @@ def build_state(config_path: str = "env_config.json") -> ServerState:
     config: ServerConfig = load_config(config_path)
 
     # Environment variables must be in place BEFORE libGenie.so is loaded.
+    logger.info(f"Target platform: {config.platform} "
+                f"(TARGET_PLATFORM={config.target_platform})")
     config.apply_process_env()
 
     from .capi import GenieLib
     so_path = config.resolved_genie_lib_path()
     lib = GenieLib.load(so_path)
-    logger.info(f"libGenie.so loaded from: {so_path}")
+    logger.info(f"libGenie.so loaded from: {_mapped_path(so_path)}")
 
     from . import vlm
     from .slots import SlotManager
@@ -54,6 +57,22 @@ def build_state(config_path: str = "env_config.json") -> ServerState:
         manager=manager,
         prefix_cache=PrefixCache(config.prefix_cache_dir),
     )
+
+
+def _mapped_path(so_path: str) -> str:
+    """The file the loader actually mapped for so_path. A bare name such as
+    "libGenie.so" resolves through LD_LIBRARY_PATH and the system cache, and
+    the name alone does not say which copy won."""
+    name = os.path.basename(so_path)
+    try:
+        with open("/proc/self/maps", encoding="utf-8") as f:
+            for line in f:
+                path = line.split(maxsplit=5)[-1].strip()
+                if os.path.basename(path) == name:
+                    return path if path == so_path else f"{path} (requested {so_path})"
+    except OSError:
+        pass
+    return so_path
 
 
 def build_app(config_path: str = "env_config.json") -> FastAPI:

@@ -744,9 +744,9 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `QAIRT_SDK_ROOT` | effectively required | `""` | Root path of the QAIRT SDK. Also used for `QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH`. |
+| `QAIRT_SDK_ROOT` | required for SDK layouts | `""` | Root path of the QAIRT SDK. Leave unset when using Ubuntu's `qairt-*` packages; otherwise also used for `QNN_SDK_ROOT`/`ADSP_LIBRARY_PATH`. |
 | `HEXAGON_VERSION` | optional | `"v73"` | Hexagon version used in `ADSP_LIBRARY_PATH` (e.g. `hexagon-v73`). |
-| `TARGET_PLATFORM` | optional | `"auto"` | `"linux-oe"`, `"android"`, or `"auto"` to detect. Selects the QAIRT ABI directory (`aarch64-oe-linux-gcc11.2` vs `aarch64-android`) and the `ADSP_LIBRARY_PATH` layout — see [Running on Android](#running-on-android). Only set it explicitly if the SDK you are pointing at is laid out for a different target than the one you are running on. |
+| `TARGET_PLATFORM` | optional | `"auto"` | `"linux-oe"`, `"linux-ubuntu"`, `"android"`, or `"auto"` to detect. Selects the library and `ADSP_LIBRARY_PATH` layout — see [Ubuntu with QAIRT packages](#ubuntu-with-qairt-packages) and [Running on Android](#running-on-android). |
 | `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit — and that two slots sharing a `device_id` is allowed but does not run them concurrently. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
 | `POLL` | optional | (unset) | Default for every slot's `poll`: `true`/`false` overrides `dialog.engine.backend.QnnHtp.poll` in each model bundle, unset leaves each bundle as it is. **`false` is usually what you want** — polling costs ~260% CPU on SA8255P for latency indistinguishable from blocking (see [`QnnHtp.poll`](#qnnhtppoll-costs-260-cpu-and-buys-nothing-here)). A per-slot `poll` wins over this. Text slots only; VLM slots are unaffected. |
 | `SLOT_LOAD_ORDER` | optional | `"vlm-first"` | Which slot kind is created first when both `TEXT_SLOTS` and `VLM_SLOTS` are set: `"vlm-first"` or `"text-first"`. See [Slot creation order](#slot-creation-order-slot_load_order) and [Loading Two Models at Once](#loading-two-models-at-once). Any other value is rejected at startup. |
@@ -758,7 +758,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `DEFAULT_MAX_TOKENS` | optional | `0` (disabled) | Extra cap applied to `/v1/completions`/`/v1/chat/completions` requests that don't specify `max_tokens`/`max_completion_tokens`, on top of the model's own remaining context space (see `max_tokens` under [API Reference](./API.md)). `0` means no extra cap — bound only by context size, matching Qualcomm's own qai-appbuilder reference server. Set a positive value if a specific model/deployment is known to run away and you want a smaller safety margin (see [Troubleshooting](#troubleshooting)). Explicit client-provided `max_tokens` always overrides this. |
 | `INFERENCE_TIMEOUT` | optional | `120` | Watchdog limit (seconds) for one `GenieDialog_query` call. Long generations on slow targets may need this raised. Also bounds `GET /v1/server/idle` and the sync path's overall wait (2x this value). |
 | `HOST` / `PORT` | optional | `"0.0.0.0"` / `8080` | Listen address / port. The `--host` / `--port` CLI flags override these. |
-| `GENIE_LIB_PATH` | optional | (unset) | Explicit path to `libGenie.so`. Default: `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so` for the resolved `TARGET_PLATFORM`. |
+| `GENIE_LIB_PATH` | optional | (unset) | Explicit path to `libGenie.so`. Default: `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`, or the system loader's `libGenie.so` on `linux-ubuntu` without an SDK root. |
 | `GENIE_PROFILE` | optional | `false` | Binds a `GenieProfile` to every text slot; read the SDK's own TTFT / prefill / decode KPIs from `GET /v1/server/profile` (see [Profiling](#profiling-sdk-side-kpis)). Needs a restart to change. |
 | `GENIE_LOG_LEVEL` | optional | `""` (off) | Turns on libGenie's own logging at `"error"`, `"warn"`, `"info"` or `"verbose"`, by creating a `GenieLog` and binding it to every dialog, node and pipeline config the server creates. **Off is not "quiet", it is silent**: every `__INFO`/`__ERROR` inside the SDK is gated on a bound logger, so with this unset you see none of the SDK's own diagnostics — not even the errors behind a failed load. `"error"` is cheap; `"info"` also shows engine setup decisions, such as which inference path a bundle takes — and is noisy: a four-slot 0.6B startup measured **1,836 lines**, most of them per-buffer memory registration. The useful ones are few and near the top, such as `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128`, which tells you how the engine set itself up for a bundle. The SDK writes the lines itself, to this process's stdout (`Genie:  <ms> [ LEVEL ] ...`) on Linux and to logcat on Android — they do not pass through Python logging, so they are not in the server's own log format. Binds to the config, so a change needs a restart. |
 | `PROMPT_LOGPROBS` | optional | `false` | Enables prompt scoring (`echo`+`logprobs` teacher forcing, used by lm_eval loglikelihood tasks) at startup. Also toggleable at runtime via `POST /v1/server/prompt_logprobs` — see [Logprobs](#logprobs). |
@@ -894,6 +894,46 @@ GENIE_SERVER_CONFIG=env_config.json uvicorn genie_server.asgi:app --host 0.0.0.0
 
 **Always keep `--workers` at 1.** Each slot's `GenieDialog` handle is process-global state; splitting across multiple worker processes would have them fight over separate NPU contexts and break.
 
+## Ubuntu with QAIRT packages
+
+On a QCS9075 Ubuntu target with the `qairt-*` packages installed, set
+`TARGET_PLATFORM` to `"linux-ubuntu"` (or leave it at `"auto"`, which picks
+it when `/etc/os-release` names Ubuntu and `/lib/dsp/cdsp` and
+`/usr/lib/rfsa/adsp` exist; the startup log prints the platform it chose).
+The packaged `libGenie.so` is found through the system loader, so
+`QAIRT_SDK_ROOT` and `GENIE_LIB_PATH` are unnecessary, and any
+`QAIRT_SDK_ROOT`/`QNN_SDK_ROOT` inherited from the shell is cleared. The
+startup log prints the file the loader actually picked:
+
+```json
+{
+  "TARGET_PLATFORM": "linux-ubuntu",
+  "TEXT_SLOTS": [{"model_root": "/path/to/compatible/model"}]
+}
+```
+
+This profile sets `ADSP_LIBRARY_PATH` to `/usr/lib/rfsa/adsp` and the DSP-side
+library directory of each cDSP in use: `/lib/dsp/cdsp` for `device_id` 0 and
+`/lib/dsp/cdspN` for the others. An unpinned slot runs on whichever core its
+bundle names, so with one both `/lib/dsp/cdsp` and `/lib/dsp/cdsp1` are
+listed. `HEXAGON_VERSION` only matters together with `QAIRT_SDK_ROOT`, where
+it names the SDK skel directory. Use a model bundle built for the
+installed QAIRT version; a newer binary may be rejected at dialog creation.
+Verified on a QCS9075 Ubuntu 24.04 target with `qairt-libs` 2.46.0 and the
+[Qwen3-0.6B GENIE bundle for IQ-9075](https://aihub.qualcomm.com/models/qwen3_0_6b)
+(built with QAIRT 2.45): startup, `/health`, `/v1/models`, and a chat
+completion succeeded.
+
+To use a separate SDK, set `QAIRT_SDK_ROOT` to its root. On the QCS9075 Ubuntu
+target the SDK's `aarch64-oe-linux-gcc11.2` libraries are used, and its
+`lib/hexagon-v73/unsigned` directory is searched before the system DSP paths.
+`LD_LIBRARY_PATH` is not needed for this: the SDK's `libGenie.so` carries
+`RPATH=$ORIGIN` (checked in 2.45.41, 2.48.40, 2.49.x and 2.50.x), so the QNN backends it
+loads (`libQnnHtp.so`, `libQnnSystem.so`, the stub) come from its own
+directory even with the `qairt-libs` package installed. With QAIRT 2.50.40 on
+the QCS9075 Ubuntu target, the libraries mapped into the process were the
+same with and without the SDK directory on `LD_LIBRARY_PATH`.
+
 ## Running on Android
 
 The server runs unchanged on an Android target — the only code that had to
@@ -909,11 +949,11 @@ installed (see [What is missing](#what-is-missing-on-android)).
 
 ### What the platform changes
 
-| | `linux-oe` | `android` |
-|---|---|---|
-| QAIRT ABI directory | `lib/aarch64-oe-linux-gcc11.2` (glibc) | `lib/aarch64-android` (bionic) |
-| `ADSP_LIBRARY_PATH` | SDK skels, `/usr/lib/rfsa/adsp`, one `/dsp/image/dsp/cdspN` per `device_id` in use | `/vendor/lib/rfsa/adsp` **first**, then the SDK skels. No `cdspN` entries |
-| `LD_LIBRARY_PATH` | not set by the server | SDK ABI directory + `/vendor/lib64` |
+| | `linux-oe` | `linux-ubuntu` | `android` |
+|---|---|---|---|
+| `libGenie.so` | SDK `lib/aarch64-oe-linux-gcc11.2` | System package, or SDK `lib/aarch64-oe-linux-gcc11.2` | SDK `lib/aarch64-android` |
+| `ADSP_LIBRARY_PATH` | SDK skels, `/usr/lib/rfsa/adsp`, one `/dsp/image/dsp/cdspN` per `device_id` in use | SDK skels if selected, `/usr/lib/rfsa/adsp`, `/lib/dsp/cdsp` (device 0) and one `/lib/dsp/cdspN` per other `device_id` in use; both cores for an unpinned slot | `/vendor/lib/rfsa/adsp` **first**, then the SDK skels. No `cdspN` entries |
+| `LD_LIBRARY_PATH` | not set by the server | not set by the server (not needed: `libGenie.so` loads its backends through `RPATH=$ORIGIN`) | SDK ABI directory + `/vendor/lib64` |
 
 A library built for one ABI will not load on the other, so a `libGenie.so` you
 rebuilt for OE Linux cannot be used on Android and vice versa.
@@ -1497,7 +1537,9 @@ So `tokenizers` is optional only in the sense that the server starts without it.
 
 The Genie SDK exposes no logits through `GenieDialog` — logprobs are implemented via the SDK's **custom sampler** hook (`GenieSampler_registerUserDataCallback` + sampler config `{"type": "custom"}`), which hands the server the full dequantized float32 logits vector at every generation step and lets it choose the emitted token (`genie_server/logprobs.py`).
 
-**Generated-token logprobs** (always available): `logprobs` on `/v1/completions` (int) or `logprobs`/`top_logprobs` on `/v1/chat/completions` (bool/int) record each generated token's logprob and top-N alternatives. Sampling moves into the server for these requests (greedy / temperature / top-k / top-p over the same logits — `temperature=0` matches the SDK's greedy exactly); the SDK's basic sampler with the model's defaults is restored afterwards. Overhead is one log-softmax over the vocab per token (~1-2 ms) versus tens of ms of NPU decode — and exactly zero for requests that don't ask for logprobs. Requires `numpy` and the model tokenizer. Not supported with `stream: true`, on VLM slots, or with grammar-constrained models' masked-out semantics in mind (logprobs are post-grammar-mask).
+**Generated-token logprobs** (when the QAIRT runtime provides logits): `logprobs` on `/v1/completions` (int) or `logprobs`/`top_logprobs` on `/v1/chat/completions` (bool/int) record each generated token's logprob and top-N alternatives. Sampling moves into the server for these requests (greedy / temperature / top-k / top-p over the same logits — `temperature=0` matches the SDK's greedy exactly); the SDK's basic sampler with the model's defaults is restored afterwards. Overhead is one log-softmax over the vocab per token (~1-2 ms) versus tens of ms of NPU decode — and exactly zero for requests that don't ask for logprobs. Requires `numpy` and the model tokenizer. Not supported with `stream: true`, on VLM slots, or with grammar-constrained models' masked-out semantics in mind (logprobs are post-grammar-mask).
+
+Some runtimes accept the custom sampler setting but never invoke its logits callback. On Ubuntu with the QCS9075 QAIRT 2.46 packages, this was measured with a Qwen3-0.6B bundle. If the first generated token arrives without a logits callback, the server stops that query and returns HTTP 400 with `error.code: "logprobs_not_supported"` for generated-token logprobs and prompt scoring, rather than returning empty or misleading scores. The slot remembers the result, so later logprobs requests get the same 400 at once instead of running a generation first. Prompt scoring also checks that it got one score per prompt token and returns HTTP 500 if the callback stopped partway, since a short list would shift every score. QAIRT 2.50.40 invoked the callback with the same bundle, but its unpatched reset path failed after longer generation; see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
 
 **Prompt scoring** (`echo: true` + `logprobs`, the shape lm_eval's loglikelihood tasks send): the server prefills only the first prompt token, then **teacher-forces** every following prompt token through the decode loop, recording P(token_i | tokens_<i) at each position — exact loglikelihood and `is_greedy`, with `token_logprobs[0] = null` (the first token's probability is undefined, same as OpenAI's `echo`). Token-id prompts (what lm_eval sends with `tokenizer_backend=huggingface`) are scored with exact id alignment. **Each request runs its whole prompt at decode speed** (a 500-token document at 20 tok/s ≈ 25 s), so it is gated:
 
