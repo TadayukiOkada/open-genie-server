@@ -7,6 +7,7 @@ are ignored so a config written for a newer server version still loads.
 import functools
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,6 +105,11 @@ def resolve_model_path(value, base: Path | None) -> Path:
     if p.is_absolute() or base is None:
         return p.resolve()
     return (base / p).resolve()
+
+
+# How many images at VLM_MAX_IMAGE_PIXELS the default total admits. See
+# ServerConfig.vlm_max_total_pixels.
+VLM_MAX_TOTAL_FRAMES_AT_MAX = 64
 
 
 @dataclass(frozen=True)
@@ -255,6 +261,34 @@ class ServerConfig:
     # did -- it let any web page a user on the same network happened to open
     # drive the management endpoints and read the replies.
     cors_allow_origins: tuple[str, ...] = ()
+    # Ceilings on what one request can make this process hold, so a client
+    # cannot exhaust the board's memory by sending enough of it. 0 turns a
+    # ceiling off. They bound this server's own buffers, not what the SDK is
+    # given -- a request past the vision budget still reaches the SDK unless
+    # VLM_VISION_BUDGET_GUARD is on -- so they hide nothing about the SDK.
+    #
+    # The body is read into memory whole, then parsed into a second copy.
+    max_request_body_mb: float = 64
+    # An image is decoded at full size and only resized when it is fed, and
+    # every frame of a request is held decoded at once: 3 bytes per pixel for
+    # RGB, 4 for RGBA, CMYK and 32-bit images. A flat-colour PNG of 13000 x 13000, just under Pillow's own ceiling,
+    # is about 500 KB on the wire and 483 MB decoded, so the body limit alone
+    # does not bound this. Checked from the image header,
+    # before anything is decoded. The encoders take far less: every spec
+    # resizes to its own input size, a few hundred pixels square.
+    #
+    # The per-image default is 4096 x 4096, above every image the test suites
+    # and probes send that we could measure (640 x 427 and 640 x 480 photos,
+    # 512 x 512 frames).
+    # The total is VLM_MAX_TOTAL_FRAMES_AT_MAX of those, 64 being the most any
+    # of them sends in one request (the integration suite's budget-guard
+    # check), so a test whose images each pass the per-image limit is never
+    # stopped by the total, up to 64 of them. That is up to 4 GB decoded (3 GB
+    # if every image is RGB; a 4096 x 4096 RGBA PNG of one colour is 63 KB on
+    # the wire, so 64 of them fit any body limit). Set it lower for a board
+    # that has less to spare.
+    vlm_max_image_pixels: int = 4096 * 4096
+    vlm_max_total_pixels: int = VLM_MAX_TOTAL_FRAMES_AT_MAX * 4096 * 4096
     text_slots: tuple[SlotSpec, ...] = field(default_factory=tuple)
     vlm_slots: tuple[VLMSlotSpec, ...] = field(default_factory=tuple)
     # Which kind of slot is created first at startup. Only matters when both
@@ -519,6 +553,22 @@ def _parse_slot_load_order(raw: dict) -> str:
     return order
 
 
+def _parse_limit(raw: dict, key: str, default, kind):
+    """A non-negative size ceiling; 0 means no limit. A bool or a string is
+    refused rather than coerced: "64" might be meant as MB or as bytes, and
+    true would read as 1. So are NaN and Infinity, which Python's json
+    accepts: NaN passes a "< 0" test, and either one fails later, far from
+    the key that caused it (int(nan) when the app is built)."""
+    value = raw.get(key, default)
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or (kind is int and value != int(value)) or value < 0):
+        raise ValueError(
+            f"{key} must be a non-negative {kind.__name__} (0 = no limit), "
+            f"got {value!r}")
+    return kind(value)
+
+
 def _parse_cors_allow_origins(raw: dict) -> tuple[str, ...]:
     """CORS_ALLOW_ORIGINS: a list of origins such as
     ["http://localhost:3000"], or ["*"]. A bare string is refused rather than
@@ -584,6 +634,12 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         host=raw.get("HOST", "0.0.0.0"),
         port=int(raw.get("PORT", 8080)),
         cors_allow_origins=_parse_cors_allow_origins(raw),
+        max_request_body_mb=_parse_limit(raw, "MAX_REQUEST_BODY_MB", 64, float),
+        vlm_max_image_pixels=_parse_limit(raw, "VLM_MAX_IMAGE_PIXELS",
+                                          4096 * 4096, int),
+        vlm_max_total_pixels=_parse_limit(raw, "VLM_MAX_TOTAL_PIXELS",
+                                          VLM_MAX_TOTAL_FRAMES_AT_MAX * 4096 * 4096,
+                                          int),
         text_slots=text_slots,
         vlm_slots=vlm_slots,
         slot_load_order=_parse_slot_load_order(raw),

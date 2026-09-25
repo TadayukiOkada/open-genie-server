@@ -4,6 +4,18 @@
 
 ### Breaking
 
+- **One request can no longer make the server allocate without bound.**
+  Nothing capped the body, the size of an image, or the number of frames,
+  and every frame is decoded at full size and held at once: a flat-colour
+  PNG of about 500 KB declaring 13000 x 13000 (just under Pillow's own
+  ceiling) is 483 MB decoded, and a 64 MB body holds over a hundred. Three
+  ceilings, each `0` to turn off: `MAX_REQUEST_BODY_MB` (default 64; over it
+  is `413`), and `VLM_MAX_IMAGE_PIXELS` / `VLM_MAX_TOTAL_PIXELS` (4096 x 4096
+  per image, 64 times that per request; over either is
+  `400`, checked from the image headers before anything is decoded). A
+  request past them used to work, if the board had the memory. Base64 is
+  also decoded strictly now: a character outside the alphabet is a `400`
+  instead of being skipped, and only whitespace is ignored.
 - **A web page on another origin can no longer drive the server through a
   browser.** Every origin was allowed by CORS, and a `POST` body was parsed
   as JSON whatever its `Content-Type`, so any page a user on the same network

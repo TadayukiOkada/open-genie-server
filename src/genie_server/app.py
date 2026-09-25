@@ -453,6 +453,8 @@ def create_app(state: ServerState) -> FastAPI:
         state.manager.free_all()
 
     app = FastAPI(title="Genie OpenAI-Compatible Server", lifespan=lifespan)
+    app.state.max_request_body_bytes = int(
+        state.config.max_request_body_mb * 2**20)
 
     # CORS: off unless CORS_ALLOW_ORIGINS names the origins a browser page may
     # call from (see ServerConfig.cors_allow_origins). With no middleware a
@@ -856,7 +858,10 @@ def create_app(state: ServerState) -> FastAPI:
             segments = vlm.plan_segments(vslot, system_text, parts,
                                          vlm.extract_video_meta(body),
                                          guard=cfg.vlm_vision_budget_guard)
-            images = await asyncio.to_thread(vlm.decode_media_sources, sources)
+            images = await asyncio.to_thread(
+                vlm.decode_media_sources, sources,
+                max_image_pixels=cfg.vlm_max_image_pixels,
+                max_total_pixels=cfg.vlm_max_total_pixels)
         except ValueError as e:
             raise InvalidRequestError(str(e), "messages")
 

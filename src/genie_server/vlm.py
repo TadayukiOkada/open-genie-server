@@ -421,22 +421,29 @@ def extract_video_meta(body: dict) -> dict:
     return video if isinstance(video, dict) else {}
 
 
-def _decode_base64_image(b64data: str, what: str):
+def _open_base64_image(b64data: str, what: str):
     """One base64 payload (an image_url's, or one frame out of a video_url's
-    comma-joined list) -> a loaded PIL image."""
+    comma-joined list) -> a PIL image whose header has been read but whose
+    pixels have not. Whitespace is dropped (some encoders wrap lines); any
+    other character outside the base64 alphabet is an error, where the
+    default decoder would skip it and hand Pillow a corrupted image."""
     import base64
+    import binascii
     import io
     from PIL import Image
 
     try:
-        img = Image.open(io.BytesIO(base64.b64decode(b64data)))
-        img.load()
+        data = base64.b64decode("".join(b64data.split()), validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"{what} is not valid base64: {e}") from e
+    try:
+        return Image.open(io.BytesIO(data))
     except Exception as e:
         raise ValueError(f"failed to decode {what} data: {e}") from e
-    return img
 
 
-def decode_media_sources(sources: list) -> list:
+def decode_media_sources(sources: list, *, max_image_pixels: int = 0,
+                         max_total_pixels: int = 0) -> list:
     """The base64 payloads extract_multimodal_parts collected -> PIL images,
     in the same order, so a part's indices keep pointing at the right frame.
 
@@ -446,8 +453,33 @@ def decode_media_sources(sources: list) -> list:
     decoding its frames. That matters at the sizes this path invites — a
     500-frame request is 500 JPEG decodes and their bitmaps resident at once,
     on a board whose memory is the reason the guard exists.
+
+    For the same reason every header is read, and the pixel ceilings
+    (VLM_MAX_IMAGE_PIXELS, VLM_MAX_TOTAL_PIXELS; 0 = none) checked, before
+    any image is decoded: the sizes are in the headers, and a small JPEG can
+    declare an enormous bitmap.
     """
-    return [_decode_base64_image(b64, what) for b64, what in sources]
+    opened = [(_open_base64_image(b64, what), what) for b64, what in sources]
+    total = 0
+    for img, what in opened:
+        pixels = img.width * img.height
+        if max_image_pixels and pixels > max_image_pixels:
+            raise ValueError(
+                f"{what} is {img.width}x{img.height} = {pixels} pixels, over "
+                f"VLM_MAX_IMAGE_PIXELS ({max_image_pixels}); the encoder "
+                "resizes it far smaller anyway, so scale it down first")
+        total += pixels
+    if max_total_pixels and total > max_total_pixels:
+        raise ValueError(
+            f"the request's {len(opened)} images/frames total {total} pixels, "
+            f"over VLM_MAX_TOTAL_PIXELS ({max_total_pixels}); send fewer "
+            "frames or smaller ones")
+    for img, what in opened:
+        try:
+            img.load()
+        except Exception as e:
+            raise ValueError(f"failed to decode {what} data: {e}") from e
+    return [img for img, _ in opened]
 
 
 def extract_multimodal_parts(messages: list) -> tuple:
