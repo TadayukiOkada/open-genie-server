@@ -600,9 +600,9 @@ def create_app(state: ServerState) -> FastAPI:
         wedge or paper over it (README, principle 3)."""
         slots = [{"name": s.name, "loaded": s.handle is not None}
                  for s in manager.slots]
-        # A VLM slot builds its pipeline once, at startup, and nothing ever
-        # takes it away (there is no VLM model switch), so this reads true for
-        # as long as the server runs. It is listed so the probe covers every
+        # A VLM slot builds its pipeline once, at startup, and only shutdown
+        # frees it (there is no VLM model switch), so this reads true for as
+        # long as the server serves. It is listed so the probe covers every
         # slot a client can reach, and so it stays right if VLM slots ever
         # gain a switch that can leave them empty.
         slots += [{"name": v.name, "loaded": v.pipeline is not None}
