@@ -2,9 +2,12 @@
 
 ## 1.5.0 — fixes from a repository-wide code review: safer defaults, strict input, and a readiness probe
 
-Everything in this release comes out of one code review
+Almost everything in this release comes out of one code review
 (`docs/reviews/2026-09-25-repository-review.md`), fixed in pull requests
-#22-#44. The themes are:
+#22-#44. The one exception is #29, the LoRA alpha check, which came from a
+board test. The review document records what each PR resolved (#45), and
+the docs and examples were brought up to date for this release in #47. The
+themes are:
 - the server no longer blocks its event loop or runs a request against a
   model it was not planned for;
 - a browser on the same network can no longer drive it;
