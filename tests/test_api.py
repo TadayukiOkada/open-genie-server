@@ -1,6 +1,13 @@
 """Offline HTTP API tests (FakeGenieLib — no NPU, no libGenie.so)."""
 
 import json
+import threading
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from genie_server.app import create_app
 
 FAKE_RESPONSE = "Hello world from Genie!"
 
@@ -1133,29 +1140,146 @@ def test_the_alias_still_routes(client):
     assert unknown.json()["model"] == "qwen3-test"
 
 
-def test_waiting_for_a_slot_lock_does_not_block_the_event_loop(state):
+class _WatchedLock:
+    """threading.Lock that records when someone starts waiting on it, so a
+    test can tell a request is queued on the slot instead of sleeping."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.waiting = threading.Event()
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self._lock.acquire(blocking=False):
+            return True
+        if not blocking:
+            return False
+        self.waiting.set()
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self):
+        self._lock.release()
+
+    def locked(self):
+        return self._lock.locked()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def _hold_slot_and_queue(state, client, path, body):
+    """Holds the primary slot's lock, sends `path` from another thread, and
+    returns once that request is waiting on the lock. The caller releases
+    the lock and joins the thread."""
+    slot = state.manager.slots[0]
+    slot.lock = _WatchedLock()
+    slot.lock.acquire()
+    result = {}
+    t = threading.Thread(
+        target=lambda: result.update(r=client.post(path, json=body)))
+    t.start()
+    assert slot.lock.waiting.wait(5), f"{path} never waited on the slot lock"
+    return slot, t, result
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/v1/lora/apply", {"lora_adapter_name": "a"}),
+    ("/v1/server/performance_policy", {"policy": "burst"}),
+    ("/v1/models/switch", None),         # needs a bundle; built below
+])
+def test_waiting_for_a_slot_lock_does_not_block_the_event_loop(
+        state, tmp_path, path, body):
     """A management call queued behind a busy slot must not freeze /health
     (H-1): the lock wait runs on a worker thread, not the event loop."""
-    import threading
-    import time
-
-    from fastapi.testclient import TestClient
-    from genie_server.app import create_app
-
-    slot = state.manager.slots[0]
+    if body is None:
+        body = {"model_dir": str(_bundle(tmp_path, "other"))}
     # `with` shares one event loop across requests, as uvicorn does.
     with TestClient(create_app(state)) as c:
-        slot.lock.acquire()
-        result = {}
-        t = threading.Thread(target=lambda: result.update(
-            r=c.post("/v1/lora/apply", json={"lora_adapter_name": "a"})))
-        t.start()
+        slot, t, result = _hold_slot_and_queue(state, c, path, body)
         try:
-            time.sleep(0.3)  # the apply is now waiting on the lock
             t0 = time.monotonic()
             assert c.get("/health").status_code == 200
             assert time.monotonic() - t0 < 1.0
         finally:
             slot.lock.release()
         t.join(timeout=5)
-        assert result["r"].status_code == 200
+        assert result["r"].status_code == 200, result["r"].json()
+
+
+def test_a_slot_emptied_while_waiting_is_rechecked_under_the_lock(state):
+    """require_loaded passed before the wait, but a failed unload_first
+    switch emptied the slot during it: the call must answer 503, not hand a
+    null handle to the SDK."""
+    handles = []
+    orig = state.lib.apply_lora
+    state.lib.apply_lora = lambda h, e, a: handles.append(h) or orig(h, e, a)
+    with TestClient(create_app(state), raise_server_exceptions=False) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/lora/apply", {"lora_adapter_name": "a"})
+        slot.handle = None      # what a failed unload_first switch leaves
+        slot.lock.release()
+        t.join(timeout=5)
+    assert "r" in result, "the queued request never answered"
+    assert result["r"].status_code == 503, result["r"].text
+    assert result["r"].json()["error"]["code"] == "model_not_loaded"
+    assert handles == []
+
+
+def test_a_switch_still_reaches_an_empty_slot(state, tmp_path, client):
+    """The recheck must not apply to the switch itself: loading a model is
+    how a slot a failed switch left empty gets one back."""
+    state.manager.slots[0].handle = None
+    r = client.post("/v1/models/switch",
+                    json={"model_dir": str(_bundle(tmp_path, "other"))})
+    assert r.status_code == 200, r.json()
+    assert state.manager.slots[0].handle is not None
+
+
+def test_a_status_read_behind_a_busy_slot_reports_not_live(state):
+    """GET /v1/lora/current waits a second at most, then answers from the
+    cached value rather than stalling behind a generation."""
+    slot = state.manager.slots[0]
+    with TestClient(create_app(state)) as c:
+        slot.lock.acquire()
+        try:
+            r = c.get("/v1/lora/current")
+        finally:
+            slot.lock.release()
+    assert r.status_code == 200
+    assert r.json()["live"] is False
+
+
+def test_a_request_whose_client_left_does_not_run_once_it_gets_the_lock(state):
+    """Starlette does not cancel a plain request's handler on disconnect and
+    a thread cannot be cancelled, so the wait itself has to notice the client
+    is gone — otherwise a switch the client gave up on runs minutes later."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from genie_server.app import ClientGoneError, run_with_slot_lock
+
+    class _Gone:
+        async def is_disconnected(self):
+            return True
+
+    slot = state.manager.slots[0]
+    ran = []
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    async def main():
+        slot.lock.acquire()
+        try:
+            with pytest.raises(ClientGoneError):
+                await run_with_slot_lock(
+                    slot, lambda: ran.append(1), timeout=5,
+                    executor=executor, request=_Gone())
+        finally:
+            slot.lock.release()
+
+    asyncio.run(main())
+    executor.shutdown(wait=True)   # the worker has now had the lock
+    assert ran == []
+    assert not slot.lock.locked()
