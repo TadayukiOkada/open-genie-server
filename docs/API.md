@@ -423,7 +423,7 @@ Main status codes:
 | `400` | Invalid request parameters (a required field is missing, `n>1`, etc.) |
 | `404` | A resource doesn't exist (prefix cache key, model directory, unknown slot name) |
 | `422` | Semantically impossible to process (e.g. a prefix warmup request on the llama2 template) |
-| `500` | An SDK call failed, a model load failed, or the server hit an exception it did not expect (a bug: the message names only the exception's type, and the server log has the traceback) |
+| `500` | An SDK call failed, a model load failed, or the server hit an exception it did not expect. The last is a bug: the message names only the exception's type and an error id such as `err-1a2b3c4d`, and the server log has the traceback under that id |
 | `409` | The target slot changed (a model switch, or a LoRA apply, release or strength change) after this request was prepared and before it ran. It was not run. Send it again. On a stream, the same condition is an `error` event. |
 | `503` | Timed out acquiring the target slot's lock (that slot is busy) |
 | `504` | Inference timed out |
