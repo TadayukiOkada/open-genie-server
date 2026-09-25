@@ -12,11 +12,30 @@ have been normalized by prepare_messages().
 import logging
 
 from . import tool_formats
-from . import tools as tools_mod
 
 logger = logging.getLogger(__name__)
 
 TEMPLATE_FAMILIES = ("chatml", "llama3", "llama2", "gemma", "gemma4")
+
+
+class UnrenderableMessageError(ValueError):
+    """A message the slot's chat template has no form for. Raised instead of
+    dropping it: a turn that silently vanishes from the prompt is a wrong
+    answer nobody can trace back to the request."""
+
+
+def _refuse_tool_history(messages: list, template: str) -> None:
+    """llama2 and Gemma 2/3 have no tool-call or tool-result form in their
+    own chat templates. llama2 used to drop tool-role messages outright, and
+    both dropped an assistant turn's tool_calls, so a tool round trip reached
+    the model with its calls and results missing."""
+    for i, m in enumerate(messages):
+        if m.get("role") == "tool" or m.get("tool_calls"):
+            what = "a tool result" if m.get("role") == "tool" else "tool_calls"
+            raise UnrenderableMessageError(
+                f"messages[{i}] carries {what}, which the {template!r} chat "
+                "template has no form for; send the round trip to a slot "
+                "whose template does (chatml, llama3, gemma4)")
 
 
 def detect_template(hint: str) -> str:
@@ -153,13 +172,15 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
                 role = "ipython"  # Llama 3.x's tool-result role name
             elif role == "assistant" and m.get("tool_calls"):
                 for tc in m["tool_calls"]:
-                    content += ("\n" if content else "") + \
-                        tools_mod.format_tool_call_for_prompt(tc)
+                    content += ("\n" if content else "") + (
+                        tool_format or tool_formats.HermesToolFormat
+                    ).format_tool_call_for_prompt(tc)
             out += (f"<|start_header_id|>{role}<|end_header_id|>"
                     f"\n\n{content}<|eot_id|>")
         return out + "<|start_header_id|>assistant<|end_header_id|>\n\n"
 
     if template == "llama2":
+        _refuse_tool_history(messages, template)
         # No system turn: system text rides in the next [INST], inside
         # <<SYS>>. Consecutive system messages share that one block rather
         # than overwriting each other, and system text with no user turn
@@ -182,11 +203,16 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
                 out += f"<s>[INST] {sys_block()}{c} [/INST]"
             elif r == "assistant":
                 out += f" {c} </s>"
+            else:
+                raise UnrenderableMessageError(
+                    f"role {r!r} has no form in the 'llama2' chat template "
+                    "(system, user and assistant only)")
         if pending:
             out += f"<s>[INST] {sys_block()} [/INST]"
         return out if bos else out.removeprefix("<s>")
 
     if template == "gemma":
+        _refuse_tool_history(messages, template)
         # Gemma 2/3 family. There is no system role: per Google's own chat
         # template, system text is prepended to the next user turn. The
         # assistant role is named "model". As with llama2, consecutive system
@@ -227,15 +253,30 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
         #    declarations live inside that same turn.
         fmt = tool_format or tool_formats.HermesToolFormat
         out = "<bos>" if bos else ""
+        # tool_call_id -> function name, from the assistant turns so far:
+        # an OpenAI tool message carries only the id, and gemma4 writes the
+        # function's name into response:NAME{...}.
+        call_names: dict = {}
         for m in messages:
             r, c = m.get("role", "user"), m.get("content", "")
             if r == "assistant" and m.get("tool_calls"):
                 for tc in m["tool_calls"]:
+                    if isinstance(tc, dict) and isinstance(tc.get("id"), str):
+                        fn = tc.get("function")
+                        call_names[tc["id"]] = (fn.get("name", "")
+                                                if isinstance(fn, dict) else "")
                     c += ("\n" if c else "") + fmt.format_tool_call_for_prompt(tc)
             elif r == "tool":
                 # A tool result comes back in a user turn, marked with
                 # gemma4's own response tokens.
-                name = m.get("name", "")
+                name, tid = m.get("name"), m.get("tool_call_id")
+                if not isinstance(name, str) or not name:
+                    name = call_names.get(tid, "") if isinstance(tid, str) else ""
+                if not isinstance(name, str) or not name:
+                    raise UnrenderableMessageError(
+                        "a tool message needs a 'name', or a 'tool_call_id' "
+                        "matching an earlier assistant tool_call, for gemma4 "
+                        "to write response:NAME{...}")
                 out += (f"<|turn>user\n<|tool_response>response:{name}"
                         f"{{{c}}}<tool_response|><turn|>\n")
                 continue

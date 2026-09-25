@@ -2409,3 +2409,17 @@ def test_greedy_logprobs_are_greedy(state, client, collectors):
         "max_tokens": 2, "temperature": 0})
     assert r.status_code == 200, r.text
     assert collectors[-1].top_k == 1
+
+
+def test_tool_history_on_a_template_without_a_tool_form_is_a_400(state,
+                                                                  client):
+    state.manager.slots[0].chat_template = "llama2"
+    r = client.post("/v1/chat/completions", json={"max_tokens": 4, "messages": [
+        {"role": "user", "content": "weather?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c", "type": "function",
+             "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c", "content": "sunny"}]})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "messages"
+    assert state.lib.queries == []
