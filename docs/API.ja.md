@@ -204,7 +204,7 @@ curl "$base_url/v1/server/idle?slot=chat"
 
 ### GET /v1/server/performance_policy
 
-現在の `Genie_PerformancePolicy_t` を取得(`?model=` でスロット選択、`/v1/lora/current` 同様の非ブロッキング試行)。
+現在の `Genie_PerformancePolicy_t` を取得(`?slot=` か `?model=` でスロット選択、`/v1/lora/current` 同様の非ブロッキング試行)。
 
 ```json
 {"slot": "chat", "policy": "balanced", "raw_value": 40, "live": true}
@@ -214,7 +214,7 @@ curl "$base_url/v1/server/idle?slot=chat"
 
 ### POST /v1/server/performance_policy
 
-パフォーマンスポリシーを設定します。`model` でスロットを選択。ベンチマーク実行前に `burst` に固定し、終了後に元へ戻す運用を想定しています。
+パフォーマンスポリシーを設定します。`slot` か `model` でスロットを選択。ベンチマーク実行前に `burst` に固定し、終了後に元へ戻す運用を想定しています。
 
 **実際に性能が変わるかはターゲット依存で、少なくとも1つのターゲットでは全く変わりません** — [パフォーマンスポリシー](./MANUAL.ja.md#パフォーマンスポリシー) を参照してください。
 
@@ -300,7 +300,7 @@ namespace を記録する前に保存したエントリは、次にスロット�
 
 ### POST /v1/prefix/warmup
 
-指定システムプロンプトのprefix KVキャッシュを事前生成します。`model` でスロットを選択します。
+指定システムプロンプトのprefix KVキャッシュを事前生成します。`slot` か `model` でスロットを選択します。
 
 ```bash
 curl -X POST $base_url/v1/prefix/warmup \
@@ -351,9 +351,8 @@ curl -X POST $base_url/v1/prefix/warmup \
 2本目には `slot` でしか到達できません。同じモデルを二度ロードしないなら、
 `model` だけで足ります。
 
-このルールより前からある GET が2つだけ、片方しか受け付けません:
-`/v1/server/idle` は `?slot=` のみ(`?model=` は不可)、
-`GET /v1/server/performance_policy` は `?model=` のみ(`?slot=` は不可)です。
+このルールより前からある GET が1つだけ、片方しか受け付けません:
+`/v1/server/idle` は `?slot=` のみ(`?model=` は不可)です。
 それ以外はどちらも受け付けます。
 
 ## モデルとLoRA

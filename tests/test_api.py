@@ -2423,3 +2423,66 @@ def test_tool_history_on_a_template_without_a_tool_form_is_a_400(state,
     assert r.status_code == 400
     assert r.json()["error"]["param"] == "messages"
     assert state.lib.queries == []
+
+
+# ---------------------------------------------------------------- small fixes (L-6..L-14)
+
+def _with_a_loaded_second_slot(state):
+    """A second slot holding the same model, so 'model' cannot tell the two
+    apart and only 'slot' can."""
+    from genie_server.slots import Slot
+    first = state.manager.slots[0]
+    second = Slot(name="second", device_id=1, model_root=first.model_root)
+    second.handle = state.lib.create_dialog(b"{}")
+    second.dialog_cfg = dict(first.dialog_cfg)
+    second.chat_template = first.chat_template
+    second.tokenizer = first.tokenizer
+    state.manager.slots.append(second)
+    state.manager._by_name[second.name] = second
+    state.manager.status[second.name] = {"phase": "idle", "detail": ""}
+    state.manager.reindex()
+    return second
+
+
+def test_warmup_can_target_a_slot_by_name(state, client):
+    """With 'model' alone the second of two slots holding one model was out
+    of reach."""
+    second = _with_a_loaded_second_slot(state)
+    r = client.post("/v1/prefix/warmup", json={"slot": "second",
+                                               "system_prompt": "s"})
+    assert r.status_code == 200, r.text
+    key = r.json()["key"]
+    e = {x["key"]: x for x in client.get("/v1/prefix/cache").json()["entries"]}
+    assert e[key]["namespace"] == second.cache_namespace
+
+
+def test_performance_policy_can_target_a_slot_by_name(state, client):
+    _with_a_loaded_second_slot(state)
+    r = client.post("/v1/server/performance_policy",
+                    json={"slot": "second", "policy": "burst"})
+    assert r.status_code == 200, r.text
+    assert r.json()["slot"] == "second"
+    r = client.get("/v1/server/performance_policy", params={"slot": "second"})
+    assert r.json()["slot"] == "second"
+
+
+def test_prompt_scoring_reads_max_completion_tokens_first(client, state):
+    """Every other path lets max_completion_tokens win over max_tokens; the
+    scoring path did the opposite and refused this request."""
+    pytest.importorskip("numpy")
+    client.post("/v1/server/prompt_logprobs", json={"enabled": True})
+    ids = state.manager.slots[0].tokenizer.encode("the quick brown fox").ids
+    r = client.post("/v1/completions", json={
+        "prompt": [ids], "echo": True, "logprobs": 1,
+        "max_completion_tokens": 0, "max_tokens": 5})
+    assert r.status_code == 200, r.text
+
+
+def test_a_prompt_that_does_not_fit_is_refused_before_any_prompt_runs(
+        state, client):
+    """It used to be found only after the prompts ahead of it had run."""
+    state.manager.slots[0].dialog_cfg = {"context": {"size": 64}}
+    r = client.post("/v1/completions", json={
+        "prompt": ["short", "word " * 200], "max_tokens": 4})
+    assert r.status_code == 400
+    assert state.lib.queries == []
