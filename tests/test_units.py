@@ -3127,3 +3127,49 @@ def test_gemma4_malformed_tool_history_is_a_400_not_a_500(tool_calls, tool_msg):
     with pytest.raises(templates.UnrenderableMessageError):
         templates.render_chat_prompt(msgs, "gemma4",
                                      tool_formats.FORMATS["gemma4"])
+
+
+def test_a_vlm_text_callback_error_goes_to_the_log(monkeypatch, caplog):
+    """It used to be print()ed, outside logging."""
+    from genie_server import capi, genie_node
+    captured = {}
+
+    def set_cb(handle, io, cb):
+        captured["cb"] = cb
+        return 0
+
+    monkeypatch.setattr(genie_node, "_lib",
+                        _fake_cdll(GenieNode_setTextCallback=set_cb))
+    node = object.__new__(genie_node.Node)
+    node._handle = 1
+
+    def boom(text, code, **kwargs):
+        raise RuntimeError("callback broke")
+
+    node.set_text_callback(next(iter(genie_node.NODE_IO)), boom)
+    with caplog.at_level("ERROR", logger="genie_server.genie_node"):
+        captured["cb"](b"x", capi.SENTENCE_CONTINUE, None)
+    assert "callback broke" in caplog.text
+
+
+@pytest.mark.parametrize("argv, expected", [
+    (["--port", "0"], ("0.0.0.0", 0)),        # 0 = any free port, not "unset"
+    (["--host", ""], ("", 8080)),
+    ([], ("0.0.0.0", 8080)),
+])
+def test_cli_passes_explicit_host_and_port_through(monkeypatch, argv,
+                                                   expected):
+    import sys
+    import types
+    from genie_server import bootstrap, cli
+    from genie_server.config import ServerConfig
+    ran = {}
+    monkeypatch.setattr(sys, "argv", ["genie-server", *argv])
+    monkeypatch.setattr(bootstrap, "build_state",
+                        lambda path: types.SimpleNamespace(
+                            config=ServerConfig(sdk_root="/x")))
+    monkeypatch.setattr("genie_server.app.create_app", lambda state: "app")
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(
+        run=lambda app, host, port: ran.update(host=host, port=port)))
+    cli.main()
+    assert (ran["host"], ran["port"]) == expected

@@ -77,8 +77,8 @@ def main() -> None:
 
     import uvicorn
     uvicorn.run(app,
-                host=args.host or state.config.host,
-                port=args.port or state.config.port)
+                host=args.host if args.host is not None else state.config.host,
+                port=args.port if args.port is not None else state.config.port)
 
 
 if __name__ == "__main__":
