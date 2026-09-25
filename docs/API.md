@@ -420,6 +420,7 @@ Main status codes:
 | `404` | A resource doesn't exist (prefix cache key, model directory, unknown slot name) |
 | `422` | Semantically impossible to process (e.g. a prefix warmup request on the llama2 template) |
 | `500` | An SDK call failed, or a model load failed |
+| `409` | The target slot changed (a model switch, or a LoRA apply, release or strength change) after this request was prepared and before it ran. It was not run. Send it again. On a stream, the same condition is an `error` event. |
 | `503` | Timed out acquiring the target slot's lock (that slot is busy) |
 | `504` | Inference timed out |
 

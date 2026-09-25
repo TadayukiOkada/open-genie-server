@@ -1457,3 +1457,160 @@ def test_sampler_settings_do_not_leak_into_the_next_request(state, client):
     params = state.lib.sampler_params[handle_id]
     assert params["top-k"] == "0" and params["seed"] != "5"
     assert params["temp"] == "0.7"
+
+
+def _swap_under_lock(slot):
+    """What a LoRA apply or model switch does to the slot while it holds the
+    lock: a different namespace, a new epoch."""
+    slot.active_lora_adapter = "other-adapter"
+    slot.epoch += 1
+
+
+_SYS_CHAT = {"messages": [{"role": "system", "content": "be brief"},
+                          {"role": "user", "content": "hi"}]}
+
+
+def test_a_request_planned_before_a_swap_is_refused_not_run(state):
+    """H-5: the prompt, max_tokens and prefix-cache key are fixed before the
+    lock is taken. A LoRA/model change that got the lock first left the
+    worker to restore the OLD namespace's KV into the new state."""
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/chat/completions", _SYS_CHAT)
+        queries = len(state.lib.queries)
+        _swap_under_lock(slot)
+        slot.lock.release()
+        t.join(timeout=5)
+    r = result["r"]
+    assert r.status_code == 409
+    assert "changed" in r.json()["error"]["message"]
+    assert len(state.lib.queries) == queries, "the stale request still ran"
+
+
+def test_a_streamed_request_planned_before_a_swap_gets_an_error_event(state):
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/chat/completions", {**_SYS_CHAT, "stream": True})
+        queries = len(state.lib.queries)
+        _swap_under_lock(slot)
+        slot.lock.release()
+        t.join(timeout=5)
+    body = result["r"].text
+    assert '"error"' in body and "changed" in body
+    assert len(state.lib.queries) == queries
+
+
+def test_a_request_is_refused_when_the_slot_lost_its_model_while_waiting(state):
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/completions", {"prompt": "hi"})
+        queries = len(state.lib.queries)
+        slot.handle = None
+        slot.epoch += 1
+        slot.lock.release()
+        t.join(timeout=5)
+    assert result["r"].status_code == 409
+    assert len(state.lib.queries) == queries
+
+
+def test_lora_apply_and_release_change_the_epoch(state, client):
+    slot = state.manager.slots[0]
+    e0 = slot.epoch
+    client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})
+    e1 = slot.epoch
+    client.post("/v1/lora/release", json={"lora_adapter_name": "a"})
+    assert e0 < e1 < slot.epoch
+
+
+def test_a_prefix_warmup_queued_across_a_swap_does_not_save_under_the_old_key(state):
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/prefix/warmup", {"system_prompt": "be brief"})
+        _swap_under_lock(slot)
+        slot.lock.release()
+        t.join(timeout=5)
+    assert result["r"].status_code == 500
+    assert not state.lib.saved_states, "KV was saved under the stale key"
+
+
+def test_a_model_switch_changes_the_epoch(state, tmp_path):
+    slot = state.manager.slots[0]
+    e0 = slot.epoch
+    with TestClient(create_app(state)) as c:
+        r = c.post("/v1/models/switch",
+                   json={"model_dir": str(_bundle(tmp_path, "other"))})
+    assert r.status_code == 200
+    assert slot.epoch >= e0 + 2  # unload, then adopt (bumps at both ends)
+
+
+def test_an_image_request_goes_through_the_http_path(state, monkeypatch, tmp_path):
+    """Nothing else sends an image through the HTTP handler; the VLM path
+    builds its Generation from a VLMSlot, which must carry what a text Slot
+    does (the H-5 epoch broke every VLM request with an AttributeError)."""
+    pytest.importorskip("numpy")
+    PIL = pytest.importorskip("PIL.Image")
+    import base64
+    import io
+    from pathlib import Path
+
+    from fake_genie import FakeVLMNode, FakeVLMPipeline
+    from genie_server import genie_node, vlm
+
+    monkeypatch.setattr(genie_node, "Node", FakeVLMNode)
+    monkeypatch.setattr(genie_node, "Pipeline", FakeVLMPipeline)
+    bundle = Path(__file__).parent / "data" / "vlm_bundles" / "ai_hub"
+    vslot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=bundle,
+                        spec_name=None, htp_ext_cache_dir=tmp_path)
+    state.manager.vlm_slots = [vslot]
+
+    buf = io.BytesIO()
+    PIL.new("RGB", (4, 4)).save(buf, "PNG")
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    with TestClient(create_app(state)) as c:
+        r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": url}}]}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "ai_hub"
+    assert vslot.pipeline.executed == 1
+
+
+def test_a_lora_strength_change_is_part_of_the_cache_namespace(state, client):
+    """A prefix KV saved at one alpha must not be restored at another, and a
+    request planned before the change must not run after it (epoch)."""
+    slot = state.manager.slots[0]
+    ns0, e0 = slot.cache_namespace, slot.epoch
+    r = client.post("/v1/lora/strength",
+                    json={"tensor_name": "t", "alpha": 0.5})
+    assert r.status_code == 200
+    assert slot.cache_namespace != ns0 and slot.epoch > e0
+    ns_half = slot.cache_namespace
+    client.post("/v1/lora/strength", json={"tensor_name": "t", "alpha": 1.0})
+    assert slot.cache_namespace not in (ns0, ns_half)
+    # Applying an adapter does NOT put the alphas back (measured on the
+    # board: they belong to the dialog, so they survive an adapter switch), and
+    # the namespace must keep saying so.
+    client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})
+    assert slot.lora_strengths == {"primary/t": 1.0}
+    assert slot.cache_namespace.startswith(f"{slot.name}|{slot.active_model_id}|a|")
+    # A release does, so its namespace goes back to the plain one.
+    client.post("/v1/lora/release", json={"lora_adapter_name": "a"})
+    assert slot.lora_strengths == {}
+    assert slot.cache_namespace == f"{slot.name}|{slot.active_model_id}|"
+
+
+def test_no_strength_keeps_the_old_namespace(state):
+    """Existing on-disk cache keys stay reachable: without a strength set,
+    the namespace string is exactly what it was before strengths joined it."""
+    slot = state.manager.slots[0]
+    assert slot.cache_namespace == \
+        f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}"
+
+
+def test_a_failed_strength_change_leaves_the_namespace_alone(state, client):
+    slot = state.manager.slots[0]
+    ns0, e0 = slot.cache_namespace, slot.epoch
+    state.lib.lora_strength_status = -1
+    r = client.post("/v1/lora/strength", json={"tensor_name": "t", "alpha": 0.5})
+    assert r.status_code == 500
+    assert slot.cache_namespace == ns0 and slot.epoch == e0

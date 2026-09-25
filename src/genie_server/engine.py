@@ -63,12 +63,24 @@ def ensure_logprobs_sampler(lib: GenieLib, slot: Slot) -> None:
     slot.logprobs_registered = True
 
 
+class SlotChangedError(RuntimeError):
+    """The slot's model, LoRA adapter or handle changed while the request
+    waited for the slot lock; what it was planned against is gone (HTTP 409)."""
+
+
 class Generation:
     """One in-flight generation and its thread/asyncio bridge."""
 
-    def __init__(self, request_id: str, slot, lib: GenieLib):
+    def __init__(self, request_id: str, slot, lib: GenieLib,
+                 epoch: int | None = None):
         self.request_id = request_id
         self.slot = slot
+        # The slot's epoch when the request was planned. Callers that plan
+        # from the slot's model (template, cache key, max_tokens) pass the
+        # value they read BEFORE planning; the default reads it now.
+        self.epoch = slot.epoch if epoch is None else epoch
+        # Set when the slot changed between planning and running.
+        self.slot_changed = False
         self._lib = lib
         self._loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue = asyncio.Queue()
@@ -156,6 +168,8 @@ class Generation:
             if item is None:
                 break
             chunks.append(item)
+        if self.slot_changed:
+            raise SlotChangedError(self.error or "slot changed")
         if self.timeout_error:
             # Whatever arrived is a truncated output, not a completion.
             raise TimeoutError(f"Inference timed out [{self.request_id}]")
@@ -195,6 +209,18 @@ def start_generation(
                 logger.info(f"Client disconnected before lock [{generation.request_id}]")
                 return
             try:
+                if slot.handle is None or slot.epoch != generation.epoch:
+                    # A model switch or LoRA change took the lock first. The
+                    # prompt, max_tokens and prefix-cache key were all derived
+                    # from the old state, so running them now could restore
+                    # another model's or adapter's KV. Refuse instead.
+                    generation.slot_changed = True
+                    generation.error = (
+                        f"Slot '{slot.name}' changed (model switch or LoRA "
+                        "update) while this request waited for it; resend the "
+                        "request.")
+                    logger.warning(f"{generation.error} [{generation.request_id}]")
+                    return
                 _locked_query(lib, slot, plan, params, generation,
                               prefix_cache, inference_timeout_s, collector)
             finally:

@@ -110,6 +110,21 @@ class Slot:
         self.sampler_defaults: dict = {}
         self.active_model_id = model_root.name
         self.active_lora_adapter = ""
+        # Alphas set through /v1/lora/strength since the adapter was applied,
+        # {"<engine>/<tensor>": alpha}. Part of cache_namespace: a prefix KV
+        # computed at one strength is wrong at another. Cleared by a release
+        # and by a model switch (a new dialog), NOT by applying an adapter:
+        # measured on the board (Phi-4 LoRA bundle), release+apply of the same
+        # adapter puts the alphas back but applying a second adapter keeps
+        # them. There is no getter, so this dict is the only record.
+        self.lora_strengths: dict[str, float] = {}
+        # Bumped, under lock, whenever what a request was planned against
+        # changes: the dialog handle, the model (template, context size,
+        # tokenizer) or the applied LoRA adapter. A request records it when it
+        # is planned and, once it holds the lock, refuses to run if it moved
+        # (see engine.start_generation). adopt() bumps at both ends so a
+        # request that read the slot mid-swap can never match afterwards.
+        self.epoch = 0
         # Logprobs (custom sampler) support — see engine.ensure_logprobs_sampler.
         # The callback registration is per-slot (names are process-global in
         # the SDK) and survives model hot-swaps; the collector is per-request,
@@ -128,6 +143,7 @@ class Slot:
     def adopt(self, assets: ModelAssets) -> None:
         """Adopts a load_model() result. The caller is responsible for
         freeing any handle this slot previously held — this only rebinds."""
+        self.epoch += 1
         self.handle = assets.handle
         self.dialog_cfg = assets.dialog_cfg
         self.tokenizer = assets.tokenizer
@@ -137,6 +153,8 @@ class Slot:
         self.model_root = assets.model_dir
         self.active_model_id = assets.model_dir.name
         self.active_lora_adapter = ""
+        self.lora_strengths = {}
+        self.epoch += 1
 
     @property
     def context_size(self) -> int | None:
@@ -145,8 +163,14 @@ class Slot:
 
     @property
     def cache_namespace(self) -> str:
-        """Current (slot, model, LoRA) identity — see PrefixCache.key."""
-        return f"{self.name}|{self.active_model_id}|{self.active_lora_adapter}"
+        """Current (slot, model, LoRA adapter, LoRA strengths) identity — see
+        PrefixCache.key. With no strength set it is the same string as before
+        strengths were part of it, so existing cache entries stay reachable."""
+        ns = f"{self.name}|{self.active_model_id}|{self.active_lora_adapter}"
+        if self.lora_strengths:
+            ns += "|" + ",".join(f"{k}={v!r}"
+                                 for k, v in sorted(self.lora_strengths.items()))
+        return ns
 
     def count_tokens(self, text: str) -> int:
         """Exact token count via the model tokenizer; whitespace fallback."""
@@ -505,6 +529,7 @@ class SlotManager:
         swaps you actually perform have been tested."""
         if unload_first:
             old_handle, slot.handle = slot.handle, None
+            slot.epoch += 1
             self.lib.free_dialog(old_handle)
             logger.info(f"[{slot.name}] Freed previous model before loading "
                         "(unload_first=true)")
