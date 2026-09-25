@@ -7,6 +7,7 @@ are ignored so a config written for a newer server version still loads.
 import functools
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -269,8 +270,8 @@ class ServerConfig:
     # The body is read into memory whole, then parsed into a second copy.
     max_request_body_mb: float = 64
     # An image is decoded at full size and only resized when it is fed, and
-    # every frame of a request is held decoded at once (3 bytes per pixel as
-    # RGB). A flat-colour PNG of 13000 x 13000, just under Pillow's own ceiling,
+    # every frame of a request is held decoded at once: 3 bytes per pixel for
+    # RGB, 4 for RGBA, CMYK and 32-bit images. A flat-colour PNG of 13000 x 13000, just under Pillow's own ceiling,
     # is about 500 KB on the wire and 483 MB decoded, so the body limit alone
     # does not bound this. Checked from the image header,
     # before anything is decoded. The encoders take far less: every spec
@@ -282,8 +283,10 @@ class ServerConfig:
     # The total is VLM_MAX_TOTAL_FRAMES_AT_MAX of those, 64 being the most any
     # of them sends in one request (the integration suite's budget-guard
     # check), so a test whose images each pass the per-image limit is never
-    # stopped by the total, up to 64 of them. That is 3 GB decoded; set it
-    # lower for a board that has less to spare.
+    # stopped by the total, up to 64 of them. That is up to 4 GB decoded (3 GB
+    # if every image is RGB; a 4096 x 4096 RGBA PNG of one colour is 63 KB on
+    # the wire, so 64 of them fit any body limit). Set it lower for a board
+    # that has less to spare.
     vlm_max_image_pixels: int = 4096 * 4096
     vlm_max_total_pixels: int = VLM_MAX_TOTAL_FRAMES_AT_MAX * 4096 * 4096
     text_slots: tuple[SlotSpec, ...] = field(default_factory=tuple)
@@ -553,9 +556,12 @@ def _parse_slot_load_order(raw: dict) -> str:
 def _parse_limit(raw: dict, key: str, default, kind):
     """A non-negative size ceiling; 0 means no limit. A bool or a string is
     refused rather than coerced: "64" might be meant as MB or as bytes, and
-    true would read as 1."""
+    true would read as 1. So are NaN and Infinity, which Python's json
+    accepts: NaN passes a "< 0" test, and either one fails later, far from
+    the key that caused it (int(nan) when the app is built)."""
     value = raw.get(key, default)
     if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
             or (kind is int and value != int(value)) or value < 0):
         raise ValueError(
             f"{key} must be a non-negative {kind.__name__} (0 = no limit), "

@@ -2652,6 +2652,11 @@ def test_size_ceilings_default_and_accept_numbers(tmp_path, key, value,
     ("MAX_REQUEST_BODY_MB", True),
     ("VLM_MAX_IMAGE_PIXELS", 1.5),
     ("VLM_MAX_TOTAL_PIXELS", [1]),
+    # Python's json writes and reads these; NaN passes a "< 0" test.
+    ("MAX_REQUEST_BODY_MB", float("nan")),
+    ("MAX_REQUEST_BODY_MB", float("inf")),
+    ("VLM_MAX_IMAGE_PIXELS", float("inf")),
+    ("VLM_MAX_TOTAL_PIXELS", float("nan")),
 ])
 def test_size_ceilings_that_are_not_non_negative_numbers_are_refused(
         tmp_path, key, value):
