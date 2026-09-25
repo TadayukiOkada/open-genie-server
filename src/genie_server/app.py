@@ -126,11 +126,11 @@ def _parse_gen_params(body: dict, allow_stop: bool = True) -> GenParams:
     # 0 is accepted here because lm_eval's loglikelihood (prompt scoring)
     # requests legitimately send max_tokens=0; the non-scoring paths reject
     # it explicitly (_require_positive_max_tokens).
-    max_tokens = body.get("max_completion_tokens", body.get("max_tokens"))
-    if max_tokens is not None:
-        if not isinstance(max_tokens, int) or max_tokens < 0:
-            raise InvalidRequestError(
-                "max_tokens must be a non-negative integer", "max_tokens")
+    # _number, as for every other count: true was read as 1, while 8.0 --
+    # how some clients serialize every number -- was refused.
+    max_tokens = _number(body, "max_completion_tokens", lo=0, integer=True)
+    if max_tokens is None:
+        max_tokens = _number(body, "max_tokens", lo=0, integer=True)
 
     stop = body.get("stop") if allow_stop else None
     if stop is None:
@@ -144,17 +144,22 @@ def _parse_gen_params(body: dict, allow_stop: bool = True) -> GenParams:
 
     top_k = body.get("top_k")
     if (isinstance(top_k, (int, float)) and not isinstance(top_k, bool)
-            and top_k < 0):
-        # vLLM's "no limit"; the SDK reads top-k as unsigned.
+            and top_k < 0 and top_k != -1):
         raise InvalidRequestError(
-            f"top_k must be an integer >= 0 (0 means no top-k limit), got "
-            f"{top_k!r}", "top_k")
+            f"top_k must be an integer >= 0 (0, or vLLM's -1, means no top-k "
+            f"limit), got {top_k!r}", "top_k")
+    top_k = _number(body, "top_k", lo=-1, integer=True)
+    if top_k == -1:
+        # vLLM's spelling of "no top-k limit", which is 0 here: the SDK reads
+        # top-k as unsigned. Same meaning, so nothing about the model or the
+        # SDK is hidden by accepting it, and a client written for vLLM works.
+        top_k = 0
     return GenParams(
         max_tokens=max_tokens,
         stop=stop_list,
         temperature=_number(body, "temperature", lo=0),
         top_p=_number(body, "top_p", lo=0, hi=1),
-        top_k=_number(body, "top_k", lo=0, integer=True),
+        top_k=top_k,
         seed=_number(body, "seed", lo=0, hi=_MAX_SEED, integer=True),
     )
 
@@ -194,7 +199,24 @@ def _reject_unsupported(body: dict, endpoint: str) -> None:
 
 
 def _include_usage(body: dict) -> bool:
-    return bool((body.get("stream_options") or {}).get("include_usage", False))
+    """stream_options.include_usage. Called where the request is parsed,
+    before a generation starts: a 400 raised once the stream is being set up
+    would leave that generation holding the slot."""
+    options = body.get("stream_options")
+    if options is None:
+        return False
+    if not isinstance(options, dict):
+        raise InvalidRequestError("stream_options must be an object",
+                                  "stream_options")
+    value = options.get("include_usage")
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        # bool("false") is true: a client asking for no usage chunk got one.
+        raise InvalidRequestError(
+            f"stream_options.include_usage must be true or false, got {value!r}",
+            "stream_options.include_usage")
+    return value
 
 
 _MAX_TOP_LOGPROBS = 20
@@ -251,12 +273,9 @@ def _chat_top_n(body: dict) -> int | None:
     the top-N to record, or None when logprobs are off."""
     if not _flag(body, "logprobs"):
         return None
-    top = body.get("top_logprobs", 0)
-    if not isinstance(top, int) or top < 0 or top > _MAX_TOP_LOGPROBS:
-        raise InvalidRequestError(
-            f"top_logprobs must be an integer between 0 and {_MAX_TOP_LOGPROBS}",
-            "top_logprobs")
-    return top
+    # _number, not isinstance(int): true is an int to Python and read as 1.
+    top = _number(body, "top_logprobs", lo=0, hi=_MAX_TOP_LOGPROBS, integer=True)
+    return 0 if top is None else top
 
 
 # ---------------------------------------------------------------- streaming
@@ -765,6 +784,7 @@ def create_app(state: ServerState) -> FastAPI:
         _reject_unsupported(body, "completions")
         params = _parse_gen_params(body)
         stream = _flag(body, "stream")
+        include_usage = _include_usage(body)
         echo = _flag(body, "echo")
         top_n = _completions_top_n(body)
 
@@ -839,7 +859,7 @@ def create_app(state: ServerState) -> FastAPI:
                     make_final=lambda reason: protocol.completion_chunk(
                         request_id, model_name, "", finish_reason=reason),
                     preamble=preamble,
-                    include_usage=_include_usage(body),
+                    include_usage=include_usage,
                     prompt_tokens=slot.count_prompt_tokens(prompt),
                     usage_object_type="text_completion",
                 ),
@@ -969,6 +989,7 @@ def create_app(state: ServerState) -> FastAPI:
             raise InvalidRequestError("'messages' must be a non-empty array", "messages")
         requested_model = body.get("model", KNOWN_MODEL_ID)
         stream = _flag(body, "stream")
+        include_usage = _include_usage(body)   # also validates it for _vlm_chat
         _reject_unsupported(body, "chat")
         params = _parse_gen_params(body)
         _require_positive_max_tokens(params)
@@ -1072,7 +1093,7 @@ def create_app(state: ServerState) -> FastAPI:
                     preamble=[protocol.chat_role_chunk(request_id, model_name)],
                     tool_filter=slot.tool_format.stream_filter(known_tool_names)
                     if tools else None,
-                    include_usage=_include_usage(body),
+                    include_usage=include_usage,
                     prompt_tokens=slot.count_prompt_tokens(full_prompt),
                 ),
                 media_type="text/event-stream")

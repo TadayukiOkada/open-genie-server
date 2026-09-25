@@ -52,11 +52,15 @@
   `enable_thinking` and chat `logprobs` went through `bool()`, so the string
   `"false"` meant true. Now:
   - `temperature` must be ≥ 0, `top_p` from 0 to 1, and `top_k` an integer
-    ≥ 0. vLLM's `-1` is refused with a message naming `0`.
+    ≥ 0. vLLM's `-1` ("no limit") is accepted and sent as `0`, which means
+    the same here.
   - `seed` must be an integer from 0 to 2³¹−1.
   - `n` and `best_of` must be integers ≥ 1.
-  - `chat_template_kwargs` must be an object, and the flags must be
-    booleans.
+  - `max_tokens`, `max_completion_tokens` and `top_logprobs` must be
+    integers. `true` used to be read as 1.
+  - `chat_template_kwargs` and `stream_options` must be objects, and the
+    flags must be booleans. This includes `stream_options.include_usage`:
+    the string `"false"` used to send the usage chunk anyway.
   - An integral float such as `2.0` counts as an integer.
 - **`/v1/lora/strength` refuses an alpha the model does not have.** The SDK
   answers success for any name: on an engine with an inference scheduler, a

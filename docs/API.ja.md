@@ -55,7 +55,7 @@ curl $base_url/v1/models
 | `stream` | bool | 既定 `false`。 |
 | `max_completion_tokens` / `max_tokens` | int | 前者が優先(OpenAIの非推奨方針に準拠)。どちらも未指定の場合、`genie_config.json`の`dialog.context.size`からプロンプトのトークン数を引いた値(=残りコンテキスト容量)がデフォルトになる — Qualcomm自身のqai-appbuilderリファレンスサーバと同じ挙動。`DEFAULT_MAX_TOKENS`(`env_config.json`)を正の値に設定した場合は、その値と残りコンテキスト容量のうち小さい方が使われる。詳細は[トラブルシューティング](./MANUAL.ja.md#トラブルシューティング)参照。 |
 | `stop` | string \| string[] | 停止シーケンス。マッチングはSDK内で行われ、ストリーミング中は部分一致テキストをホールドバックし、一致した停止シーケンス自体は出力からトリムされる(OpenAIセマンティクス)。 |
-| `temperature` / `top_p` / `top_k` | number | サンプリングパラメータ。リクエストごとに再適用され、省略したパラメータは**モデル自身の`genie_config.json`既定値**に戻る(直前のリクエストの設定が漏れない)。`temperature=0` で貪欲デコード(SDKのランタイムサンプラ設定はtemp=0を受け付けないため、`top-k=1`として実装)。範囲は `temperature` ≥ 0、`top_p` 0〜1、`top_k` 0 以上の整数(0 = top-k の制限なし。SDK は top-k を符号なしで読むので、vLLM の `-1` は拒否する)。それ以外(文字列を含む)は `400`。 |
+| `temperature` / `top_p` / `top_k` | number | サンプリングパラメータ。リクエストごとに再適用され、省略したパラメータは**モデル自身の`genie_config.json`既定値**に戻る(直前のリクエストの設定が漏れない)。`temperature=0` で貪欲デコード(SDKのランタイムサンプラ設定はtemp=0を受け付けないため、`top-k=1`として実装)。範囲は `temperature` ≥ 0、`top_p` 0〜1、`top_k` 0 以上の整数(0 = top-k の制限なし。同じ意味の vLLM の `-1` も受け付け、0 として送る。SDK は top-k を符号なしで読むため)。それ以外(文字列を含む)は `400`。 |
 | `seed` | int | ベストエフォートのサンプリングシード。SDKサンプラに転送される。省略するとリクエストごとに新しい乱数シードを使い、前のリクエストのシードを引き継がない。バンドルの sampler 設定にある `seed` は、ダイアログ作成時に一度だけ使われる。出力を再現したい場合は `seed` を指定する。0〜2³¹−1 の整数。 |
 | `logprobs` | int (0-20) | **生成**トークンのトークン単位logprobsと、各位置の上位N候補を返す([Logprobs](./MANUAL.ja.md#logprobs)参照)。非ストリーミングのみ。`echo`と組み合わせると**プロンプトスコアリング**(lm_eval loglikelihood)に切り替わる — `POST /v1/server/prompt_logprobs`によるゲートあり。logits callbackを呼ばないQAIRTランタイムではHTTP 400 `logprobs_not_supported`。 |
 | `suffix` / `best_of` | — | 非対応 → `400`。 |

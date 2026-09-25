@@ -1922,11 +1922,67 @@ def test_a_generation_parameter_of_the_wrong_type_is_a_400(state, client,
     assert state.lib.queries == []
 
 
-def test_top_k_minus_one_is_refused_with_the_value_that_means_no_limit(client):
-    """vLLM spells "no top-k limit" -1; the SDK reads top-k as unsigned."""
+def test_vllms_top_k_minus_one_means_no_limit(state, client):
+    """vLLM spells "no top-k limit" -1; here it is 0, since the SDK reads
+    top-k as unsigned. Same meaning, so it is accepted and sent as 0."""
     r = _chat(client, top_k=-1)
+    assert r.status_code == 200, r.text
+    handle = state.manager.slots[0].handle.value
+    assert state.lib.sampler_params[handle]["top-k"] == "0"
+
+
+@pytest.mark.parametrize("top_k", [-2, -1.5])
+def test_other_negative_top_k_is_refused(client, top_k):
+    r = _chat(client, top_k=top_k)
     assert r.status_code == 400
-    assert "0 means no top-k limit" in r.json()["error"]["message"]
+    assert r.json()["error"]["param"] == "top_k"
+    assert "vLLM's -1" in r.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens"])
+def test_a_max_tokens_of_true_is_not_one(client, key):
+    """isinstance(True, int) let true through as max_tokens = 1."""
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], key: True})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == key
+
+
+def test_an_integral_float_max_tokens_is_accepted(state, client):
+    """8.0 is how some clients serialize every number; it was refused while
+    true was accepted."""
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8.0})
+    assert r.status_code == 200, r.text
+    assert state.lib.max_tokens[state.manager.slots[0].handle.value] == 8
+
+
+def test_top_logprobs_of_true_is_not_one(client):
+    r = _chat(client, logprobs=True, top_logprobs=True)
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "top_logprobs"
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/completions", {"prompt": "hi"}),
+])
+@pytest.mark.parametrize("options, param", [
+    ("x", "stream_options"),
+    (["include_usage"], "stream_options"),
+    ({"include_usage": "false"}, "stream_options.include_usage"),
+])
+def test_stream_options_are_checked_before_the_generation_starts(
+        state, client, path, body, options, param):
+    """bool("false") sent a usage chunk to a client that asked for none, and
+    a non-object was a 500. Both are refused before any generation starts:
+    a 400 raised while the stream was being set up would have left that
+    generation holding the slot."""
+    r = client.post(path, json={**body, "stream": True,
+                                "stream_options": options})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == param
+    assert state.lib.queries == []
 
 
 def test_a_nan_temperature_is_a_400(state, client):
