@@ -1283,3 +1283,68 @@ def test_a_request_whose_client_left_does_not_run_once_it_gets_the_lock(state):
     executor.shutdown(wait=True)   # the worker has now had the lock
     assert ran == []
     assert not slot.lock.locked()
+
+
+def _stall_after_partial_output(state):
+    """Makes the fake SDK emit 'partial ' and then hang until signalled, and
+    return WARNING_ABORTED like the real one does for any abort."""
+    import threading
+
+    from genie_server import capi
+
+    released = threading.Event()
+    lib = state.lib
+
+    def query(handle, text, sentence_code, on_token):
+        on_token("partial ", capi.SENTENCE_CONTINUE)
+        released.wait(5)
+        return capi.WARNING_ABORTED
+
+    def signal_abort(handle):
+        lib.abort_signals += 1
+        released.set()
+        return 0
+
+    lib.query = query
+    lib.signal_abort = signal_abort
+
+
+def _short_timeout_client(state, timeout_s=0.2):
+    """A client whose app was built with a short inference_timeout_s (the app
+    captures the config at creation, so it cannot be changed afterwards)."""
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+    from genie_server.app import create_app
+
+    state.config = dataclasses.replace(state.config, inference_timeout_s=timeout_s)
+    return TestClient(create_app(state))
+
+
+def test_inference_timeout_is_an_error_not_a_stop(state):
+    """H-2: a watchdog abort used to come back as 200 / finish_reason "stop"
+    with the truncated text."""
+    client = _short_timeout_client(state)
+    _stall_after_partial_output(state)
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 504
+    assert "timed out" in r.json()["error"]["message"]
+
+
+def test_inference_timeout_mid_stream_emits_an_error_event(state):
+    client = _short_timeout_client(state)
+    _stall_after_partial_output(state)
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "stream": True})
+    body = r.text
+    assert '"error"' in body and "timed out" in body
+    assert '"finish_reason": "stop"' not in body
+
+
+def test_a_client_abort_is_still_a_normal_stop(state, client):
+    """Only the watchdog's abort is a failure; the flag must not leak."""
+    r = client.post("/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["finish_reason"] == "stop"

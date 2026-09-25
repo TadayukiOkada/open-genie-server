@@ -317,7 +317,13 @@ async def _collect_or_raise(gen: Generation, state: ServerState,
     """Sync path: waits for the full completion; maps failures to HTTP."""
     try:
         text = await gen.collect_text((timeout_s or state.config.inference_timeout_s) * 2)
+    except asyncio.CancelledError:
+        gen.abort()
+        raise
     except TimeoutError:
+        # Free the slot: without this the worker keeps waiting for the lock,
+        # then runs the abandoned generation to its end.
+        gen.abort()
         raise HTTPException(
             status_code=504,
             detail=f"Inference timed out on Hexagon NPU [{gen.request_id}]")

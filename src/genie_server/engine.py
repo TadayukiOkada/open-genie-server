@@ -81,6 +81,10 @@ class Generation:
         self.query_active = threading.Event()
         self.finish_reason = "stop"
         self.error: str | None = None
+        # Set by the watchdog when it, not the client, aborted the query. The
+        # SDK reports both as WARNING_ABORTED, so this is the only way to
+        # tell a truncated-by-timeout output from a normal stop.
+        self.timed_out = False
         # Set when a logprobs request emitted a token without the custom
         # sampler's logits callback having run (see _locked_query).
         self.logprobs_unsupported = False
@@ -104,6 +108,11 @@ class Generation:
             ret = self._lib.signal_abort(self.slot.handle)
             if ret != capi.STATUS_SUCCESS:
                 logger.warning(f"GenieDialog_signal failed [{self.request_id}]: {ret}")
+
+    def abort_on_timeout(self) -> None:
+        """Watchdog: the query ran past inference_timeout_s."""
+        self.timed_out = True
+        self.abort()
 
     def on_token(self, token: str, code: int) -> None:
         """SDK token callback (worker thread, inside GenieDialog_query)."""
@@ -135,6 +144,9 @@ class Generation:
             if item is None:
                 break
             chunks.append(item)
+        if self.timed_out:
+            # Whatever arrived is a truncated output, not a completion.
+            raise TimeoutError(f"Inference timed out [{self.request_id}]")
         if self.error and not chunks:
             raise RuntimeError(self.error)
         return "".join(chunks)
@@ -189,7 +201,7 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
                   generation: Generation, prefix_cache: PrefixCache | None,
                   inference_timeout_s: float, collector=None) -> None:
     """The actual SDK sequence, with slot.lock held."""
-    watchdog = threading.Timer(inference_timeout_s, generation.abort)
+    watchdog = threading.Timer(inference_timeout_s, generation.abort_on_timeout)
     watchdog.start()
     try:
         lib.reset(slot.handle)
@@ -241,6 +253,15 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
         if ret < capi.STATUS_SUCCESS:
             logger.error(f"GenieDialog_query failed [{generation.request_id}]: {ret}")
             generation.error = f"GenieDialog_query failed with status {ret}"
+        elif generation.timed_out and ret == capi.WARNING_ABORTED:
+            # Our watchdog cut the query short. Report it as a failure: a
+            # partial output labeled finish_reason "stop" would be scored as
+            # a finished sample. (A timer that fires after the query already
+            # ended normally leaves ret != ABORTED and is ignored.)
+            logger.error(f"Inference exceeded {inference_timeout_s}s and was "
+                         f"aborted [{generation.request_id}]")
+            generation.error = (f"Inference timed out after {inference_timeout_s:g}s "
+                                f"and was aborted; the output is incomplete")
         else:
             if ret > capi.STATUS_SUCCESS:
                 logger.warning(f"GenieDialog_query warning [{generation.request_id}]: {ret}")
