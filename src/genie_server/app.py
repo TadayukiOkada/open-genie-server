@@ -39,7 +39,7 @@ from . import engine, logprobs as logprobs_mod, protocol, templates, \
 from .capi import (GenieLib, PERFORMANCE_POLICIES, PERFORMANCE_POLICY_NAMES,
                    STATUS_SUCCESS)
 from .config import ServerConfig, resolve_model_path
-from .engine import GenParams, Generation, QueryPlan
+from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
 from .prefix_cache import PrefixCache
 from .protocol import InvalidRequestError, openai_error, read_json_body, sse
@@ -320,6 +320,8 @@ async def _collect_or_raise(gen: Generation, state: ServerState,
     except asyncio.CancelledError:
         gen.abort()
         raise
+    except SlotChangedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except TimeoutError:
         # Free the slot: without this the worker keeps waiting for the lock,
         # then runs the abandoned generation to its end.
@@ -609,7 +611,7 @@ def create_app(state: ServerState) -> FastAPI:
 
     async def _score_prompt(slot, model_name: str, request_id: str,
                             text: str, ids: list | None, top_n: int,
-                            extra_tokens: int = 0):
+                            extra_tokens: int = 0, epoch: int | None = None):
         """Prompt scoring (lm_eval loglikelihood): prefill only the first
         token, then teacher-force every following prompt token through the
         decode loop, recording P(token_i | tokens_<i) from the custom
@@ -649,7 +651,7 @@ def create_app(state: ServerState) -> FastAPI:
         score_params = GenParams(max_tokens=n_steps, stop=[])
         timeout_s = max(cfg.inference_timeout_s,
                         len(ids) * _SCORING_SECONDS_PER_TOKEN)
-        gen = Generation(request_id, slot, state.lib)
+        gen = Generation(request_id, slot, state.lib, epoch=epoch)
         engine.start_generation(
             state.lib, slot, QueryPlan(full_prompt=first_text), score_params,
             gen, None, timeout_s, collector=collector)
@@ -688,6 +690,9 @@ def create_app(state: ServerState) -> FastAPI:
         requested_model = body.get("model", KNOWN_MODEL_ID)
         slot = manager.select_for_request(body, requested_model)
         manager.require_loaded(slot)
+        # Everything below is planned from the slot's current model. Read the
+        # epoch first, so a swap that lands before the lock is taken is seen.
+        epoch = slot.epoch
         # The response reports the model that actually answered, not the
         # string the client sent. They differ whenever a client routes with an
         # alias — lm_eval sends a fixed placeholder for every request — and
@@ -741,7 +746,7 @@ def create_app(state: ServerState) -> FastAPI:
             for index, (text, ids) in enumerate(prompts):
                 choice = await _score_prompt(
                     slot, model_name, f"{request_id}-{index}", text, ids, top_n,
-                    extra_tokens=extra_tokens)
+                    extra_tokens=extra_tokens, epoch=epoch)
                 choice["index"] = index
                 choices.append(choice)
                 total_pt += len(choice["logprobs"]["tokens"]) - extra_tokens
@@ -760,7 +765,7 @@ def create_app(state: ServerState) -> FastAPI:
             req_params = replace(params, max_tokens=engine.default_max_tokens(
                 slot, prompt, params.max_tokens, cfg.default_max_tokens_cap))
             request_id = f"cmpl-{uuid.uuid4()}"
-            gen = Generation(request_id, slot, state.lib)
+            gen = Generation(request_id, slot, state.lib, epoch=epoch)
             engine.start_generation(
                 state.lib, slot, QueryPlan(full_prompt=prompt), req_params, gen,
                 None, cfg.inference_timeout_s)
@@ -792,7 +797,7 @@ def create_app(state: ServerState) -> FastAPI:
                 collector = LogprobsCollector(
                     top_n=top_n, temperature=params.temperature,
                     top_p=params.top_p, top_k=params.top_k, seed=params.seed)
-            gen = Generation(f"{request_id}-{index}", slot, state.lib)
+            gen = Generation(f"{request_id}-{index}", slot, state.lib, epoch=epoch)
             engine.start_generation(
                 state.lib, slot, QueryPlan(full_prompt=prompt), req_params, gen,
                 None, cfg.inference_timeout_s, collector=collector)
@@ -927,6 +932,9 @@ def create_app(state: ServerState) -> FastAPI:
 
         slot = manager.select_for_request(body, requested_model)
         manager.require_loaded(slot)
+        # Everything below is planned from the slot's current model. Read the
+        # epoch first, so a swap that lands before the lock is taken is seen.
+        epoch = slot.epoch
         # The response reports the model that actually answered, not the
         # string the client sent. They differ whenever a client routes with an
         # alias — lm_eval sends a fixed placeholder for every request — and
@@ -982,7 +990,7 @@ def create_app(state: ServerState) -> FastAPI:
             cacheable=cacheable,
         )
         request_id = f"chatcmpl-{uuid.uuid4()}"
-        gen = Generation(request_id, slot, state.lib)
+        gen = Generation(request_id, slot, state.lib, epoch=epoch)
         engine.start_generation(state.lib, slot, plan, params, gen,
                                 state.prefix_cache, cfg.inference_timeout_s,
                                 collector=collector)
@@ -1108,6 +1116,7 @@ def create_app(state: ServerState) -> FastAPI:
         body = await read_json_body(request)
         slot = manager.select(body.get("model", KNOWN_MODEL_ID))
         manager.require_loaded(slot)
+        epoch = slot.epoch
         system_prompt = body.get("system_prompt", "")
         if not system_prompt:
             raise InvalidRequestError("'system_prompt' is required.", "system_prompt")
@@ -1148,6 +1157,13 @@ def create_app(state: ServerState) -> FastAPI:
             nonlocal error_msg
             try:
                 with slot.lock:
+                    if slot.handle is None or slot.epoch != epoch:
+                        # The key names the model and adapter the prefix was
+                        # rendered for; saving this dialog's KV under it now
+                        # would poison the cache for that namespace.
+                        raise RuntimeError(
+                            f"slot '{slot.name}' changed (model switch or "
+                            "LoRA update) while the warmup waited; resend it")
                     manager.status[slot.name] = {"phase": "resetting dialog", "detail": ""}
                     state.lib.reset(slot.handle)
                     engine.warm_up_prefix(state.lib, slot, prefix_prompt,
@@ -1265,6 +1281,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     detail=f"GenieDialog_applyLora failed: {ret}")
             # Read back from the SDK rather than trust the request blindly.
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
+            slot.epoch += 1  # the prefix-cache namespace just changed
 
         await _admin_with_slot_lock(request, slot, _apply, cfg.inference_timeout_s)
         return {"status": "applied", "slot": slot.name, "engine": engine_role,
@@ -1310,6 +1327,7 @@ def create_app(state: ServerState) -> FastAPI:
                     status_code=500,
                     detail=f"GenieDialog_releaseLoraMemory failed: {ret}")
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
+            slot.epoch += 1
 
         await _admin_with_slot_lock(request, slot, _release, cfg.inference_timeout_s)
         return {"status": "released", "slot": slot.name, "engine": engine_role,

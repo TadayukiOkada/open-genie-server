@@ -1457,3 +1457,87 @@ def test_sampler_settings_do_not_leak_into_the_next_request(state, client):
     params = state.lib.sampler_params[handle_id]
     assert params["top-k"] == "0" and params["seed"] != "5"
     assert params["temp"] == "0.7"
+
+
+def _swap_under_lock(slot):
+    """What a LoRA apply or model switch does to the slot while it holds the
+    lock: a different namespace, a new epoch."""
+    slot.active_lora_adapter = "other-adapter"
+    slot.epoch += 1
+
+
+_SYS_CHAT = {"messages": [{"role": "system", "content": "be brief"},
+                          {"role": "user", "content": "hi"}]}
+
+
+def test_a_request_planned_before_a_swap_is_refused_not_run(state):
+    """H-5: the prompt, max_tokens and prefix-cache key are fixed before the
+    lock is taken. A LoRA/model change that got the lock first left the
+    worker to restore the OLD namespace's KV into the new state."""
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/chat/completions", _SYS_CHAT)
+        queries = len(state.lib.queries)
+        _swap_under_lock(slot)
+        slot.lock.release()
+        t.join(timeout=5)
+    r = result["r"]
+    assert r.status_code == 409
+    assert "changed" in r.json()["error"]["message"]
+    assert len(state.lib.queries) == queries, "the stale request still ran"
+
+
+def test_a_streamed_request_planned_before_a_swap_gets_an_error_event(state):
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/chat/completions", {**_SYS_CHAT, "stream": True})
+        queries = len(state.lib.queries)
+        _swap_under_lock(slot)
+        slot.lock.release()
+        t.join(timeout=5)
+    body = result["r"].text
+    assert '"error"' in body and "changed" in body
+    assert len(state.lib.queries) == queries
+
+
+def test_a_request_is_refused_when_the_slot_lost_its_model_while_waiting(state):
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/completions", {"prompt": "hi"})
+        queries = len(state.lib.queries)
+        slot.handle = None
+        slot.epoch += 1
+        slot.lock.release()
+        t.join(timeout=5)
+    assert result["r"].status_code == 409
+    assert len(state.lib.queries) == queries
+
+
+def test_lora_apply_and_release_change_the_epoch(state, client):
+    slot = state.manager.slots[0]
+    e0 = slot.epoch
+    client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})
+    e1 = slot.epoch
+    client.post("/v1/lora/release", json={"lora_adapter_name": "a"})
+    assert e0 < e1 < slot.epoch
+
+
+def test_a_prefix_warmup_queued_across_a_swap_does_not_save_under_the_old_key(state):
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/prefix/warmup", {"system_prompt": "be brief"})
+        _swap_under_lock(slot)
+        slot.lock.release()
+        t.join(timeout=5)
+    assert result["r"].status_code == 500
+    assert not state.lib.saved_states, "KV was saved under the stale key"
+
+
+def test_a_model_switch_changes_the_epoch(state, tmp_path):
+    slot = state.manager.slots[0]
+    e0 = slot.epoch
+    with TestClient(create_app(state)) as c:
+        r = c.post("/v1/models/switch",
+                   json={"model_dir": str(_bundle(tmp_path, "other"))})
+    assert r.status_code == 200
+    assert slot.epoch >= e0 + 2  # unload, then adopt (bumps at both ends)

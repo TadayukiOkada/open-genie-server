@@ -17,6 +17,17 @@
 
 ### Fixed
 
+- **A request no longer runs against a model or LoRA adapter it was not
+  planned for.** The prompt, `max_tokens` and prefix-cache key are worked out
+  before a request takes the slot lock. A model switch or LoRA change that got
+  the lock first left the waiting request to run with the old model's
+  template and context budget and to restore the old namespace's prefix KV
+  into the new state (a swapped LoRA keeps the KV shape, so nothing failed);
+  after a failed switch it even reached the SDK with no dialog. The slot now
+  carries an epoch that every handle, model or adapter change bumps. A request
+  that finds it moved once it holds the lock is refused with `409` (an `error`
+  event on a stream) and should be resent. `POST /v1/prefix/warmup` checks the
+  same, so it cannot save a KV under a stale key.
 - **A request no longer inherits the previous request's sampler settings.**
   The SDK merges partial sampler updates, and a parameter the request and the
   model config both left out was simply not sent, so it kept the last value:
