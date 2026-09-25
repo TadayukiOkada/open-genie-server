@@ -23,6 +23,19 @@ nothing we do not already say on the front page:
   slot wedge in particular is reported, not worked around; the per-version
   matrix is in [QAIRT Version Issues](./docs/QAIRT_VERSIONS.md), and defects in
   `libGenie.so` belong to Qualcomm.
+- **Message content reaches the model as written.** A chat template's turn
+  markers (`<|im_end|>`, `<|start_header_id|>`, ...) typed into a message are
+  not escaped, so a caller can close its own turn and open one as another
+  role. This is what a measuring instrument should do, and what vLLM does:
+  the prompt the model sees is the one the caller built. An application that
+  forwards untrusted text has to sanitise it first.
+- **Errors say what failed, paths included.** A failed model load or SDK call
+  answers with the SDK status and the paths involved, and
+  `GET /v1/prefix/cache` lists absolute paths. They are there for whoever is
+  debugging the bench. Since cross-origin pages can no longer read replies
+  (see below), they reach only clients on the network the server runs on.
+  An exception nobody anticipated is the exception: its text stays in the
+  log, and the reply names only its type.
 
 **Run it on a network you control.** If you need it reachable from anywhere
 else, put authentication and access control in front of it — a reverse proxy

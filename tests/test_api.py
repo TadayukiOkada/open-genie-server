@@ -2425,6 +2425,31 @@ def test_tool_history_on_a_template_without_a_tool_form_is_a_400(state,
     assert state.lib.queries == []
 
 
+def test_an_unknown_model_name_is_routed_but_logged_once(state, client,
+                                                        caplog):
+    """The fallback stays (lm_eval sends a fixed placeholder); a typo that
+    rides it should at least be findable."""
+    with caplog.at_level("WARNING", logger="genie_server.slots"):
+        for _ in range(2):
+            r = client.post("/v1/chat/completions", json={
+                "model": "qwen3-tset", "max_tokens": 2,
+                "messages": [{"role": "user", "content": "hi"}]})
+            assert r.status_code == 200
+    hits = [rec for rec in caplog.records if "qwen3-tset" in rec.getMessage()]
+    assert len(hits) == 1
+    assert "routed to the primary slot 'default'" in hits[0].getMessage()
+
+
+@pytest.mark.parametrize("model", ["genie-local", ""])
+def test_the_placeholder_and_an_empty_name_are_not_warned_about(
+        state, client, caplog, model):
+    with caplog.at_level("WARNING", logger="genie_server.slots"):
+        client.post("/v1/chat/completions", json={
+            "model": model, "max_tokens": 2,
+            "messages": [{"role": "user", "content": "hi"}]})
+    assert "Unknown model" not in caplog.text
+
+
 # ---------------------------------------------------------------- small fixes (L-6..L-14)
 
 def _with_a_loaded_second_slot(state):
@@ -2486,3 +2511,36 @@ def test_a_prompt_that_does_not_fit_is_refused_before_any_prompt_runs(
         "prompt": ["short", "word " * 200], "max_tokens": 4})
     assert r.status_code == 400
     assert state.lib.queries == []
+
+
+def test_unknown_model_warnings_stop_at_a_cap(state, caplog, monkeypatch):
+    """A client putting something unique into every 'model' must not grow
+    the remembered set, or the log, without bound."""
+    from genie_server import slots as slots_mod
+    monkeypatch.setattr(slots_mod, "MAX_WARNED_MODEL_NAMES", 3)
+    with caplog.at_level("WARNING", logger="genie_server.slots"):
+        for i in range(10):
+            state.manager.select(f"typo-{i}")
+    unknown = [r for r in caplog.records if "Unknown model" in r.getMessage()]
+    capped = [r for r in caplog.records if "distinct unknown model names"
+              in r.getMessage()]
+    assert len(unknown) == 3 and len(capped) == 1
+    assert len(state.manager._warned_model_names) == 3
+
+
+def test_an_image_request_with_an_unknown_model_name_is_logged(state, caplog):
+    """The VLM fallback hid a typo the same way. A loaded text model's name
+    is expected there (an image goes to a VLM slot whatever the name), and
+    stays quiet."""
+    import types
+    state.manager.vlm_slots = [types.SimpleNamespace(
+        name="vlm0", active_model_id="qwen3-vl")]
+    text_model = state.manager.slots[0].active_model_id
+    with caplog.at_level("WARNING", logger="genie_server.slots"):
+        assert state.manager.select_vlm("qwen3-vl-tpyo").name == "vlm0"
+        assert state.manager.select_vlm(text_model).name == "vlm0"
+        assert state.manager.select_vlm("qwen3-vl").name == "vlm0"
+    hits = [r.getMessage() for r in caplog.records
+            if "Unknown model" in r.getMessage()]
+    assert len(hits) == 1
+    assert "'qwen3-vl-tpyo'" in hits[0] and "first VLM slot 'vlm0'" in hits[0]

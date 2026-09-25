@@ -44,14 +44,10 @@ from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
 from .prefix_cache import KEY_RE, PrefixCache
 from .protocol import InvalidRequestError, openai_error, read_json_body, sse
-from .slots import (SlotManager, UnknownSlotError, canonical_engine_role,
-                    lora_alpha_names)
+from .slots import (KNOWN_MODEL_ID, SlotManager, UnknownSlotError,
+                    canonical_engine_role, lora_alpha_names)
 
 logger = logging.getLogger(__name__)
-
-# Historical fixed model id, accepted (and echoed back) from clients such as
-# lm_eval, which always sends one fixed placeholder for every request.
-KNOWN_MODEL_ID = "genie-local"
 
 
 @dataclass

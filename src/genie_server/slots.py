@@ -28,6 +28,16 @@ except ImportError:
     logger.warning("'tokenizers' not installed — token counts will be approximated.")
 
 
+# The placeholder lm_eval and similar clients send as 'model' on every
+# request. It routes to the primary slot without a warning.
+KNOWN_MODEL_ID = "genie-local"
+
+# How many distinct unknown 'model' names are remembered, and so warned
+# about once each. A client that puts something unique into every request
+# would otherwise grow the set, and the log, without bound.
+MAX_WARNED_MODEL_NAMES = 256
+
+
 class UnknownSlotError(ValueError):
     """Raised when a request names a slot that does not exist (HTTP 404)."""
 
@@ -422,6 +432,10 @@ class SlotManager:
         self.vlm_slots: list = []  # populated by vlm.create_vlm_slots()
         self._by_name: dict[str, Slot] = {}
         self._by_model_id: dict[str, Slot] = {}
+        # Unknown 'model' names already warned about (see
+        # _warn_unknown_model), capped at MAX_WARNED_MODEL_NAMES.
+        self._warned_model_names: set[str] = set()
+        self._warned_model_names_full = False
         # Per-slot processing phase for /v1/server/status (GIL-atomic dict
         # key assignments; VLM slots don't report phases in V1).
         self.status: dict[str, dict] = {}
@@ -547,9 +561,42 @@ class SlotManager:
         """Routes by the request's 'model' field; falls back to the primary
         slot for lm_eval's fixed placeholder ("genie-local") or any name
         that doesn't match a loaded model — a single-slot deployment needs
-        no client changes at all."""
+        no client changes at all.
+
+        A name that is neither loaded nor the placeholder is logged once at
+        WARNING: the fallback is deliberate, but it also hides a typo, which
+        then reaches the wrong model without an error. Warning keeps the
+        fallback and makes the typo findable in the log."""
         self._require_text_slots()
-        return self._by_model_id.get(model_name, self.slots[0])
+        slot = self._by_model_id.get(model_name)
+        if slot is not None:
+            return slot
+        primary = self.slots[0]
+        self._warn_unknown_model(
+            model_name, f"the primary slot '{primary.name}' "
+            f"({primary.active_model_id})", sorted(self._by_model_id))
+        return primary
+
+    def _warn_unknown_model(self, model_name: str, routed_to: str,
+                            loaded: list) -> None:
+        """Logs, once per name, a 'model' that fell back because nothing
+        loaded matches it. The placeholder and an empty name are expected
+        and stay quiet. Past MAX_WARNED_MODEL_NAMES distinct names it says
+        so once and stops, rather than remember every name forever."""
+        if (not model_name or model_name == KNOWN_MODEL_ID
+                or model_name in self._warned_model_names):
+            return
+        if len(self._warned_model_names) >= MAX_WARNED_MODEL_NAMES:
+            if not self._warned_model_names_full:
+                self._warned_model_names_full = True
+                logger.warning(
+                    f"{MAX_WARNED_MODEL_NAMES} distinct unknown model names "
+                    "have been logged; further ones are routed without a "
+                    "warning.")
+            return
+        self._warned_model_names.add(model_name)
+        logger.warning(f"Unknown model {model_name!r}: routed to {routed_to}. "
+                       f"Loaded: {loaded}. Logged once per name.")
 
     def _require_text_slots(self) -> None:
         """A VLM-only deployment ("TEXT_SLOTS": []) has no text slot to fall
@@ -602,7 +649,18 @@ class SlotManager:
         if not self.vlm_slots:
             return None
         by_id = {s.active_model_id: s for s in self.vlm_slots}
-        return by_id.get(model_name, self.vlm_slots[0])
+        vslot = by_id.get(model_name)
+        if vslot is not None:
+            return vslot
+        first = self.vlm_slots[0]
+        # An image goes to a VLM slot whatever the name, so a loaded text
+        # model's name here is expected (a client that sends one name for
+        # everything). Only a name nothing loaded matches is a likely typo.
+        if model_name not in self._by_model_id:
+            self._warn_unknown_model(
+                model_name, f"the first VLM slot '{first.name}' "
+                f"({first.active_model_id})", sorted(by_id))
+        return first
 
     def select_vlm_for_request(self, body: dict, model_name: str):
         if not self.vlm_slots:
