@@ -1752,3 +1752,135 @@ def test_a_body_within_the_limit_or_with_none_is_read(state, mb):
     r = client.post("/v1/server/prompt_logprobs",
                     json={"enabled": True, "pad": "x" * (500 if mb else 5000)})
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------- LoRA alpha names
+
+def _with_lora(state, lora):
+    """The shape of genie_phi4_lora's dialog config: one basic engine whose
+    binary carries the adapters."""
+    slot = state.manager.slots[0]
+    slot.dialog_cfg = {**slot.dialog_cfg,
+                       "engine": {"model": {"binary": {"lora": lora}}}}
+    return slot
+
+
+# genie_phi4_lora's lora block, bin-sections left out.
+PHI4_LORA = {"version": 1, "alpha-tensor-name": "lora_alpha", "adapters": [
+    {"version": 1, "name": "finetuned", "alphas": ["alpha0", "alpha1"]},
+    {"version": 1, "name": "default_adapter", "alphas": ["alpha0", "alpha1"]}]}
+
+
+@pytest.mark.parametrize("name", ["alpha2", "lora_alpha"])
+def test_a_lora_alpha_the_model_does_not_have_is_refused(state, client, name):
+    """The SDK says success for it and changes nothing (measured on the
+    board), so nothing may reach the SDK or the cache namespace. That
+    includes the base graph's alpha tensor: once the adapters list their own
+    alphas, the SDK looks names up among those only."""
+    slot = _with_lora(state, PHI4_LORA)
+    ns0, e0 = slot.cache_namespace, slot.epoch
+    r = client.post("/v1/lora/strength", json={"tensor_name": name,
+                                               "alpha": 0.5})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["param"] == "tensor_name"
+    assert "['alpha0', 'alpha1']" in err["message"]
+    assert state.lib.lora_strengths == []
+    assert (slot.cache_namespace, slot.epoch) == (ns0, e0)
+
+
+def test_a_declared_alpha_is_set_even_before_its_adapter_is_applied(state,
+                                                                   client):
+    """The SDK keeps it and writes it when the adapter is applied."""
+    _with_lora(state, PHI4_LORA)
+    r = client.post("/v1/lora/strength", json={"tensor_name": "alpha1",
+                                               "alpha": 0.5})
+    assert r.status_code == 200
+    assert state.lib.lora_strengths[-1][1:] == ("primary", "alpha1", 0.5)
+
+
+def test_an_engine_without_lora_refuses_every_alpha(state, client):
+    slot = state.manager.slots[0]
+    slot.dialog_cfg = {**slot.dialog_cfg, "engine": {"model": {"binary": {}}}}
+    r = client.post("/v1/lora/strength", json={"tensor_name": "alpha0",
+                                               "alpha": 1.0})
+    assert r.status_code == 400
+    assert "declares no LoRA adapters" in r.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("alpha", ['"0.5"', "true", "[0.5]", "NaN",
+                                   "Infinity"])
+def test_lora_alpha_must_be_a_finite_number(state, client, alpha):
+    """Sent as raw JSON: Python's json reads NaN and Infinity, and float()
+    would have taken "0.5", true and NaN alike."""
+    r = client.post("/v1/lora/strength",
+                    content=f'{{"tensor_name": "t", "alpha": {alpha}}}',
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "alpha"
+    assert state.lib.lora_strengths == []
+
+
+def test_lora_tensor_name_must_be_a_string(state, client):
+    r = client.post("/v1/lora/strength", json={"tensor_name": ["t"],
+                                               "alpha": 1.0})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "tensor_name"
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/lora/apply", {"lora_adapter_name": "a"}),
+    ("/v1/lora/strength", {"tensor_name": "alpha0", "alpha": 0.5}),
+    ("/v1/lora/release", {"lora_adapter_name": "a"}),
+])
+@pytest.mark.parametrize("engine", [["primary"], {"role": "primary"}, 1, ""])
+def test_lora_engine_must_be_a_string(state, client, path, body, engine):
+    """A non-string engine reached str.encode or a dict lookup: a 500."""
+    _with_lora(state, PHI4_LORA)
+    r = client.post(path, json={**body, "engine": engine})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "engine"
+
+
+@pytest.mark.parametrize("path", ["/v1/lora/apply", "/v1/lora/release"])
+def test_lora_adapter_name_must_be_a_string(client, path):
+    r = client.post(path, json={"lora_adapter_name": ["a"]})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "lora_adapter_name"
+
+
+def test_one_alpha_set_under_both_role_spellings_is_recorded_once(state, client):
+    """The SDK folds "target" into "primary". Recorded under both spellings,
+    alpha0 = 1.0 and alpha0 = 0.5 came out as the same cache namespace
+    (primary/alpha0=0.5,target/alpha0=1.0), whichever was set last."""
+    def namespace_after(steps):
+        slot = _with_lora(state, PHI4_LORA)
+        slot.lora_strengths = {}
+        for engine, alpha in steps:
+            r = client.post("/v1/lora/strength", json={
+                "engine": engine, "tensor_name": "alpha0", "alpha": alpha})
+            assert r.status_code == 200
+        return slot.cache_namespace, dict(slot.lora_strengths)
+
+    ns_one, strengths = namespace_after([("primary", 0.5), ("target", 1.0)])
+    assert strengths == {"primary/alpha0": 1.0}
+    ns_half, strengths = namespace_after([("target", 1.0), ("primary", 0.5)])
+    assert strengths == {"primary/alpha0": 0.5}
+    assert ns_one != ns_half
+
+
+def test_a_lora_alpha_is_checked_against_the_model_that_holds_the_lock(state):
+    """Checked when the call runs, not when it was sent: a switch that won
+    the lock first must not have the old model's names vouch for the new."""
+    _with_lora(state, PHI4_LORA)
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/lora/strength", {"tensor_name": "alpha0",
+                                            "alpha": 0.5})
+        # What a switch to a model without LoRA leaves behind.
+        slot.dialog_cfg = {**slot.dialog_cfg, "engine": {"model": {"binary": {}}}}
+        slot.lock.release()
+        t.join(timeout=5)
+    assert result["r"].status_code == 400
+    assert "declares no LoRA adapters" in result["r"].json()["error"]["message"]
+    assert state.lib.lora_strengths == []

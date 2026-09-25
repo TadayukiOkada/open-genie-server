@@ -379,6 +379,8 @@ curl -X POST $base_url/v1/lora/apply \
 
 LoRAのalpha強度を変更します(適用後 `GenieDialog_reset`)。`slot` でスロットを、`model` ではロード中のモデル名で選択します([スロットの選び方](#スロットの選び方)を参照)。
 
+`tensor_name` は、モデルの `genie_config.json` がそのエンジンに宣言している alpha でなければなりません。アダプタの `alphas`、`alphas` を持たないアダプタについては lora ブロックの `alpha-tensor-name`、CB multi-LoRA の `adapter-order` の名前です。それ以外は、宣言されている名前を示して `400` を返します — SDK 自身は、持っていない名前にも成功を返し、何も変えません。`alpha` は有限の数値でなければなりません。アダプタを適用する前に alpha を設定するのは可能で、SDK は値を保持し、アダプタの適用時に書き込みます。
+
 ```bash
 curl -X POST $base_url/v1/lora/strength \
   -H "Content-Type: application/json" \

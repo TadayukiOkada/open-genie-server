@@ -44,6 +44,20 @@
 
 ### Fixed
 
+- **`/v1/lora/strength` refuses an alpha the model does not have.** The SDK
+  answers success for any name: on an engine with an inference scheduler, a
+  name it does not know is kept as a CB multi-LoRA adapter-order name, and no
+  tensor changes. A typo therefore returned `200`, and the server even moved
+  the prefix-cache namespace to a strength that was never applied. The name is
+  now checked against the alphas `genie_config.json` declares for the engine,
+  and anything else is a `400` listing them. The check runs under the slot
+  lock, against the model the call reaches. `alpha` must be a finite number:
+  `"0.5"`, `true` and `NaN` used to be passed to the SDK as floats, and a list
+  was a `500`. On all three LoRA endpoints, `engine` and `lora_adapter_name`
+  must be strings; a list there was a `500` too. A strength is recorded under
+  the engine the SDK acts on. `"target"` is `"primary"` to the SDK, and one
+  alpha set under both spellings was recorded twice, so two different
+  strengths could produce the same prefix-cache namespace.
 - **A request no longer runs against a model or LoRA adapter it was not
   planned for.** The prompt, `max_tokens` and prefix-cache key are worked out
   before a request takes the slot lock. A model switch or LoRA change that got
