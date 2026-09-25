@@ -2854,12 +2854,15 @@ def test_a_slot_still_busy_at_the_deadline_is_left_allocated(tmp_path,
     slot = manager.slots[0]
     slot.lock.acquire()
     try:
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             manager.free_all(timeout=0.05)
     finally:
         slot.lock.release()
     assert manager.lib.freed == [] and manager.lib.freed_loggers == []
     assert slot.handle is not None and manager.log_handle is not None
+    # Said before the wait as well as after it: a wedged VLM slot holds
+    # shutdown for the whole deadline.
+    assert "busy at shutdown; waiting up to" in caplog.text
     assert "still busy at shutdown" in caplog.text
 
 
@@ -2879,7 +2882,9 @@ def test_shutdown_frees_a_vlm_slots_pipeline_then_its_nodes(tmp_path,
                                                             monkeypatch):
     pytest.importorskip("numpy")
     from pathlib import Path
+
     from fake_genie import FakeVLMNode, FakeVLMPipeline
+
     from genie_server import genie_node, vlm
 
     order = []

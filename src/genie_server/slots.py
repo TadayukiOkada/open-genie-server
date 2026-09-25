@@ -503,7 +503,16 @@ class SlotManager:
         deadline = time.monotonic() + timeout
         left_busy = []
         for s in [*self.slots, *self.vlm_slots]:
-            if not s.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            acquired = s.lock.acquire(blocking=False)
+            if not acquired:
+                # Say so before the wait: a VLM call cannot be aborted, and a
+                # wedged one holds shutdown for the whole deadline.
+                remaining = max(0.0, deadline - time.monotonic())
+                logger.info(f"[{s.name}] busy at shutdown; waiting up to "
+                            f"{remaining:.0f}s for it to finish before "
+                            "freeing its handles")
+                acquired = s.lock.acquire(timeout=remaining)
+            if not acquired:
                 left_busy.append(s.name)
                 logger.warning(
                     f"[{s.name}] still busy at shutdown after {timeout:g}s; "

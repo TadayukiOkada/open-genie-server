@@ -310,11 +310,13 @@ class VLMSlot:
         self.text_encoder = nodes["text_encoder"]
         self.text_generator = nodes["text_generator"]
 
-        self.pipeline = genie_node.Pipeline(log_handle=log_handle)
+        pipeline = genie_node.Pipeline(log_handle=log_handle)
         for node in nodes.values():
-            self.pipeline.add(node)
+            pipeline.add(node)
         for producer_key, io, consumer_key, io2 in self.spec.connections:
-            self.pipeline.connect(nodes[producer_key], io, nodes[consumer_key], io2)
+            pipeline.connect(nodes[producer_key], io, nodes[consumer_key], io2)
+        # None only once free() has run, at shutdown.
+        self.pipeline: genie_node.Pipeline | None = pipeline
 
         # Content-independent tensors (position encodings, attention masks)
         # for the spec's fixed resolution — read once, reused every request.
@@ -742,6 +744,13 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                     logger.info(f"[{vslot.name}] Request abandoned while waiting "
                                 f"for the slot; not running it [{generation.request_id}]")
                     return
+                pipeline = vslot.pipeline
+                if pipeline is None:
+                    # Shutdown freed the slot (SlotManager.free_all) while
+                    # this waited for it. Its nodes are gone too: touch none.
+                    generation.error = (f"VLM slot '{vslot.name}' was released "
+                                        "at shutdown")
+                    return
                 vslot.text_generator.set_text_callback(
                     vlm_layout.TEXT_GENERATOR_TEXT_OUTPUT_IO, on_text)
                 sampler_params = capi.make_sampler_params(
@@ -753,7 +762,7 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                 except Exception as e:
                     logger.warning(f"VLM sampling params not applied: {e}")
 
-                vslot.pipeline.reset()
+                pipeline.reset()
                 spec = vslot.spec
                 for kind, value in segments:
                     if kind == "text":
@@ -765,7 +774,7 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                             vlm_layout.IMAGE_ENCODER_IMAGE_INPUT_IO, pixel_values)
                         for io_name, static_bytes in vslot.static_tensors.items():
                             vslot.image_encoder.set_buffer(io_name, static_bytes)
-                vslot.pipeline.execute()
+                pipeline.execute()
 
             # Reaching here means the SDK returned SUCCESS. It does that both
             # for a natural EOS stop and for hitting the node's
