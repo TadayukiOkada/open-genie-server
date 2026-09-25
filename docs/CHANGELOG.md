@@ -89,6 +89,11 @@
 
 ### Fixed
 
+- **A `model` name that matches nothing is logged.** It still routes to the
+  primary slot, which is what lets `lm_eval`'s fixed placeholder work, but a
+  typo used to reach the wrong model without a trace. Any name other than
+  `genie-local` that matches no loaded model is now logged once at WARNING,
+  together with the models that are loaded.
 - **A Qwen3-VL bundle whose `temporal_patch_size` is not 2 is refused at
   startup.** The patchify stacks exactly two frames, but `metadata.json`
   could set any value. The slot then loaded and failed a reshape with a

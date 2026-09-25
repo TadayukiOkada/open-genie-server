@@ -2423,3 +2423,28 @@ def test_tool_history_on_a_template_without_a_tool_form_is_a_400(state,
     assert r.status_code == 400
     assert r.json()["error"]["param"] == "messages"
     assert state.lib.queries == []
+
+
+def test_an_unknown_model_name_is_routed_but_logged_once(state, client,
+                                                        caplog):
+    """The fallback stays (lm_eval sends a fixed placeholder); a typo that
+    rides it should at least be findable."""
+    with caplog.at_level("WARNING", logger="genie_server.slots"):
+        for _ in range(2):
+            r = client.post("/v1/chat/completions", json={
+                "model": "qwen3-tset", "max_tokens": 2,
+                "messages": [{"role": "user", "content": "hi"}]})
+            assert r.status_code == 200
+    hits = [rec for rec in caplog.records if "qwen3-tset" in rec.getMessage()]
+    assert len(hits) == 1
+    assert "routed to the primary slot 'default'" in hits[0].getMessage()
+
+
+@pytest.mark.parametrize("model", ["genie-local", ""])
+def test_the_placeholder_and_an_empty_name_are_not_warned_about(
+        state, client, caplog, model):
+    with caplog.at_level("WARNING", logger="genie_server.slots"):
+        client.post("/v1/chat/completions", json={
+            "model": model, "max_tokens": 2,
+            "messages": [{"role": "user", "content": "hi"}]})
+    assert "Unknown model" not in caplog.text

@@ -28,6 +28,11 @@ except ImportError:
     logger.warning("'tokenizers' not installed — token counts will be approximated.")
 
 
+# The placeholder lm_eval and similar clients send as 'model' on every
+# request. It routes to the primary slot without a warning.
+KNOWN_MODEL_ID = "genie-local"
+
+
 class UnknownSlotError(ValueError):
     """Raised when a request names a slot that does not exist (HTTP 404)."""
 
@@ -422,6 +427,8 @@ class SlotManager:
         self.vlm_slots: list = []  # populated by vlm.create_vlm_slots()
         self._by_name: dict[str, Slot] = {}
         self._by_model_id: dict[str, Slot] = {}
+        # Unknown 'model' names already warned about (see select).
+        self._warned_model_names: set[str] = set()
         # Per-slot processing phase for /v1/server/status (GIL-atomic dict
         # key assignments; VLM slots don't report phases in V1).
         self.status: dict[str, dict] = {}
@@ -547,9 +554,24 @@ class SlotManager:
         """Routes by the request's 'model' field; falls back to the primary
         slot for lm_eval's fixed placeholder ("genie-local") or any name
         that doesn't match a loaded model — a single-slot deployment needs
-        no client changes at all."""
+        no client changes at all.
+
+        A name that is neither loaded nor the placeholder is logged once at
+        WARNING: the fallback is deliberate, but it also hides a typo, which
+        then reaches the wrong model without an error. Warning keeps the
+        fallback and makes the typo findable in the log."""
         self._require_text_slots()
-        return self._by_model_id.get(model_name, self.slots[0])
+        slot = self._by_model_id.get(model_name)
+        if slot is not None:
+            return slot
+        if (model_name and model_name != KNOWN_MODEL_ID
+                and model_name not in self._warned_model_names):
+            self._warned_model_names.add(model_name)
+            logger.warning(
+                f"Unknown model {model_name!r}: routed to the primary slot "
+                f"'{self.slots[0].name}' ({self.slots[0].active_model_id}). "
+                f"Loaded: {sorted(self._by_model_id)}. Logged once per name.")
+        return self.slots[0]
 
     def _require_text_slots(self) -> None:
         """A VLM-only deployment ("TEXT_SLOTS": []) has no text slot to fall
