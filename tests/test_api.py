@@ -1575,6 +1575,40 @@ def test_an_image_request_goes_through_the_http_path(state, monkeypatch, tmp_pat
     assert vslot.pipeline.executed == 1
 
 
+def test_an_image_over_the_pixel_ceiling_is_a_400_before_the_npu(
+        state, monkeypatch, tmp_path):
+    """VLM_MAX_IMAGE_PIXELS reaches the HTTP path: the request is refused as
+    the client's error and the pipeline never runs."""
+    pytest.importorskip("numpy")
+    PIL = pytest.importorskip("PIL.Image")
+    import base64
+    import dataclasses
+    import io
+    from pathlib import Path
+
+    from fake_genie import FakeVLMNode, FakeVLMPipeline
+    from genie_server import genie_node, vlm
+
+    monkeypatch.setattr(genie_node, "Node", FakeVLMNode)
+    monkeypatch.setattr(genie_node, "Pipeline", FakeVLMPipeline)
+    bundle = Path(__file__).parent / "data" / "vlm_bundles" / "ai_hub"
+    vslot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=bundle,
+                        spec_name=None, htp_ext_cache_dir=tmp_path)
+    state.manager.vlm_slots = [vslot]
+    state.config = dataclasses.replace(state.config, vlm_max_image_pixels=15)
+
+    buf = io.BytesIO()
+    PIL.new("RGB", (4, 4)).save(buf, "PNG")
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    with TestClient(create_app(state)) as c:
+        r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": url}}]}]})
+    assert r.status_code == 400, r.text
+    assert "VLM_MAX_IMAGE_PIXELS" in r.json()["error"]["message"]
+    assert vslot.pipeline.executed == 0
+
+
 def test_a_lora_strength_change_is_part_of_the_cache_namespace(state, client):
     """A prefix KV saved at one alpha must not be restored at another, and a
     request planned before the change must not run after it (epoch)."""
@@ -1677,3 +1711,44 @@ def test_cors_allows_only_the_configured_origins(state):
     ok = _preflight(client, "http://localhost:3000")
     assert ok.headers["access-control-allow-origin"] == "http://localhost:3000"
     assert "access-control-allow-origin" not in _preflight(client, EVIL).headers
+
+
+# ---------------------------------------------------------------- body size
+
+def _client_with_body_limit(state, mb):
+    import dataclasses
+    state.config = dataclasses.replace(state.config, max_request_body_mb=mb)
+    return TestClient(create_app(state))
+
+
+def test_a_body_over_the_limit_is_413(state):
+    """Refused from the declared Content-Length, before it is buffered."""
+    client = _client_with_body_limit(state, 1 / 1024)   # 1 KiB
+    r = client.post("/v1/server/prompt_logprobs",
+                    json={"enabled": True, "pad": "x" * 2000})
+    assert r.status_code == 413
+    assert "MAX_REQUEST_BODY_MB" in r.json()["error"]["message"]
+    assert client.get("/v1/server/prompt_logprobs").json()["enabled"] is False
+
+
+def test_a_chunked_body_over_the_limit_is_413(state):
+    """No Content-Length to go by: counted as it arrives."""
+    client = _client_with_body_limit(state, 1 / 1024)
+
+    def chunks():
+        yield b'{"enabled": true, "pad": "'
+        for _ in range(20):
+            yield b"x" * 100
+        yield b'"}'
+
+    r = client.post("/v1/server/prompt_logprobs", content=chunks(),
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+@pytest.mark.parametrize("mb", [1 / 1024, 0])
+def test_a_body_within_the_limit_or_with_none_is_read(state, mb):
+    client = _client_with_body_limit(state, mb)
+    r = client.post("/v1/server/prompt_logprobs",
+                    json={"enabled": True, "pad": "x" * (500 if mb else 5000)})
+    assert r.status_code == 200

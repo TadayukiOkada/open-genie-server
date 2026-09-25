@@ -255,6 +255,25 @@ class ServerConfig:
     # did -- it let any web page a user on the same network happened to open
     # drive the management endpoints and read the replies.
     cors_allow_origins: tuple[str, ...] = ()
+    # Ceilings on what one request can make this process hold, so a client
+    # cannot exhaust the board's memory by sending enough of it. 0 turns a
+    # ceiling off. They bound this server's own buffers, not what the SDK is
+    # given -- a request past the vision budget still reaches the SDK unless
+    # VLM_VISION_BUDGET_GUARD is on -- so they hide nothing about the SDK.
+    #
+    # The body is read into memory whole, then parsed into a second copy.
+    max_request_body_mb: float = 64
+    # An image is decoded at full size and only resized when it is fed, and
+    # every frame of a request is held decoded at once (3 bytes per pixel as
+    # RGB). A flat-colour PNG of 13000 x 13000, just under Pillow's own ceiling,
+    # is about 500 KB on the wire and 483 MB decoded, so the body limit alone
+    # does not bound this. Checked from the image header,
+    # before anything is decoded. The per-image default is 4096 x 4096; the
+    # total, about 64 frames of 1920 x 1080 (384 MB as RGB). The encoders take
+    # far less: every spec resizes to its own input size, a few hundred pixels
+    # square.
+    vlm_max_image_pixels: int = 4096 * 4096
+    vlm_max_total_pixels: int = 128 * 1024 * 1024
     text_slots: tuple[SlotSpec, ...] = field(default_factory=tuple)
     vlm_slots: tuple[VLMSlotSpec, ...] = field(default_factory=tuple)
     # Which kind of slot is created first at startup. Only matters when both
@@ -519,6 +538,19 @@ def _parse_slot_load_order(raw: dict) -> str:
     return order
 
 
+def _parse_limit(raw: dict, key: str, default, kind):
+    """A non-negative size ceiling; 0 means no limit. A bool or a string is
+    refused rather than coerced: "64" might be meant as MB or as bytes, and
+    true would read as 1."""
+    value = raw.get(key, default)
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or (kind is int and value != int(value)) or value < 0):
+        raise ValueError(
+            f"{key} must be a non-negative {kind.__name__} (0 = no limit), "
+            f"got {value!r}")
+    return kind(value)
+
+
 def _parse_cors_allow_origins(raw: dict) -> tuple[str, ...]:
     """CORS_ALLOW_ORIGINS: a list of origins such as
     ["http://localhost:3000"], or ["*"]. A bare string is refused rather than
@@ -584,6 +616,11 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         host=raw.get("HOST", "0.0.0.0"),
         port=int(raw.get("PORT", 8080)),
         cors_allow_origins=_parse_cors_allow_origins(raw),
+        max_request_body_mb=_parse_limit(raw, "MAX_REQUEST_BODY_MB", 64, float),
+        vlm_max_image_pixels=_parse_limit(raw, "VLM_MAX_IMAGE_PIXELS",
+                                          4096 * 4096, int),
+        vlm_max_total_pixels=_parse_limit(raw, "VLM_MAX_TOTAL_PIXELS",
+                                          128 * 1024 * 1024, int),
         text_slots=text_slots,
         vlm_slots=vlm_slots,
         slot_load_order=_parse_slot_load_order(raw),

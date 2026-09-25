@@ -2130,6 +2130,67 @@ def test_an_undecodable_frame_is_a_client_error():
                                   ("not base64 jpeg", "video_url frame 1")])
 
 
+def _b64_png(size, mode="1"):
+    """A flat PNG: tiny on the wire whatever size it declares."""
+    import base64
+    import io
+    Image = pytest.importorskip("PIL.Image")
+    buf = io.BytesIO()
+    Image.new(mode, size).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_an_image_over_the_pixel_ceiling_is_refused_before_decoding(
+        monkeypatch):
+    """The size is in the header: a small payload declaring a huge bitmap
+    must be refused without that bitmap ever being allocated."""
+    pytest.importorskip("PIL")
+    from PIL import ImageFile
+    from genie_server import vlm
+    loads = []
+    real_load = ImageFile.ImageFile.load
+    monkeypatch.setattr(ImageFile.ImageFile, "load",
+                        lambda self: loads.append(self) or real_load(self))
+    big = _b64_png((5000, 4000))
+    assert len(big) < 100_000
+    with pytest.raises(ValueError, match="image_url is 5000x4000.*"
+                                         "VLM_MAX_IMAGE_PIXELS"):
+        vlm.decode_media_sources([(_b64_jpeg((1, 2, 3)), "video_url frame 0"),
+                                  (big, "image_url")],
+                                 max_image_pixels=4096 * 4096)
+    assert loads == []
+
+
+def test_frames_over_the_total_pixel_ceiling_are_refused_before_decoding():
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    _, _, sources = vlm.extract_multimodal_parts(_messages_with_video(3))
+    with pytest.raises(ValueError, match="3 images/frames total 48 pixels"):
+        vlm.decode_media_sources(sources, max_total_pixels=47)
+    assert len(vlm.decode_media_sources(sources, max_total_pixels=48)) == 3
+
+
+def test_pixel_ceilings_of_zero_are_off():
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    img, = vlm.decode_media_sources([(_b64_png((5000, 4000)), "image_url")])
+    assert img.size == (5000, 4000)
+
+
+def test_base64_with_characters_outside_the_alphabet_is_refused():
+    """The default decoder skips them and hands Pillow a different byte
+    stream; line breaks are the one thing an encoder legitimately adds."""
+    pytest.importorskip("PIL")
+    from genie_server import vlm
+    b64 = _b64_jpeg((1, 2, 3))
+    with pytest.raises(ValueError, match="image_url is not valid base64"):
+        vlm.decode_media_sources([(b64[:8] + "!" + b64[8:], "image_url")])
+    wrapped = "\n".join(b64[i:i + 76] for i in range(0, len(b64), 76))
+    assert "\n" in wrapped
+    img, = vlm.decode_media_sources([(wrapped, "image_url")])
+    assert img.size == (4, 4)
+
+
 def test_video_container_media_types_are_refused_not_half_supported():
     """No demuxer ships with this server, so data:video/mp4 has to be a clear
     client error rather than a decode failure deeper in."""
@@ -2562,4 +2623,43 @@ def test_cors_allow_origins_that_is_not_a_list_of_origins_is_refused(
                                 "TEXT_SLOTS": [{"model_root": str(tmp_path)}],
                                 "CORS_ALLOW_ORIGINS": value}))
     with pytest.raises(ValueError, match="CORS_ALLOW_ORIGINS"):
+        load_config(str(path))
+
+
+@pytest.mark.parametrize("key, value, expected", [
+    ("MAX_REQUEST_BODY_MB", None, 64),
+    ("MAX_REQUEST_BODY_MB", 0.5, 0.5),
+    ("VLM_MAX_IMAGE_PIXELS", None, 4096 * 4096),
+    ("VLM_MAX_IMAGE_PIXELS", 0, 0),
+    ("VLM_MAX_TOTAL_PIXELS", None, 128 * 1024 * 1024),
+])
+def test_size_ceilings_default_and_accept_numbers(tmp_path, key, value,
+                                                  expected):
+    from genie_server.config import load_config
+
+    raw = {"QAIRT_SDK_ROOT": "/opt/qairt",
+           "TEXT_SLOTS": [{"model_root": str(tmp_path)}]}
+    if value is not None:
+        raw[key] = value
+    path = tmp_path / "env_config.json"
+    path.write_text(json.dumps(raw))
+    assert getattr(load_config(str(path)), key.lower()) == expected
+
+
+@pytest.mark.parametrize("key, value", [
+    ("MAX_REQUEST_BODY_MB", "64"),
+    ("MAX_REQUEST_BODY_MB", -1),
+    ("MAX_REQUEST_BODY_MB", True),
+    ("VLM_MAX_IMAGE_PIXELS", 1.5),
+    ("VLM_MAX_TOTAL_PIXELS", [1]),
+])
+def test_size_ceilings_that_are_not_non_negative_numbers_are_refused(
+        tmp_path, key, value):
+    from genie_server.config import load_config
+
+    path = tmp_path / "env_config.json"
+    path.write_text(json.dumps({"QAIRT_SDK_ROOT": "/opt/qairt",
+                                "TEXT_SLOTS": [{"model_root": str(tmp_path)}],
+                                key: value}))
+    with pytest.raises(ValueError, match=key):
         load_config(str(path))

@@ -83,11 +83,13 @@ Chat completion (for `lm_eval`'s `local-chat-completions` backend, Open WebUI, a
 
 Message `content` may be either a plain string or an OpenAI parts array (`[{"type": "text", ...}]`, as sent by Open WebUI); text parts are flattened automatically, and an `image_url` or `video_url` part routes the request to a VLM slot (see [VLM (Multimodal) Support](./MANUAL.md#vlm-multimodal-support)).
 
-A `video_url` carries frames the client already extracted — base64 JPEGs joined by commas under a `video/jpeg` media type, the form vLLM uses for client-side preprocessing — and `media_io_kwargs.video` (top level of the body; `extra_body` from an OpenAI client) carries the `fps`/`frames_indices` the frame timestamps come from — `<t seconds>` markers on a `qwen3_vl` slot, `mm:ss` on a `gemma4` slot; with no `fps`, neither writes any. Four request errors are specific to this path, all `400`:
+A `video_url` carries frames the client already extracted — base64 JPEGs joined by commas under a `video/jpeg` media type, the form vLLM uses for client-side preprocessing — and `media_io_kwargs.video` (top level of the body; `extra_body` from an OpenAI client) carries the `fps`/`frames_indices` the frame timestamps come from — `<t seconds>` markers on a `qwen3_vl` slot, `mm:ss` on a `gemma4` slot; with no `fps`, neither writes any. Six request errors are specific to this path, all `400`:
 
 - **A media type that is not `video/jpeg`.** No demuxer ships with this server, so a container (`data:video/mp4;base64,...`) is refused rather than half-supported.
 - **A remote `http(s)` URL**, for video as for images: this server does not fetch them.
 - **A `video_url` with no frames in it.**
+- **A payload that is not base64.** Line breaks are ignored; any other character outside the base64 alphabet is refused, rather than skipped as Python's default decoder would.
+- **An image or frame over `VLM_MAX_IMAGE_PIXELS`, or a request whose images and frames together pass `VLM_MAX_TOTAL_PIXELS`** (defaults: 4096 × 4096, and about 64 frames of 1920 × 1080). Both come from the image headers, before anything is decoded. Every encoder resizes its input to a few hundred pixels square, so scaling down on the client loses nothing. Applies to `image_url` as well.
 - **More visual input than the slot's context holds** — only when `VLM_VISION_BUDGET_GUARD` is on, which it is not by default. The message names how many encoder steps fit and why. See [Limiting visual input](./MANUAL.md#limiting-visual-input) for what happens with it off, which is the default and is not graceful.
 
 In addition to `/v1/completions`'s fields:

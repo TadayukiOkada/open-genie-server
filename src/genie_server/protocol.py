@@ -72,6 +72,31 @@ def _is_json_media_type(content_type: str) -> bool:
         media_type.startswith("application/") and media_type.endswith("+json"))
 
 
+async def _read_body(request: Request) -> bytes:
+    """The whole body, refused with 413 once it passes MAX_REQUEST_BODY_MB.
+    A declared Content-Length over the limit is refused before reading; a
+    chunked body is counted as it arrives, so neither is buffered whole."""
+    limit = getattr(request.app.state, "max_request_body_bytes", 0)
+    if not limit:
+        return await request.body()
+
+    def too_large():
+        return InvalidRequestError(
+            f"Request body exceeds MAX_REQUEST_BODY_MB "
+            f"({limit / 2**20:g} MB)", status_code=413)
+
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise too_large()
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def read_json_body(request: Request) -> dict:
     """Parses the request body, mapping malformed JSON to a clean 400.
 
@@ -86,8 +111,9 @@ async def read_json_body(request: Request) -> dict:
             "Request body must be sent with Content-Type: application/json, "
             + (f"got {content_type!r}" if content_type else "got no Content-Type"),
             status_code=415)
+    raw = await _read_body(request)
     try:
-        body = await request.json()
+        body = json.loads(raw)
     except json.JSONDecodeError as e:
         raise InvalidRequestError(f"Request body is not valid JSON: {e}") from e
     if not isinstance(body, dict):
