@@ -86,8 +86,8 @@ def _install_signatures(lib) -> None:
 
 
 def attach(existing_cdll) -> None:
-    """Reuses an already-loaded libGenie.so CDLL (e.g. genie-server.py's
-    `genie_lib`) instead of loading the shared library a second time."""
+    """Reuses an already-loaded libGenie.so CDLL (the server passes
+    GenieLib.cdll) instead of loading the shared library a second time."""
     global _lib
     _install_signatures(existing_cdll)
     _lib = existing_cdll
@@ -95,7 +95,7 @@ def attach(existing_cdll) -> None:
 
 def load(path="libGenie.so"):
     """Loads libGenie standalone (for scripts not already holding a CDLL,
-    e.g. vlm_stream.py). Prefer attach() inside genie-server.py."""
+    e.g. a standalone test script). The server itself uses attach()."""
     global _lib
     if _lib is not None:
         return _lib

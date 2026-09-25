@@ -67,9 +67,12 @@ def resolve_lut_paths(lut: dict, base: Path) -> None:
 @dataclass
 class ModelAssets:
     """Everything load_model() produces for one model, before any Slot adopts
-    it. Loading and adopting are separate steps so a hot-swap can load the
-    new model FIRST and only free the old handle after success — a bad
-    model_dir then never leaves a slot without a working model."""
+    it. Loading and adopting are separate steps so that a hot-swap with
+    unload_first=false can load the new model first and free the old handle
+    only after that succeeds; a bad model_dir then leaves the old model in
+    place. The default, unload_first=true, frees the old handle first (the
+    order that switches reliably on a device with no room for both), so a
+    failed load there leaves the slot empty -- /ready reports it."""
     handle: object
     config_json: bytes
     dialog_cfg: dict

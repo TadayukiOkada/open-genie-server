@@ -206,7 +206,7 @@ python3 -m pytest tests/
 The `[test]` dependencies are not optional for a green run: without `requests`
 and `jsonschema` eight grammar tests fail with `ModuleNotFoundError`, and
 without `numpy` eight logprobs tests do. The same suite runs on every push and
-pull request against Python 3.10 and 3.12
+pull request against Python 3.10, 3.12 and 3.14
 (`.github/workflows/offline-tests.yml`).
 
 To exercise a real device end-to-end from the host PC (with a Markdown/JSON report and server-death detection), see [tests/integration/](https://github.com/TadayukiOkada/open-genie-server/tree/master/tests/integration).

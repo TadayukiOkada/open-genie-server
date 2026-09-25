@@ -3,10 +3,11 @@ resolution (resolution/patch grid, spatial merge) that varies across the
 three known layouts (AI Hub 4B, the DeepStack tutorial 4B, and 2B) but
 nothing else about the model does.
 
-The normalization constants and patch ordering can only be trusted once this
-module's patchify implementation is verified to be byte-identical to the real
-transformers processor's output. See preprocess.py / the golden test in
-tests/ for that check.
+The patch ordering follows transformers' Qwen3VLVideoProcessor. The values
+are not byte-identical to that processor's output: it resamples with
+interpolation, this resizes once and normalizes. Recognition on the device
+is correct with it, which is why the difference is accepted; nothing in
+tests/ compares against the processor.
 """
 from dataclasses import replace
 
@@ -28,9 +29,8 @@ def _qwen3vl_patchify(frame0: np.ndarray, frame1: np.ndarray, spec: "VLMSpec") -
     """2 frames (H,W,3 uint8) -> (rows, cols) float32.
 
     Ordering: row = [hb][wb][mh][mw], within a row = [c][t][ph][pw]
-    (implemented to match transformers' Qwen3VLVideoProcessor ordering —
-    verify separately via a byte-for-byte comparison against golden output.
-    See preprocess.py.)
+    (transformers' Qwen3VLVideoProcessor ordering; the values themselves
+    differ from its output, see the module docstring.)
     """
     patch, merge, temporal = spec.patch_size, spec.spatial_merge_size, spec.temporal_patch_size
     grid_h = spec.image_height // patch

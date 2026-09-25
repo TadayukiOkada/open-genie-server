@@ -307,7 +307,8 @@ class ServerConfig:
     # option exists for smaller VLMs where the total does fit.
     slot_load_order: str = "vlm-first"
 
-    # Derived timeouts (kept relative to inference_timeout_s).
+    # Timeouts the config does not set: two follow inference_timeout_s
+    # (prefix warmup, shutdown drain) and two are fixed.
     @property
     def abort_drain_timeout_s(self) -> float:
         return 5.0
