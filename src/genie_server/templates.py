@@ -230,12 +230,17 @@ def split_prompt_for_prefix_cache(messages: list, template: str,
     if template in ("llama2", "gemma"):
         return "", render_chat_prompt(messages, template, tool_format, bos), False
 
-    sys_msgs = [m for m in messages if m.get("role") == "system"]
-    non_sys = [m for m in messages if m.get("role") != "system"]
-    if not sys_msgs:
+    # Only a conversation that OPENS with its one and only system message
+    # splits into prefix + remainder. Anything else -- no system message, a
+    # system message that is not first, or several -- would lose or reorder
+    # the extra ones if they were pulled out, so it is rendered whole and
+    # left uncached (the message order is exactly what the caller sent).
+    n_sys = sum(1 for m in messages if m.get("role") == "system")
+    if n_sys != 1 or messages[0].get("role") != "system":
         return "", render_chat_prompt(messages, template, tool_format, bos), False
 
-    sc = sys_msgs[0].get("content", "")
+    sc = messages[0].get("content", "")
+    non_sys = messages[1:]
     if template == "gemma4":
         # gemma4 keeps system as its own turn, so unlike Gemma 2/3 it splits.
         prefix = ("<bos>" if bos else "") + f"<|turn>system\n{sc}<turn|>\n"

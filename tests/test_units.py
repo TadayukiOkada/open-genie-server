@@ -57,6 +57,26 @@ def test_split_prefix_concat_equals_full_render():
         assert prefix + remaining == templates.render_chat_prompt(msgs, template)
 
 
+@pytest.mark.parametrize("template", ["chatml", "llama3", "gemma4"])
+@pytest.mark.parametrize("msgs", [
+    # H-3: a later system message used to be dropped from the prompt, and a
+    # system message that is not first used to be hoisted to the front.
+    [{"role": "system", "content": "SYS-A"}, {"role": "user", "content": "q1"},
+     {"role": "assistant", "content": "a1"},
+     {"role": "system", "content": "SYS-B"}, {"role": "user", "content": "q2"}],
+    [{"role": "system", "content": "SYS-A"}, {"role": "system", "content": "SYS-B"},
+     {"role": "user", "content": "q"}],
+    [{"role": "user", "content": "q1"}, {"role": "system", "content": "SYS-B"},
+     {"role": "user", "content": "q2"}],
+], ids=["mid-conversation", "two-leading", "not-first"])
+def test_split_prefix_keeps_every_system_message_in_order(template, msgs):
+    prefix, remaining, cacheable = \
+        templates.split_prompt_for_prefix_cache(msgs, template)
+    assert not cacheable
+    assert prefix + remaining == templates.render_chat_prompt(msgs, template)
+    assert "SYS-B" in prefix + remaining
+
+
 def test_split_prefix_llama2_not_cacheable():
     msgs = [{"role": "system", "content": "sys"},
             {"role": "user", "content": "hi"}]

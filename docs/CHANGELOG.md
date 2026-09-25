@@ -29,6 +29,14 @@
   end with nobody listening. A VLM request abandoned before it gets its slot
   never starts. There is still no way to stop a VLM request once it is
   running.
+- **Every system message now reaches the model.** With a system message in
+  the request, the prefix-cache split kept only the first one and left the
+  rest out of the prompt, so a `[system, user, assistant, system, user]`
+  conversation (agent clients, some Open WebUI features) silently lost its
+  later instructions, and a system message that was not first was moved to
+  the front. Only a conversation that starts with exactly one system message
+  is split now; any other shape is rendered whole, in the order sent, and is
+  not prefix-cached.
 
 ## 1.4.0 — Ubuntu QAIRT-package targets, and an explicit error when logprobs can't be scored
 
