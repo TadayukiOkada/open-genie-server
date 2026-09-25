@@ -227,7 +227,7 @@ See [MANUAL.md's Limitations section](https://github.com/TadayukiOkada/open-geni
 ## Acknowledgements
 
 Built with [Claude Code](https://claude.com/claude-code). The first commit here
-is dated 2026-08-19, and in the eleven days since, this went from a single
+is dated 2026-08-19, and in its first eleven days this went from a single
 2,700-line script to a packaged server with 311 offline tests, a hardware
 integration suite, and manuals in two languages.
 

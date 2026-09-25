@@ -4,10 +4,10 @@ Matches QAIRT 2.48/2.49's include/Genie/{GenieNode,GeniePipeline,GenieCommon}.h.
 GenieNode_setData takes void*/size_t, so numpy arrays can be passed directly
 without going through a file.
 
-attach() takes the ctypes.CDLL handle genie-server.py has already loaded for
-GenieDialog and adds the GenieNode_*/GeniePipeline_* signatures to that same
-in-process library (never loads the CDLL a second time). For standalone use,
-load() can load it fresh instead.
+attach() takes the ctypes.CDLL the server has already loaded for GenieDialog
+(GenieLib.cdll, passed in by vlm.py) and adds the GenieNode_*/GeniePipeline_*
+signatures to that same in-process library (never loads the CDLL a second
+time). For standalone use, load() can load it fresh instead.
 """
 import ctypes as C
 import json
