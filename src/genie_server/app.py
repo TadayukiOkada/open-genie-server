@@ -1308,6 +1308,7 @@ def create_app(state: ServerState) -> FastAPI:
 
         cache_key = state.prefix_cache.key(prefix_prompt, slot.cache_namespace)
         if state.prefix_cache.exists(cache_key):
+            state.prefix_cache.note_namespace(cache_key, slot.cache_namespace)
             return {"status": "already_cached", "key": cache_key, "slot": slot.name,
                     "enable_thinking": enable_thinking}
 

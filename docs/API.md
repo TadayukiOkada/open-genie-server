@@ -287,8 +287,10 @@ Lists saved prefix KV cache entries (a directory shared by every slot, logically
 
 A model switch or a LoRA change leaves the old entries on disk where no slot can reach them, and a KV snapshot can run to gigabytes. `scope=unreachable` deletes those. It keeps entries with no recorded namespace, which it lists in `kept_unknown`. `scope=all` deletes everything. A missing or other `scope` is a `400`, so a bare `DELETE` cannot empty the cache by accident. Namespaces are read at the moment of the call, so an entry for a model a slot is switching to right now counts as unreachable.
 
+An entry saved before namespaces were recorded gets its namespace the next time a slot reaches it, by a warmup (`already_cached`) or a cache HIT, so after an upgrade `unreachable` can sort out the old entries too. An entry that a warmup is still saving, or a request is restoring, is kept and listed in `kept_in_use`. Deleting it mid-write would leave a half-written entry. A namespace record whose entry is gone (removed by hand) is swept as well.
+
 ```json
-{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": []}
+{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": [], "kept_in_use": []}
 ```
 
 **Nothing is ever deleted on its own.** There is no size limit and no LRU. The cache fills only on an explicit warmup, and it empties only on an explicit call, so a TTFT measurement never changes behind the caller's back.
