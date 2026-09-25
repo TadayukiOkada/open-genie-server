@@ -2318,3 +2318,12 @@ def test_ready_for_an_unknown_slot_is_a_404(client):
     r = client.get("/ready", params={"slot": "nope"})
     assert r.status_code == 404
     assert r.json()["error"]["param"] == "slot"
+
+
+def test_unload_first_must_be_a_bool(state, client, tmp_path):
+    """bool("false") is True: the quoted false emptied the slot first."""
+    r = client.post("/v1/models/switch", json={
+        "model_dir": str(_bundle(tmp_path, "other")), "unload_first": "false"})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "unload_first"
+    assert state.manager.slots[0].handle is not None
