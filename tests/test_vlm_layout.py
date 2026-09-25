@@ -446,6 +446,62 @@ def test_qwen3vl_bind_falls_back_to_metadata_vision_preprocessing():
     assert (resolved.image_width, resolved.image_height) == (384, 384)
 
 
+@pytest.mark.parametrize("temporal", [1, 3, 4])
+def test_qwen3vl_bind_refuses_a_temporal_patch_size_the_patchify_cannot_take(
+        temporal):
+    """It used to load, then fail the reshape (a 500) on every request."""
+    from genie_server.vlm_specs.qwen3_vl import qwen3vl_bind
+
+    spec = vlm_specs.get_spec("qwen3_vl")
+    node_cfgs = {
+        "image_encoder": {"image-encoder": {"engine": {"model": {}}}},
+        "text_generator": {"text-generator": {}},
+    }
+    layout = vlm_layout.BundleLayout(
+        node_config_files={}, connections=[], static_tensor_files={}, source="test",
+        metadata={"genie": {"vision_preprocessing": {
+            "image_width": 384, "image_height": 384, "patch_size": 16,
+            "temporal_patch_size": temporal, "spatial_merge_size": 2}}})
+    with pytest.raises(ValueError, match=f"temporal_patch_size {temporal} "):
+        qwen3vl_bind(spec, node_cfgs, layout)
+
+
+def _bind_with_metadata(**vp):
+    from genie_server.vlm_specs.qwen3_vl import qwen3vl_bind
+    node_cfgs = {
+        "image_encoder": {"image-encoder": {"engine": {"model": {}}}},
+        "text_generator": {"text-generator": {}},
+    }
+    layout = vlm_layout.BundleLayout(
+        node_config_files={}, connections=[], static_tensor_files={}, source="test",
+        metadata={"genie": {"vision_preprocessing": {
+            "image_width": 384, "image_height": 384, "patch_size": 16,
+            "temporal_patch_size": 2, "spatial_merge_size": 2, **vp}}})
+    return qwen3vl_bind(vlm_specs.get_spec("qwen3_vl"), node_cfgs, layout)
+
+
+@pytest.mark.parametrize("vp", [{"image_width": 392}, {"image_height": 376}])
+def test_qwen3vl_bind_refuses_a_side_that_is_not_whole_patches(vp):
+    """392 = 24.5 patches: grid 24 is divisible by the merge, so it passed,
+    and then the patchify reshape failed (a 500) on every request."""
+    with pytest.raises(ValueError, match="whole number of 16-pixel patches"):
+        _bind_with_metadata(**vp)
+
+
+@pytest.mark.parametrize("vp", [{"temporal_patch_size": 2.7},
+                                {"image_width": 384.5}, {"patch_size": "16px"},
+                                {"spatial_merge_size": True}])
+def test_qwen3vl_bind_refuses_a_metadata_number_that_is_not_an_integer(vp):
+    """int() truncated 2.7 to 2, which then passed the temporal check."""
+    with pytest.raises(ValueError, match="must be an integer"):
+        _bind_with_metadata(**vp)
+
+
+def test_qwen3vl_bind_accepts_integral_metadata_numbers():
+    spec = _bind_with_metadata(image_width=384.0, temporal_patch_size="2")
+    assert (spec.image_width, spec.temporal_patch_size) == (384, 2)
+
+
 # ---------------------------------------------------------------- family auto-detection edge cases
 
 def test_ambiguous_family_detection_names_both_matches():

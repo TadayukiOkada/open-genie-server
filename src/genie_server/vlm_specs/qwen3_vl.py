@@ -222,6 +222,26 @@ def _dig(cfg: dict, *keys):
     return cfg
 
 
+def _meta_int(vp: dict, key: str, default: int) -> int:
+    """An integer from metadata.json genie.vision_preprocessing. int() used
+    to truncate a fraction without a word: temporal_patch_size 2.7 became 2
+    and passed, image_width 2.5 became 2 and failed every request."""
+    value = vp.get(key, default)
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    elif isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            pass
+    if isinstance(value, bool) or not isinstance(value, int):
+        # ValueError, like every other bad bundle value bind reports.
+        raise ValueError(  # noqa: TRY004
+            f"qwen3_vl: metadata.json genie.vision_preprocessing.{key} must be "
+            f"an integer, got {vp.get(key)!r}")
+    return value
+
+
 def qwen3vl_bind(spec: "VLMSpec", node_cfgs: dict, layout) -> "VLMSpec":
     """Resolves the resolution/patch grid from whatever the bundle states,
     in this order:
@@ -258,11 +278,13 @@ def qwen3vl_bind(spec: "VLMSpec", node_cfgs: dict, layout) -> "VLMSpec":
         if vp:
             spec = replace(
                 spec,
-                image_width=int(vp.get("image_width", spec.image_width)),
-                image_height=int(vp.get("image_height", spec.image_height)),
-                patch_size=int(vp.get("patch_size", spec.patch_size)),
-                temporal_patch_size=int(vp.get("temporal_patch_size", spec.temporal_patch_size)),
-                spatial_merge_size=int(vp.get("spatial_merge_size", spec.spatial_merge_size)),
+                image_width=_meta_int(vp, "image_width", spec.image_width),
+                image_height=_meta_int(vp, "image_height", spec.image_height),
+                patch_size=_meta_int(vp, "patch_size", spec.patch_size),
+                temporal_patch_size=_meta_int(vp, "temporal_patch_size",
+                                              spec.temporal_patch_size),
+                spatial_merge_size=_meta_int(vp, "spatial_merge_size",
+                                             spec.spatial_merge_size),
                 normalize_mean=tuple(vp.get("normalize_mean", spec.normalize_mean)),
                 normalize_std=tuple(vp.get("normalize_std", spec.normalize_std)),
             )
@@ -272,11 +294,31 @@ def qwen3vl_bind(spec: "VLMSpec", node_cfgs: dict, layout) -> "VLMSpec":
     if isinstance(merge, int) and merge > 0:
         spec = replace(spec, spatial_merge_size=merge)
 
+    # _qwen3vl_patchify stacks exactly two frames -- the only temporal
+    # patch size any export has, and the only one the patchify has run on a
+    # device with. Anything else used to pass here and then fail the reshape
+    # (a 500) on every request; refuse it at startup instead.
+    if spec.temporal_patch_size != 2:
+        raise ValueError(
+            f"qwen3_vl: temporal_patch_size {spec.temporal_patch_size} (from "
+            "metadata.json genie.vision_preprocessing) is not supported; the "
+            "patchify takes exactly 2 frames per ViT execution")
     if spec.image_width <= 0 or spec.image_height <= 0:
         raise ValueError(
             "qwen3_vl: could not determine the image resolution from "
             "vision-param, metadata.json genie.vision_preprocessing, or the "
             "family defaults")
+    if spec.patch_size <= 0 or spec.spatial_merge_size <= 0:
+        raise ValueError(
+            f"qwen3_vl: patch_size ({spec.patch_size}) and spatial_merge_size "
+            f"({spec.spatial_merge_size}) must be positive")
+    # The patchify reshapes each side into (grid, patch): a side that is not
+    # a whole number of patches passed here and then failed that reshape (a
+    # 500) on every request, like a temporal_patch_size other than 2.
+    if spec.image_height % spec.patch_size or spec.image_width % spec.patch_size:
+        raise ValueError(
+            f"qwen3_vl: image {spec.image_height}x{spec.image_width} is not a "
+            f"whole number of {spec.patch_size}-pixel patches")
     grid_h = spec.image_height // spec.patch_size
     grid_w = spec.image_width // spec.patch_size
     # _qwen3vl_patchify reshapes each of grid_h and grid_w into
