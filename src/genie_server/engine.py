@@ -267,6 +267,9 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
                     prefix_cache.restore(lib, slot.handle, plan.cache_key):
                 actual, sentence_code = plan.query_prompt, capi.SENTENCE_END
                 generation.cache_state = "HIT"
+                # start_generation's epoch check, under this same lock, makes
+                # the slot's namespace the one the key was computed from.
+                prefix_cache.note_namespace(plan.cache_key, slot.cache_namespace)
             else:
                 logger.info(f"Prefix MISS key={plan.cache_key[:8]} "
                             f"[{generation.request_id}]")
@@ -395,7 +398,8 @@ def warm_up_prefix(lib: GenieLib, slot: Slot, prefix_prompt: str, cache_key: str
         logger.error(f"[{slot.name}] Warmup query failed: {ret}")
         return False
     status[slot.name] = {"phase": "saving KV cache", "detail": "writing to disk…"}
-    return prefix_cache.save(lib, slot.handle, cache_key)
+    return prefix_cache.save(lib, slot.handle, cache_key,
+                             namespace=slot.cache_namespace)
 
 
 def prompt_tokens_over_context(slot: Slot, prompt_text: str) -> tuple[int, int] | None:

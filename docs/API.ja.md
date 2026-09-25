@@ -11,7 +11,7 @@ open-genie-server が提供する全エンドポイントを、用途ごとに�
 |---|---|
 | [OpenAI互換](#openai互換エンドポイント) | `GET /v1/models` · `GET /v1/models/{id}` · `POST /v1/completions` · `POST /v1/chat/completions` |
 | [サーバの状態と制御](#サーバの状態と制御) | `GET /v1/server/status` · `GET /v1/server/idle` · `GET\|POST /v1/server/performance_policy` · `GET\|POST /v1/server/prompt_logprobs` · `GET /v1/server/profile` |
-| [Prefix KVキャッシュ](#prefix-kvキャッシュ) | `GET /v1/prefix/cache` · `DELETE /v1/prefix/cache/{key}` · `POST /v1/prefix/warmup` |
+| [Prefix KVキャッシュ](#prefix-kvキャッシュ) | `GET /v1/prefix/cache` · `DELETE /v1/prefix/cache?scope=` · `DELETE /v1/prefix/cache/{key}` · `POST /v1/prefix/warmup` |
 | [モデルとLoRA](#モデルとlora) | `POST /v1/models/switch` · `POST /v1/lora/apply` · `POST /v1/lora/strength` · `POST /v1/lora/release` · `GET /v1/lora/current` |
 | [エラー](#エラー形式) | 全ての失敗が使う共通エンベロープ |
 
@@ -274,15 +274,28 @@ env_config.json の `GENIE_PROFILE: true` が必要。無効時は `409` を返�
 
 ### GET /v1/prefix/cache
 
-保存済みprefix KVキャッシュの一覧(全スロット共通のディレクトリ、キーで論理的に分離)。
+保存済みprefix KVキャッシュの一覧(全スロット共通のディレクトリ、キーで論理的に分離)。`namespace` はそのエントリを保存したときのスロット・モデル・LoRA の状態、`reachable` は今それを持つスロットがあるか。namespace を記録する前に保存したエントリでは、どちらも `null`。
 
 ```json
-{"entries": [{"key": "...", "path": "...", "kind": "file", "size_bytes": 12345, "mtime": 1700000000}]}
+{"entries": [{"key": "...", "path": "...", "kind": "file", "size_bytes": 12345, "mtime": 1700000000,
+              "namespace": "chat|qwen3-4b|", "reachable": true}]}
 ```
+
+### DELETE /v1/prefix/cache?scope=unreachable|all
+
+モデルの切り替えや LoRA の変更は、どのスロットからも届かなくなった古いエントリをディスクに残します。KV のスナップショットは GB 級になることもあります。`scope=unreachable` はそれらを削除します。namespace の記録が無いエントリは残し、`kept_unknown` に並べます。`scope=all` は全部を削除します。`scope` が無いか、それ以外の値なら `400` なので、素の `DELETE` でキャッシュを誤って空にすることはありません。namespace は呼んだ時点のものを読むので、ちょうど切り替え中のモデルのエントリは届かないものとして扱われます。
+
+namespace を記録する前に保存したエントリは、次にスロットがそれに届いたとき(warmup の `already_cached` か、キャッシュの HIT)に namespace が記録されます。そのため、アップグレード後も古いエントリを `unreachable` で整理できます。warmup が保存中、またはリクエストが復元中のエントリは残し、`kept_in_use` に並べます。書き込み途中で消すと、書きかけのエントリが残るためです。エントリが(手で消されるなどして)無くなった namespace の記録も、あわせて削除します。
+
+```json
+{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": [], "kept_in_use": []}
+```
+
+**勝手に消えることはありません。** サイズの上限も LRU もありません。キャッシュが埋まるのは明示の warmup だけ、空になるのは明示の呼び出しだけなので、TTFT の計測値が呼び出し側の知らないところで変わることはありません。
 
 ### DELETE /v1/prefix/cache/{key}
 
-指定キーのキャッシュを削除。存在しなければ `404`。
+指定キーのキャッシュを削除。存在しなければ `404`、`key` が 16 桁の小文字の hex(`warmup` が返す形)でなければ `400`。
 
 ### POST /v1/prefix/warmup
 

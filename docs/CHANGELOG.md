@@ -44,6 +44,20 @@
 
 ### Added
 
+- **A way to clear out prefix-cache entries no slot can reach.** The key
+  hashes the slot, model and LoRA state, so a switch or a LoRA change leaves
+  the old KV snapshots on disk, unreachable, some of them gigabytes, with
+  nothing to find or remove them. A warmup now records the namespace beside
+  the entry (`prefix_<key>.json`). `GET /v1/prefix/cache` reports each
+  entry's `namespace` and whether it is `reachable`.
+  `DELETE /v1/prefix/cache?scope=unreachable` deletes the orphans, and
+  `scope=all` deletes everything. An entry saved before this change gets
+  its namespace the next time a slot reaches it, and an entry a save or
+  restore is working on is kept. Still nothing is deleted on its own: the
+  cache fills only on an explicit warmup and empties only on an explicit
+  call. `DELETE /v1/prefix/cache/{key}` now also refuses a key that is not 16
+  hex digits with `400`.
+
 - **`GET /ready` (and `/v1/ready`), a readiness probe.** `/health` answers
   `ok` whatever the slots hold, so a slot left empty by a failed
   `unload_first` switch was invisible to monitoring while every request to it

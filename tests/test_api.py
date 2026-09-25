@@ -3,11 +3,13 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from genie_server.app import create_app
+from genie_server.prefix_cache import PrefixCache
 
 FAKE_RESPONSE = "Hello world from Genie!"
 
@@ -2096,6 +2098,149 @@ def test_an_unexpected_exception_reaches_an_allowed_origin(state, monkeypatch):
     assert r.status_code == 500
     assert r.headers.get("access-control-allow-origin") == origin
     assert r.json()["error"]["type"] == "server_error"
+
+
+# ---------------------------------------------------------------- prefix cache hygiene
+
+def _warm(client, prompt="You are terse."):
+    r = client.post("/v1/prefix/warmup", json={"system_prompt": prompt})
+    assert r.status_code == 200, r.text
+    return r.json()["key"]
+
+
+def _entries(client):
+    return {e["key"]: e for e in client.get("/v1/prefix/cache").json()["entries"]}
+
+
+def test_an_entry_records_its_namespace_and_whether_it_is_reachable(state,
+                                                                   client):
+    key = _warm(client)
+    e = _entries(client)[key]
+    assert e["namespace"] == state.manager.slots[0].cache_namespace
+    assert e["reachable"] is True
+
+
+def test_prune_deletes_only_what_no_slot_can_reach(state, client):
+    """A LoRA change moves the namespace: the old entry stays on disk,
+    unreachable, until someone asks for it to go."""
+    old = _warm(client)
+    client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})
+    new = _warm(client)
+    assert old != new
+    assert (_entries(client)[old]["reachable"],
+            _entries(client)[new]["reachable"]) == (False, True)
+
+    r = client.delete("/v1/prefix/cache?scope=unreachable")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == [old]
+    assert r.json()["freed_bytes"] > 0
+    assert set(_entries(client)) == {new}
+
+
+def test_an_entry_without_a_recorded_namespace_is_kept_unless_asked(state,
+                                                                    client):
+    """Saved before namespaces were recorded: it may well be reachable."""
+    legacy = "0123456789abcdef"
+    (state.prefix_cache._dir / f"prefix_{legacy}.geniestate").write_bytes(b"kv")
+    assert _entries(client)[legacy]["reachable"] is None
+
+    r = client.delete("/v1/prefix/cache?scope=unreachable")
+    assert r.json() == {"deleted": [], "freed_bytes": 0,
+                        "kept_unknown": [legacy], "kept_in_use": []}
+    r = client.delete("/v1/prefix/cache?scope=all")
+    assert r.json()["deleted"] == [legacy]
+    assert _entries(client) == {}
+
+
+def test_a_bare_delete_of_the_collection_is_refused(client):
+    key = _warm(client)
+    for url in ("/v1/prefix/cache", "/v1/prefix/cache?scope=everything"):
+        r = client.delete(url)
+        assert r.status_code == 400
+        assert r.json()["error"]["param"] == "scope"
+    assert key in _entries(client)
+
+
+@pytest.mark.parametrize("key", ["abc", "0123456789ABCDEF",
+                                 "0123456789abcdeg", "0123456789abcdef0"])
+def test_deleting_a_key_that_is_not_a_cache_key_is_a_400(client, key):
+    r = client.delete(f"/v1/prefix/cache/{key}")
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "key"
+
+
+def test_deleting_an_entry_removes_its_namespace_record(state, client):
+    key = _warm(client)
+    meta = state.prefix_cache._dir / f"prefix_{key}.json"
+    assert meta.exists()
+    assert client.delete(f"/v1/prefix/cache/{key}").status_code == 200
+    assert not meta.exists()
+
+
+def _forget_namespace(state, key):
+    """Makes an entry look as if it was saved before namespaces were."""
+    (state.prefix_cache._dir / f"prefix_{key}.json").unlink()
+    assert state.prefix_cache.namespace_of(key) is None
+
+
+def test_a_warmup_of_an_old_entry_records_its_namespace(state, client):
+    """Without this, every entry from before the upgrade lists as unknown
+    forever, and only scope=all can clear any of them."""
+    key = _warm(client)
+    _forget_namespace(state, key)
+    r = client.post("/v1/prefix/warmup",
+                    json={"system_prompt": "You are terse."})
+    assert r.json()["status"] == "already_cached"
+    assert _entries(client)[key]["reachable"] is True
+
+
+def test_a_hit_on_an_old_entry_records_its_namespace(state, client):
+    key = _warm(client)
+    _forget_namespace(state, key)
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "system", "content": "You are terse."},
+                     {"role": "user", "content": "hi"}], "max_tokens": 4})
+    assert r.status_code == 200
+    assert _entries(client)[key]["namespace"] == \
+        state.manager.slots[0].cache_namespace
+
+
+def test_prune_keeps_an_entry_a_save_is_still_writing(tmp_path):
+    """scope=all during a warmup must not delete the half-written entry
+    (which the save would then record a namespace for, as reachable)."""
+    cache = PrefixCache(str(tmp_path))
+    key = cache.key("You are terse.", "chat|m|")
+    seen = {}
+
+    class Lib:
+        def save_state(self, handle, path):
+            Path(path).write_bytes(b"part")
+            seen.update(cache.prune(set(), include_unknown=True))
+            Path(path).write_bytes(b"part+rest")
+            return 0
+
+    assert cache.save(Lib(), None, key, namespace="chat|m|")
+    assert seen["kept_in_use"] == [key] and seen["deleted"] == []
+    assert cache.namespace_of(key) == "chat|m|"
+    assert cache.prune(set(), include_unknown=True)["deleted"] == [key]
+
+
+def test_prune_keeps_an_entry_being_restored(state, client):
+    key = _warm(client)
+    with state.prefix_cache._using(key):
+        r = client.delete("/v1/prefix/cache?scope=all")
+    assert r.json()["kept_in_use"] == [key]
+    assert key in _entries(client)
+
+
+def test_prune_sweeps_a_namespace_record_left_without_its_entry(state,
+                                                                client):
+    key = _warm(client)
+    (state.prefix_cache._dir / f"prefix_{key}.geniestate").unlink()
+    meta = state.prefix_cache._dir / f"prefix_{key}.json"
+    assert meta.exists()
+    client.delete("/v1/prefix/cache?scope=unreachable")
+    assert not meta.exists()
 
 
 # ---------------------------------------------------------------- readiness
