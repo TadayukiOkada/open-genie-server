@@ -2096,3 +2096,80 @@ def test_an_unexpected_exception_reaches_an_allowed_origin(state, monkeypatch):
     assert r.status_code == 500
     assert r.headers.get("access-control-allow-origin") == origin
     assert r.json()["error"]["type"] == "server_error"
+
+
+# ---------------------------------------------------------------- readiness
+
+def test_ready_when_every_slot_holds_a_model(client):
+    r = client.get("/ready")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ready",
+                        "slots": [{"name": "default", "loaded": True}]}
+    assert client.get("/v1/ready").status_code == 200
+
+
+def test_a_slot_left_empty_is_not_ready_while_health_stays_ok(state, client,
+                                                              tmp_path):
+    """The failed unload_first switch the review names: the slot is empty,
+    /health cannot tell, /ready must."""
+    state.lib.fail_create = True
+    try:
+        r = client.post("/v1/models/switch",
+                        json={"model_dir": str(_bundle(tmp_path, "other"))})
+    finally:
+        state.lib.fail_create = False
+    assert r.status_code == 500
+    assert state.manager.slots[0].handle is None   # unload_first, then failed
+    assert client.get("/health").json() == {"status": "ok"}
+    r = client.get("/ready")
+    assert r.status_code == 503
+    assert r.json() == {"status": "not ready",
+                        "slots": [{"name": "default", "loaded": False}],
+                        "not_loaded": ["default"]}
+
+
+def test_readiness_covers_vlm_slots(state, client):
+    class FakeVLM:
+        name, pipeline = "vlm0", object()
+
+    state.manager.vlm_slots = [FakeVLM()]
+    assert client.get("/ready").json()["slots"][-1] == {"name": "vlm0",
+                                                        "loaded": True}
+
+
+def _with_an_empty_second_slot(state):
+    """A two-slot server whose second slot a failed switch left empty."""
+    from pathlib import Path
+
+    from genie_server.slots import Slot
+
+    second = Slot(name="second", device_id=1, model_root=Path("/models/other"))
+    state.manager.slots.append(second)
+    state.manager._by_name[second.name] = second
+    return second
+
+
+def test_one_empty_slot_makes_the_whole_server_not_ready(state, client):
+    _with_an_empty_second_slot(state)
+    r = client.get("/ready")
+    assert r.status_code == 503
+    assert r.json()["not_loaded"] == ["second"]
+
+
+def test_ready_can_be_asked_about_one_slot(state, client):
+    """A monitor that routes per slot must not see the healthy slot as down
+    because another one is empty."""
+    _with_an_empty_second_slot(state)
+    r = client.get("/ready", params={"slot": "default"})
+    assert r.status_code == 200
+    assert r.json() == {"status": "ready",
+                        "slots": [{"name": "default", "loaded": True}]}
+    r = client.get("/v1/ready", params={"slot": "second"})
+    assert r.status_code == 503
+    assert r.json()["not_loaded"] == ["second"]
+
+
+def test_ready_for_an_unknown_slot_is_a_404(client):
+    r = client.get("/ready", params={"slot": "nope"})
+    assert r.status_code == 404
+    assert r.json()["error"]["param"] == "slot"
