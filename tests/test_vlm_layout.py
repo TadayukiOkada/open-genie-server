@@ -602,6 +602,38 @@ def test_a_vlm_request_abandoned_while_waiting_never_runs(monkeypatch, tmp_path)
     assert generation.error is None
 
 
+def test_a_vlm_request_waiting_through_shutdown_touches_nothing(monkeypatch,
+                                                               tmp_path):
+    """free_all took the lock, freed the pipeline and its nodes, and let the
+    lock go: a worker that was queued behind it must not run on them."""
+    _patch_genie_node(monkeypatch)
+    import threading
+    import types
+
+    from genie_server import vlm
+
+    slot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=FIXTURES / "ai_hub",
+                       spec_name=None, htp_ext_cache_dir=tmp_path / "htpcache")
+    pipeline = slot.pipeline
+    generation = types.SimpleNamespace(
+        request_id="chatcmpl-late", completion_tokens=0, finish_reason=None,
+        error=None, done=threading.Event(), aborted=threading.Event(),
+        put_threadsafe=lambda item: None)
+    params = types.SimpleNamespace(temperature=None, top_p=None, top_k=None, seed=None)
+    segments = slot.spec.build_prompt_segments(
+        "", [("text", "describe"), ("image", 0)], {}, slot.spec)
+
+    slot.lock.acquire()                  # shutdown holds the slot
+    vlm.start_vlm_generation(None, slot, segments, [_1x1_image()], params, generation)
+    slot.free()
+    slot.lock.release()
+
+    assert generation.done.wait(timeout=5)
+    assert "released at shutdown" in generation.error
+    assert pipeline.executed == 0
+    assert slot.text_generator.text_callback is None
+
+
 def _1x1_image():
     from PIL import Image
     return Image.new("RGB", (1, 1))
