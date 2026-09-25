@@ -264,7 +264,16 @@ class Gemma4ToolFormat:
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
-                args = {}
+                args = None
+        if not isinstance(args, dict):
+            # Hermes can carry a malformed call back as the text the model
+            # wrote; gemma4's notation has no way to, and writing {} instead
+            # would tell the model it called the tool with no arguments.
+            from .templates import UnrenderableMessageError
+            raise UnrenderableMessageError(
+                f"tool_call {fn.get('name', '')!r}: arguments must be a JSON "
+                "object for gemma4 to render it back into the prompt, got "
+                f"{fn.get('arguments')!r}")
         body = ",".join(f"{k}:{_fmt_arg(v)}" for k, v in sorted(args.items()))
         return f"<|tool_call>call:{fn.get('name', '')}{{{body}}}<tool_call|>"
 
