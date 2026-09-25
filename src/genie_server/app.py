@@ -1117,10 +1117,13 @@ def create_app(state: ServerState) -> FastAPI:
             if isinstance(t, dict) and isinstance(t.get("function"), dict)
             and isinstance(t["function"].get("name"), str)
         } if (tools and cfg.tool_call_recovery) else None
-        prefix_prompt, query_prompt, cacheable = \
-            templates.split_prompt_for_prefix_cache(msgs, slot.chat_template,
-                                                    slot.tool_format,
-                                                    bos=slot.sdk_bos_token is None)
+        try:
+            prefix_prompt, query_prompt, cacheable = \
+                templates.split_prompt_for_prefix_cache(
+                    msgs, slot.chat_template, slot.tool_format,
+                    bos=slot.sdk_bos_token is None)
+        except templates.UnrenderableMessageError as e:
+            raise InvalidRequestError(str(e), "messages") from None
         full_prompt = prefix_prompt + query_prompt if cacheable else query_prompt
         _require_context_room(slot, full_prompt)
         params.max_tokens = engine.default_max_tokens(

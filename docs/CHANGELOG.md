@@ -4,6 +4,16 @@
 
 ### Breaking
 
+- **Tool history a slot's chat template cannot write is a `400`, not
+  dropped.** Send tool round trips to a chatml, llama3 or gemma4 slot.
+  - llama2 dropped `tool` messages, and llama2 and Gemma 2/3 both dropped
+    an assistant's `tool_calls`, so the model saw the round trip with
+    pieces missing. Both templates now refuse tool history, since neither
+    has a form for it.
+  - llama2 also refuses any role it has no form for, such as `developer`,
+    instead of dropping it.
+  - gemma4 refuses a tool result it cannot name (no `name` and no matching
+    `tool_call_id`), and a call whose `arguments` are not a JSON object.
 - **A config flag must be a JSON boolean, and `CHAT_TEMPLATE` and
   `TOOL_FORMAT` must name something that exists.** The four flags
   (`PROMPT_LOGPROBS`, `GENIE_PROFILE`, `TOOL_CALL_RECOVERY`,
@@ -79,6 +89,15 @@
 
 ### Fixed
 
+- **Tool round trips render consistently across chat templates.**
+  - llama3 wrote tool calls in Hermes whatever the slot's tool format was.
+  - gemma4 took a tool result's function name only from `name`, which OpenAI
+    tool messages usually lack, so `response:{...}` went out nameless. It
+    now resolves the name from the matching `tool_call_id`.
+  - gemma4 replaced unparseable `arguments` with `{}`, which told the model
+    it had called with no arguments. A list there was a `500`. Both are now
+    a `400` (see Breaking). An empty `arguments` string still renders as a
+    call with no arguments.
 - **A character split across two token callbacks is joined, not dropped.**
   The dialog path decoded each callback with `errors="ignore"`, so a
   multibyte character (Japanese, an emoji) that arrived in two pieces

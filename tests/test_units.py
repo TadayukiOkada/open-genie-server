@@ -3027,3 +3027,103 @@ def test_shutdown_frees_a_vlm_slots_pipeline_then_its_nodes(tmp_path,
     assert order[0] == "pipeline" and order.count("node") == 3
     assert set(order[1:]) == {"node"}
     assert vslot.pipeline is None
+
+
+# ---------------------------------------------------------------- tool history per template
+
+ROUND_TRIP = [
+    {"role": "user", "content": "weather?"},
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call_1", "type": "function",
+         "function": {"name": "get_weather", "arguments": '{"city": "Tokyo"}'}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+]
+
+
+@pytest.mark.parametrize("template", ["llama2", "gemma"])
+@pytest.mark.parametrize("messages", [ROUND_TRIP, ROUND_TRIP[:2],
+                                      [ROUND_TRIP[0], ROUND_TRIP[2]]])
+def test_templates_without_a_tool_form_refuse_tool_history(template,
+                                                           messages):
+    """llama2 dropped tool results outright, and both dropped tool_calls:
+    the model saw a round trip with its calls and results missing."""
+    from genie_server import templates
+    with pytest.raises(templates.UnrenderableMessageError,
+                       match=f"{template!r} chat template has no form"):
+        templates.render_chat_prompt(messages, template)
+
+
+def test_llama2_refuses_a_role_it_would_have_dropped():
+    from genie_server import templates
+    with pytest.raises(templates.UnrenderableMessageError, match="'developer'"):
+        templates.render_chat_prompt(
+            [{"role": "developer", "content": "be brief"},
+             {"role": "user", "content": "hi"}], "llama2")
+
+
+def test_llama3_renders_tool_calls_in_the_slots_dialect():
+    """It used to write Hermes whatever the slot's tool format."""
+    from genie_server import templates, tool_formats
+    out = templates.render_chat_prompt(ROUND_TRIP[:2], "llama3",
+                                       tool_formats.FORMATS["gemma4"])
+    assert "<|tool_call>call:get_weather{" in out
+    assert "<tool_call>" not in out
+
+
+def test_gemma4_names_a_tool_result_by_its_tool_call_id():
+    """OpenAI tool messages carry the id, not the name; gemma4 writes the
+    name into response:NAME{...}."""
+    from genie_server import templates, tool_formats
+    out = templates.render_chat_prompt(ROUND_TRIP, "gemma4",
+                                       tool_formats.FORMATS["gemma4"])
+    assert "<|tool_response>response:get_weather{sunny}" in out
+
+
+def test_gemma4_refuses_a_tool_result_it_cannot_name():
+    from genie_server import templates, tool_formats
+    msgs = [ROUND_TRIP[0], {"role": "tool", "tool_call_id": "nope",
+                            "content": "sunny"}]
+    with pytest.raises(templates.UnrenderableMessageError, match="tool_call_id"):
+        templates.render_chat_prompt(msgs, "gemma4",
+                                     tool_formats.FORMATS["gemma4"])
+
+
+@pytest.mark.parametrize("arguments", ["{not json", "[1, 2]", [1, 2], 3])
+def test_gemma4_refuses_arguments_it_cannot_write(arguments):
+    """{} in their place told the model it had called with no arguments; a
+    list was a 500 (list has no .items())."""
+    from genie_server import templates, tool_formats
+    msgs = [{"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c", "function": {"name": "f", "arguments": arguments}}]}]
+    with pytest.raises(templates.UnrenderableMessageError,
+                       match="arguments must be a JSON object"):
+        templates.render_chat_prompt(msgs, "gemma4",
+                                     tool_formats.FORMATS["gemma4"])
+
+
+@pytest.mark.parametrize("arguments", ["", "  ", None])
+def test_gemma4_renders_an_empty_arguments_string_as_no_arguments(arguments):
+    """A zero-argument call, as some clients and models spell it. It rendered
+    as call:NAME{} before, and must not become a 400."""
+    from genie_server import templates, tool_formats
+    msgs = [{"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c", "function": {"name": "now", "arguments": arguments}}]}]
+    out = templates.render_chat_prompt(msgs, "gemma4",
+                                       tool_formats.FORMATS["gemma4"])
+    assert "<|tool_call>call:now{}<tool_call|>" in out
+
+
+@pytest.mark.parametrize("tool_calls, tool_msg", [
+    ([{"id": "c", "function": "now"}], {"tool_call_id": "c"}),     # function a str
+    (["now"], {"tool_call_id": "c"}),                               # call a str
+    ([{"id": ["c"], "function": {"name": "now", "arguments": "{}"}}],
+     {"tool_call_id": ["c"]}),                                      # ids unhashable
+])
+def test_gemma4_malformed_tool_history_is_a_400_not_a_500(tool_calls, tool_msg):
+    """AttributeError / TypeError used to escape as a 500."""
+    from genie_server import templates, tool_formats
+    msgs = [{"role": "assistant", "content": "", "tool_calls": tool_calls},
+            {"role": "tool", "content": "12:00", **tool_msg}]
+    with pytest.raises(templates.UnrenderableMessageError):
+        templates.render_chat_prompt(msgs, "gemma4",
+                                     tool_formats.FORMATS["gemma4"])
