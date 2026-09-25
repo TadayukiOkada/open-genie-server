@@ -548,6 +548,7 @@ def test_vlm_generation_runs_end_to_end_on_the_ai_hub_layout(monkeypatch, tmp_pa
 
         def __init__(self):
             self.done = threading.Event()
+            self.aborted = threading.Event()
             self.put_calls = []
 
         def put_threadsafe(self, item):
@@ -569,6 +570,36 @@ def test_vlm_generation_runs_end_to_end_on_the_ai_hub_layout(monkeypatch, tmp_pa
     sent_texts = [io for io, _ in slot.text_encoder.texts]
     assert sent_texts and all(io == vlm.vlm_layout.TEXT_ENCODER_TEXT_INPUT_IO for io in sent_texts)
     assert vlm.vlm_layout.IMAGE_ENCODER_IMAGE_INPUT_IO in slot.image_encoder.buffers
+
+
+
+def test_a_vlm_request_abandoned_while_waiting_never_runs(monkeypatch, tmp_path):
+    """The composable pipeline has no abort, so a request the caller gave up
+    on (a 504, or a client that left) while it queued for the slot must not
+    start once it gets the lock: nobody is waiting for its answer."""
+    _patch_genie_node(monkeypatch)
+    import threading
+    import types
+    from genie_server import vlm
+
+    slot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=FIXTURES / "ai_hub",
+                       spec_name=None, htp_ext_cache_dir=tmp_path / "htpcache")
+    generation = types.SimpleNamespace(
+        request_id="chatcmpl-abandoned", completion_tokens=0, finish_reason=None,
+        error=None, done=threading.Event(), aborted=threading.Event(),
+        put_threadsafe=lambda item: None)
+    params = types.SimpleNamespace(temperature=None, top_p=None, top_k=None, seed=None)
+    segments = slot.spec.build_prompt_segments(
+        "", [("text", "describe"), ("image", 0)], {}, slot.spec)
+
+    slot.lock.acquire()                  # another request holds the slot
+    vlm.start_vlm_generation(None, slot, segments, [_1x1_image()], params, generation)
+    generation.aborted.set()             # the caller gives up while it waits
+    slot.lock.release()
+
+    assert generation.done.wait(timeout=5)
+    assert slot.pipeline.executed == 0
+    assert generation.error is None
 
 
 def _1x1_image():

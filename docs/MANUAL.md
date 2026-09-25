@@ -106,7 +106,7 @@ The rest is Qualcomm's or ours:
 - Inference, parameter changes, LoRA operations, and model switching within a slot are all serialized by **that slot's own** `threading.Lock`. **Operations on other slots are never blocked** — a 2-NSP configuration can genuinely process two requests at once.
 - Every request runs `GenieDialog_reset` on its target slot before starting. In other words, this server **never keeps multi-turn conversation state on the SDK side**. Manage conversation history on the client (the `messages` array).
 - Streaming bridges the C callback thread and the ASGI event loop with a `threading.Thread` + `asyncio.Queue`. A client disconnect actively aborts the in-flight request via `GenieDialog_signal(ACTION_ABORT)`.
-- A watchdog (`threading.Timer`) automatically aborts inference after `INFERENCE_TIMEOUT` seconds (120s by default; configurable in `env_config.json`) elapse.
+- A watchdog (`threading.Timer`) automatically aborts inference after `INFERENCE_TIMEOUT` seconds (120s by default; configurable in `env_config.json`) elapse. A request the watchdog aborts is reported as a failure, never as a finished answer: HTTP `504` on the non-streaming path, and an `error` event with no `"stop"` chunk on a stream. Whatever text had been generated before the abort is not returned as a completion.
 
 ## SDK Compatibility
 
