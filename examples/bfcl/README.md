@@ -138,7 +138,8 @@ pass `--local-model-path` to `bfcl generate` if the host is offline.
 BFCL sends its own model id (`Qwen/Qwen3-4B-Instruct-2507`), which does not match
 any slot name, so the request lands on the primary slot whatever it holds. **The
 model that answers is whatever is loaded** — `run_bfcl.sh` prints it, and it is
-worth checking, because nothing else in the pipeline will tell you.
+worth checking: BFCL itself never will. The server logs it once as well, as an
+unknown model routed to the primary slot.
 
 ```bash
 curl -sS "$BASE_URL/v1/server/status" | python3 -m json.tool

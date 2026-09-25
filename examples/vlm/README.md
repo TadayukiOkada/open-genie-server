@@ -92,6 +92,8 @@ print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
 PYEOF
 ```
 
+Send a picture of ordinary size. The encoder resizes it to a few hundred pixels on a side anyway, and one over `VLM_MAX_IMAGE_PIXELS` (4096 × 4096 by default) is refused with a `400` before it is decoded. A photo straight off a recent phone camera, at 48 MP, is over the limit: scale it down first, or raise the setting.
+
 `stream: true` streams the same answer over SSE — verified byte-identical to the
 non-streaming reply for the same request.
 

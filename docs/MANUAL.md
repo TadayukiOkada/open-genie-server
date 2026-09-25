@@ -102,7 +102,7 @@ The rest is Qualcomm's or ours:
 | `tests/` | offline test suite (`FakeGenieLib` — runs without an NPU or `libGenie.so`) |
 
 - The server is made of one or more **slots** (`Slot`). One slot = one independent `GenieDialog` handle + its own `threading.Lock` + its own tokenizer/template/LoRA state. Without `TEXT_SLOTS` set there's exactly one slot (`"default"`), matching every prior single-model version of this server exactly.
-- Each request's `model` field (in the body, or the `?model=` query param) decides **which slot it's routed to** (`SlotManager.select`). If no slot matches, it always falls back to the primary slot, so `lm_eval`'s fixed `"genie-local"` string and single-slot deployments never need any client-side changes.
+- Each request's `model` field (in the body, or the `?model=` query param) decides **which slot it's routed to** (`SlotManager.select`). If no slot matches, it always falls back to the primary slot, so `lm_eval`'s fixed `"genie-local"` string and single-slot deployments never need any client-side changes. Any other name that matches nothing is logged once at WARNING, so a typo does not go unnoticed; an image request that falls back to the first VLM slot is logged the same way (see [Limitations](#limitations)).
 - Inference, parameter changes, LoRA operations, and model switching within a slot are all serialized by **that slot's own** `threading.Lock`. **Operations on other slots are never blocked** — a 2-NSP configuration can genuinely process two requests at once.
 - Every request runs `GenieDialog_reset` on its target slot before starting. In other words, this server **never keeps multi-turn conversation state on the SDK side**. Manage conversation history on the client (the `messages` array).
 - Streaming bridges the C callback thread and the ASGI event loop with a `threading.Thread` + `asyncio.Queue`. A client disconnect actively aborts the in-flight request via `GenieDialog_signal(ACTION_ABORT)`.
@@ -726,10 +726,11 @@ The DSP-side skel library search path is built dynamically from the set of `devi
 | Operation | Slot selection | Fallback if unspecified/no match |
 |---|---|---|
 | `/v1/completions`, `/v1/chat/completions` | body's `model`, or body's `slot` (slot **name**) to override | primary slot (`slots[0]`) |
-| `/v1/prefix/warmup`, `/v1/lora/*` | body's `model` | primary slot |
-| `/v1/server/performance_policy` (GET) | query param `?model=` (no `?slot=`) | primary slot |
+| `/v1/prefix/warmup`, `/v1/lora/*` (POST), `POST /v1/server/performance_policy` | body's `slot` (slot **name**), else `model` | primary slot |
+| `GET /v1/server/performance_policy` | query param `?slot=` (slot **name**), else `?model=` | primary slot |
 | `/v1/lora/current` | query param `?slot=` (slot **name**), else `?model=` | primary slot |
 | `/v1/server/idle` | query param `?slot=` (slot **name**) | primary slot |
+| `/ready` | query param `?slot=` (slot **name**) | every slot |
 | `POST /v1/models/switch` | body's `slot` (slot **name**, not a model ID) | primary slot |
 
 Routing by `model` is decided by "does it exactly match the `active_model_id` (= model directory name) of the model currently loaded in that slot?" (`SlotManager.select`). `POST /v1/models/switch` is the one exception: since its target is the "hardware slot about to have its model swapped out" itself, it's selected by **slot name**, not model ID.
@@ -1079,7 +1080,7 @@ Prompt format per template:
 
 When `messages` includes a `system` role and the template supports splitting (llama3/chatml/gemma4), the system prompt portion is saved and restored as a separate KV cache entry.
 
-- Cache key: `sha256(f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}\x1f{prefix_prompt}")[:16]`
+- Cache key: `sha256(f"{namespace}\x1f{prefix_prompt}")[:16]`, where `namespace` is `f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}"`, followed by `|tensor=alpha,...` once a LoRA strength has been set (`Slot.cache_namespace`)
 - **Namespaced by slot/model/LoRA**, so switching state via `/v1/models/switch` or `/v1/lora/apply` never accidentally restores a KV cache saved for a different slot/model/LoRA (the key simply changes, so it naturally misses).
 - Storage format: the file (or directory) written by `GenieDialog_save`/`GenieDialog_restore` is managed as `PREFIX_CACHE_DIR/prefix_<key>.geniestate` (a single directory shared by every slot, but the keys never collide since they're namespaced). Next to it, `prefix_<key>.json` records the namespace, which is what lets `DELETE /v1/prefix/cache?scope=unreachable` find the entries a model or LoRA change has orphaned (see [API](./API.md#prefix-kv-cache)).
 
@@ -1372,6 +1373,8 @@ An odd frame count repeats the final frame to fill the last step, the same paddi
 **On a `gemma4` slot every frame is a step.** Gemma 4 has no temporal packing: each frame goes through the encoder on its own and costs `height × width / pooling-kernel-size²` tokens, written as `mm:ss <|image>`…`<image|>` with the frames joined by a space — what `Gemma4Processor` produces. The timestamp is the frame's own time from `fps` / `frames_indices` as described above, in minutes and whole seconds; without an `fps` none is written, where the processor would assume 24 fps. The processor budgets video frames at 70 soft tokens against 280 for stills, and a slot's grid is the only resolution it has, so give a slot that takes video the smaller grid.
 
 ### Limiting visual input
+
+This section is about the text-generator's context. Memory is bounded separately, and on by default: `MAX_REQUEST_BODY_MB` caps the body, and `VLM_MAX_IMAGE_PIXELS` / `VLM_MAX_TOTAL_PIXELS` cap each image's pixels and a request's total, checked from the image headers before anything is decoded. They refuse what would exhaust the server's own memory; they do not stop a request that overruns the context from reaching the SDK. See the [settings table](#configuration-env_configjson).
 
 `VLM_VISION_BUDGET_GUARD` checks vision tokens against the text-generator's `context.size` **before** the request reaches the NPU, and a request that does not fit comes back as a `400`, naming how many steps fit and why.
 

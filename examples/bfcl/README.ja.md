@@ -131,8 +131,8 @@ python3 -m venv /tmp/bfclvenv
 
 BFCL は自前のモデルID(`Qwen/Qwen3-4B-Instruct-2507`)を送りますが、これは
 どのスロット名とも一致しないため、**プライマリスロットに載っているものが応答します**。
-`run_bfcl.sh` はそれを表示します。**パイプラインの他のどこもこれを教えてくれない**ので、
-必ず確認してください。
+`run_bfcl.sh` はそれを表示します。**BFCL 自身は決して教えてくれない**ので、必ず確認してください。
+サーバのログにも、プライマリスロットに回した未知のモデルとして 1 回だけ出ます。
 
 ```bash
 curl -sS "$BASE_URL/v1/server/status" | python3 -m json.tool
