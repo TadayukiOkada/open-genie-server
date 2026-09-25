@@ -478,6 +478,16 @@ def test_collector_greedy_records_logsoftmax():
     assert [t for t, _ in top] == [1, 2]  # top-2, descending
 
 
+def test_collector_top_k_larger_than_the_vocab_means_no_limit():
+    """argpartition used to raise, and the sampler callback then emitted
+    token 0 at every step."""
+    from genie_server.logprobs import LogprobsCollector
+
+    c = LogprobsCollector(top_n=0, temperature=0.5, top_k=100, seed=0)
+    addr, n, _keep = _fake_logits([0.0, 0.0, 9.0, 0.0])
+    assert c.on_logits(addr, n, 1) == [2]
+
+
 def test_collector_force_mode():
     from genie_server.logprobs import LogprobsCollector
 
