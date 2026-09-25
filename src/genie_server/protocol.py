@@ -65,6 +65,19 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _validation(request: Request, exc: RequestValidationError):
         return openai_error(400, str(exc), "invalid_request_error")
 
+    # Anything else is a bug in this server. Without this, Starlette answers
+    # with a plain-text "Internal Server Error" that an OpenAI client cannot
+    # parse. The exception text stays out of the reply -- it can carry paths
+    # and prompt fragments -- and in the log: Starlette re-raises after this
+    # handler, so the server logs the full traceback as before. A failure
+    # after a stream has started cannot be answered this way; the headers are
+    # already out.
+    @app.exception_handler(Exception)
+    async def _unexpected(request: Request, exc: Exception):
+        return openai_error(
+            500, f"Internal server error ({type(exc).__name__}); the details "
+                 "are in the server log.", "server_error")
+
 
 def _is_json_media_type(content_type: str) -> bool:
     media_type = content_type.split(";", 1)[0].strip().lower()

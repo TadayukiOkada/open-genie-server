@@ -1884,3 +1884,40 @@ def test_a_lora_alpha_is_checked_against_the_model_that_holds_the_lock(state):
     assert result["r"].status_code == 400
     assert "declares no LoRA adapters" in result["r"].json()["error"]["message"]
     assert state.lib.lora_strengths == []
+
+
+# ---------------------------------------------------------------- unexpected errors
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/lora/apply", {"lora_adapter_name": "a"}),
+])
+def test_an_unexpected_exception_is_still_an_openai_error(state, monkeypatch,
+                                                         path, body):
+    """A bug in the server must not answer in plain text, and must not hand
+    the exception's text (a path, a piece of a prompt) to the client."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("/secret/model/dir and a prompt fragment")
+
+    monkeypatch.setattr(state.manager, "select_for_request", boom)
+    client = TestClient(create_app(state), raise_server_exceptions=False)
+    r = client.post(path, json=body)
+    assert r.status_code == 500
+    assert r.headers["content-type"] == "application/json"
+    err = r.json()["error"]
+    assert err["type"] == "server_error"
+    assert err["message"] == ("Internal server error (RuntimeError); the "
+                              "details are in the server log.")
+
+
+def test_an_unexpected_exception_still_reaches_the_server_log(state,
+                                                              monkeypatch):
+    """Starlette re-raises after the handler, which is what makes uvicorn
+    log the traceback. Keeping the text out of the reply must not lose it."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("kept for the log")
+
+    monkeypatch.setattr(state.manager, "select_for_request", boom)
+    client = TestClient(create_app(state))   # raise_server_exceptions=True
+    with pytest.raises(RuntimeError, match="kept for the log"):
+        client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})

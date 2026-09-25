@@ -44,6 +44,13 @@
 
 ### Fixed
 
+- **An unexpected exception is an OpenAI error, not plain text.** A bug
+  reached by a request (a string `n`, a list for `chat_template_kwargs`)
+  answered `500` with the body `Internal Server Error` as `text/plain`, which
+  an OpenAI client cannot parse, though the API documents the error envelope
+  for every failure. It is now the envelope with `type: "server_error"` and a
+  message naming only the exception's type. The traceback is still in the
+  server log.
 - **`/v1/lora/strength` refuses an alpha the model does not have.** The SDK
   answers success for any name: on an engine with an inference scheduler, a
   name it does not know is kept as a CB multi-LoRA adapter-order name, and no
