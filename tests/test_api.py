@@ -1131,3 +1131,31 @@ def test_the_alias_still_routes(client):
         "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8})
     assert unknown.status_code == 200          # unknown ids fall back to slot 0
     assert unknown.json()["model"] == "qwen3-test"
+
+
+def test_waiting_for_a_slot_lock_does_not_block_the_event_loop(state):
+    """A management call queued behind a busy slot must not freeze /health
+    (H-1): the lock wait runs on a worker thread, not the event loop."""
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+    from genie_server.app import create_app
+
+    slot = state.manager.slots[0]
+    # `with` shares one event loop across requests, as uvicorn does.
+    with TestClient(create_app(state)) as c:
+        slot.lock.acquire()
+        result = {}
+        t = threading.Thread(target=lambda: result.update(
+            r=c.post("/v1/lora/apply", json={"lora_adapter_name": "a"})))
+        t.start()
+        try:
+            time.sleep(0.3)  # the apply is now waiting on the lock
+            t0 = time.monotonic()
+            assert c.get("/health").status_code == 200
+            assert time.monotonic() - t0 < 1.0
+        finally:
+            slot.lock.release()
+        t.join(timeout=5)
+        assert result["r"].status_code == 200
