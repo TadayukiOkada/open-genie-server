@@ -94,6 +94,18 @@
   typo used to reach the wrong model without a trace. Any name other than
   `genie-local` that matches no loaded model is now logged once at WARNING,
   together with the models that are loaded.
+- **Small fixes from the code review's Low list:**
+  - `POST /v1/prefix/warmup` and `GET|POST /v1/server/performance_policy`
+    take `slot`, as the other slot-addressed endpoints do. With `model`
+    alone, the second of two slots holding the same model was out of reach.
+  - Prompt scoring (`echo` + `logprobs`) reads `max_completion_tokens` before
+    `max_tokens`, like every other path; it used to do the reverse.
+  - A multi-prompt completion checks every prompt against the context
+    before running any, instead of discovering the one that does not fit
+    after the prompts ahead of it had run.
+  - `--port 0` binds a free port instead of falling back to the configured
+    one, and `--host ""` is passed through.
+  - An exception in a VLM text callback is logged instead of printed.
 - **A Qwen3-VL bundle whose `temporal_patch_size` is not 2 is refused at
   startup.** The patchify stacks exactly two frames, but `metadata.json`
   could set any value. The slot then loaded and failed a reshape with a

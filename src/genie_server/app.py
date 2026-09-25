@@ -329,6 +329,21 @@ async def _sse_stream(
         raise
 
 
+async def _drain_until_done(gen: Generation, timeout_s: float) -> None:
+    """Waits up to timeout_s for an aborted generation's worker to finish,
+    by reading its queue up to the final None it puts after releasing the
+    slot lock. On the loop, not in a thread: to_thread(gen.done.wait) held a
+    default-executor thread per disconnected client for up to the whole
+    timeout, and that pool also serves the handlers' other blocking work."""
+    async def drain() -> None:
+        while await gen.queue.get() is not None:
+            pass
+    try:
+        await asyncio.wait_for(drain(), timeout_s)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def _sse_body(
     request: Request,
     state: ServerState,
@@ -353,9 +368,7 @@ async def _sse_body(
             if abortable:
                 logger.info(f"Client disconnected; ABORT [{gen.request_id}]")
                 gen.abort()
-                deadline = time.monotonic() + state.config.abort_drain_timeout_s
-                while not gen.done.is_set() and time.monotonic() < deadline:
-                    await asyncio.sleep(0.05)
+                await _drain_until_done(gen, state.config.abort_drain_timeout_s)
             else:
                 logger.info(f"Client disconnected [{gen.request_id}]; VLM inference "
                             "continues server-side (no abort API for GenieNode)")
@@ -869,10 +882,9 @@ def create_app(state: ServerState) -> FastAPI:
             # trailing entry off again), so 1 is part of the shape this mode
             # exists to serve. Anything beyond that is a generation request
             # wearing a scoring request's clothes.
-            extra_tokens = body.get("max_tokens")
-            if extra_tokens is None:
-                extra_tokens = body.get("max_completion_tokens")
-            extra_tokens = int(extra_tokens or 0)
+            # params already resolved max_completion_tokens over max_tokens,
+            # the order every other path uses.
+            extra_tokens = params.max_tokens or 0
             if extra_tokens not in (0, 1):
                 raise InvalidRequestError(
                     "echo+logprobs is a prompt-scoring mode; max_tokens must "
@@ -922,11 +934,14 @@ def create_app(state: ServerState) -> FastAPI:
                 ),
                 media_type="text/event-stream")
 
-        # Non-streaming: prompts run sequentially, one choice per prompt.
+        # Non-streaming: prompts run sequentially, one choice per prompt. All
+        # of them are checked first, so a prompt that does not fit is refused
+        # before any of the ones ahead of it has been run for nothing.
+        for prompt, _ids in prompts:
+            _require_context_room(slot, prompt)
         request_id = f"cmpl-{uuid.uuid4()}"
         choices, total_pt, total_ct = [], 0, 0
         for index, (prompt, _ids) in enumerate(prompts):
-            _require_context_room(slot, prompt)
             req_params = replace(params, max_tokens=engine.default_max_tokens(
                 slot, prompt, params.max_tokens, cfg.default_max_tokens_cap))
             collector = None
@@ -1280,10 +1295,10 @@ def create_app(state: ServerState) -> FastAPI:
     @app.post("/v1/prefix/warmup")
     async def warmup_prefix_cache(request: Request):
         """Pre-populates the prefix KV cache for a given system prompt, on
-        the slot selected via 'model'. Returns 200 when done, 202 if still
-        running (poll /v1/prefix/cache)."""
+        the slot selected via 'slot', or else 'model'. Returns 200 when done,
+        202 if still running (poll /v1/prefix/cache)."""
         body = await read_json_body(request)
-        slot = manager.select(body.get("model", KNOWN_MODEL_ID))
+        slot = manager.select_for_request(body, body.get("model", KNOWN_MODEL_ID))
         manager.require_loaded(slot)
         epoch = slot.epoch
         system_prompt = body.get("system_prompt", "")
@@ -1571,8 +1586,11 @@ def create_app(state: ServerState) -> FastAPI:
 
     @app.get("/v1/server/performance_policy")
     async def get_performance_policy(request: Request):
-        """?model= selects the slot."""
-        slot = manager.select(request.query_params.get("model", ""))
+        """?slot= selects the slot, ?model= falls back to model-name
+        routing."""
+        qp = request.query_params
+        slot = manager.select_for_request({"slot": qp.get("slot", "")},
+                                          qp.get("model", ""))
         manager.require_loaded(slot)
         try:
             val = await run_with_slot_lock(
@@ -1586,10 +1604,10 @@ def create_app(state: ServerState) -> FastAPI:
 
     @app.post("/v1/server/performance_policy")
     async def set_performance_policy(request: Request):
-        """Body: {"model": "...", "policy": "burst"} — pin to "burst" before a
-        timed benchmark run for reproducible numbers."""
+        """Body: {"slot" or "model": "...", "policy": "burst"} — pin to
+        "burst" before a timed benchmark run for reproducible numbers."""
         body = await read_json_body(request)
-        slot = manager.select(body.get("model", ""))
+        slot = manager.select_for_request(body, body.get("model", ""))
         manager.require_loaded(slot)
         policy = body.get("policy", "")
         if policy not in PERFORMANCE_POLICIES:

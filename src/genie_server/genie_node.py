@@ -11,7 +11,10 @@ time). For standalone use, load() can load it fresh instead.
 """
 import ctypes as C
 import json
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- constants
 
@@ -209,8 +212,8 @@ class Node:
             try:
                 fn(feed(response, code in TERMINAL_SENTENCE_CODES),
                    SENTENCE_CODE.get(code, str(code)), got_bytes=bool(response))
-            except Exception as e:                     # never let an exception cross into C
-                print(f"[genie_node callback error] {e}")
+            except Exception:                          # never let an exception cross into C
+                logger.exception("genie_node text callback raised")
             return GENIE_STATUS_SUCCESS
 
         self._cb_ref = TEXT_CALLBACK(_trampoline)      # keep a reference alive

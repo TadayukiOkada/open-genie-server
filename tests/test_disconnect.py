@@ -240,3 +240,34 @@ def test_sse_stream_completes_normally_when_the_client_stays(state):
         assert chunks[-1] == "data: [DONE]\n\n"
         assert any("hello" in c for c in chunks)
     run(body())
+
+
+def test_the_abort_drain_waits_on_the_queue_not_in_a_thread(state, monkeypatch):
+    """to_thread(gen.done.wait) held a default-executor thread per
+    disconnected client for up to abort_drain_timeout_s; that pool also
+    serves the handlers' other blocking work. The drain reads the queue up
+    to the worker's final None instead, skipping tokens still queued."""
+    from genie_server import app as app_mod
+
+    def no_threads(*a, **k):
+        raise AssertionError("the drain must not use a thread")
+
+    monkeypatch.setattr(app_mod.asyncio, "to_thread", no_threads)
+
+    async def body():
+        gen = Generation("req-drain", state.manager.slots[0], state.lib)
+        gen.put_threadsafe("late token")
+
+        def worker_finishes():
+            gen.put_threadsafe(None)
+            gen.done.set()
+
+        asyncio.get_running_loop().call_later(0.05, worker_finishes)
+        await asyncio.wait_for(app_mod._drain_until_done(gen, 5.0), 1.0)
+        assert gen.done.is_set()
+
+        # A worker that never finishes: the drain gives up at its timeout.
+        stuck = Generation("req-stuck", state.manager.slots[0], state.lib)
+        await app_mod._drain_until_done(stuck, 0.05)
+        assert not stuck.done.is_set()
+    run(body())

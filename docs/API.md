@@ -205,7 +205,7 @@ curl "$base_url/v1/server/idle?slot=chat"
 
 ### GET /v1/server/performance_policy
 
-Gets the current `Genie_PerformancePolicy_t` (`?model=` selects the slot; non-blocking best-effort, same as `/v1/lora/current`, which also takes `?slot=`).
+Gets the current `Genie_PerformancePolicy_t` (`?slot=` or `?model=` selects the slot; non-blocking best-effort, same as `/v1/lora/current`).
 
 ```json
 {"slot": "chat", "policy": "balanced", "raw_value": 40, "live": true}
@@ -215,7 +215,7 @@ This reports what the SDK was last told, not what the hardware is doing — the 
 
 ### POST /v1/server/performance_policy
 
-Sets the performance policy. `model` selects the slot. Intended usage: pin to `burst` before running a benchmark, then restore afterward.
+Sets the performance policy. `slot` or `model` selects the slot. Intended usage: pin to `burst` before running a benchmark, then restore afterward.
 
 **Whether it changes anything is target-dependent, and on at least one target it changes nothing at all** — see [Performance policy](./MANUAL.md#performance-policy).
 
@@ -302,7 +302,7 @@ Deletes the cache entry for the given key. `404` if it doesn't exist, `400` if `
 
 ### POST /v1/prefix/warmup
 
-Pre-generates the prefix KV cache for a given system prompt. `model` selects the slot.
+Pre-generates the prefix KV cache for a given system prompt. `slot` or `model` selects the slot.
 
 ```bash
 curl -X POST $base_url/v1/prefix/warmup \
@@ -355,9 +355,8 @@ same model directory are indistinguishable by model name**, and the second one
 is reachable only by slot. If you never load the same model twice, `model`
 alone is enough.
 
-Two GETs predate the rule and accept only one of the two: `/v1/server/idle`
-takes `?slot=` and not `?model=`, and `GET /v1/server/performance_policy`
-takes `?model=` and not `?slot=`. Everything else accepts both.
+One GET predates the rule and accepts only one of the two: `/v1/server/idle`
+takes `?slot=` and not `?model=`. Everything else accepts both.
 
 ## Models and LoRA
 
