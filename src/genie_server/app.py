@@ -1281,6 +1281,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     detail=f"GenieDialog_applyLora failed: {ret}")
             # Read back from the SDK rather than trust the request blindly.
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
+            slot.lora_strengths = {}
             slot.epoch += 1  # the prefix-cache namespace just changed
 
         await _admin_with_slot_lock(request, slot, _apply, cfg.inference_timeout_s)
@@ -1304,6 +1305,11 @@ def create_app(state: ServerState) -> FastAPI:
             if ret != STATUS_SUCCESS:
                 raise HTTPException(status_code=500,
                                     detail=f"GenieDialog_setLoraStrength failed: {ret}")
+            # A prefix KV computed at the old strength is wrong at the new one,
+            # so the strength is part of the cache namespace, and a request
+            # planned against the old one must not run (see Slot.epoch).
+            slot.lora_strengths[f"{engine_role}/{tensor_name}"] = float(alpha)
+            slot.epoch += 1
 
         await _admin_with_slot_lock(request, slot, _set, cfg.inference_timeout_s)
         return {"status": "applied", "slot": slot.name, "engine": engine_role,
@@ -1327,6 +1333,7 @@ def create_app(state: ServerState) -> FastAPI:
                     status_code=500,
                     detail=f"GenieDialog_releaseLoraMemory failed: {ret}")
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
+            slot.lora_strengths = {}
             slot.epoch += 1
 
         await _admin_with_slot_lock(request, slot, _release, cfg.inference_timeout_s)

@@ -28,6 +28,13 @@
   that finds it moved once it holds the lock is refused with `409` (an `error`
   event on a stream) and should be resent. `POST /v1/prefix/warmup` checks the
   same, so it cannot save a KV under a stale key.
+- **A LoRA strength change no longer reuses the prefix KV of the old
+  strength.** The prefix-cache namespace named the slot, model and adapter
+  but not the alphas set through `/v1/lora/strength`. A prefix saved at one
+  strength was restored at another, and generation continued from the wrong
+  KV. The strengths are now part of the namespace, and a strength change
+  bumps the slot's epoch like an adapter change does. With no strength set,
+  the namespace, and so every existing cache key, is unchanged.
 - **A request no longer inherits the previous request's sampler settings.**
   The SDK merges partial sampler updates, and a parameter the request and the
   model config both left out was simply not sent, so it kept the last value:

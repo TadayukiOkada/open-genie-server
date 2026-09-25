@@ -210,6 +210,11 @@ class VLMSlot:
     # segment, or None; see __init__.
     text_encoder_bos = None
 
+    # engine.Generation records its slot's epoch (see Slot.epoch). A VLM slot
+    # has no model switch or LoRA, so what a request was planned against
+    # never changes and this stays 0.
+    epoch = 0
+
     def __init__(self, name: str, device_id: int | None, model_root: Path,
                  spec_name: str | None, htp_ext_cache_dir: Path, max_tokens: int = 0,
                  log_handle=None, pipeline_script: str | None = None,

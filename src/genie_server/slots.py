@@ -110,6 +110,12 @@ class Slot:
         self.sampler_defaults: dict = {}
         self.active_model_id = model_root.name
         self.active_lora_adapter = ""
+        # Alphas set through /v1/lora/strength since the adapter was applied,
+        # {"<engine>/<tensor>": alpha}. Part of cache_namespace: a prefix KV
+        # computed at one strength is wrong at another. Cleared whenever the
+        # adapter changes, on the assumption that applying or releasing an
+        # adapter puts its strengths back to the bundle's own values.
+        self.lora_strengths: dict[str, float] = {}
         # Bumped, under lock, whenever what a request was planned against
         # changes: the dialog handle, the model (template, context size,
         # tokenizer) or the applied LoRA adapter. A request records it when it
@@ -145,6 +151,7 @@ class Slot:
         self.model_root = assets.model_dir
         self.active_model_id = assets.model_dir.name
         self.active_lora_adapter = ""
+        self.lora_strengths = {}
         self.epoch += 1
 
     @property
@@ -154,8 +161,14 @@ class Slot:
 
     @property
     def cache_namespace(self) -> str:
-        """Current (slot, model, LoRA) identity — see PrefixCache.key."""
-        return f"{self.name}|{self.active_model_id}|{self.active_lora_adapter}"
+        """Current (slot, model, LoRA adapter, LoRA strengths) identity — see
+        PrefixCache.key. With no strength set it is the same string as before
+        strengths were part of it, so existing cache entries stay reachable."""
+        ns = f"{self.name}|{self.active_model_id}|{self.active_lora_adapter}"
+        if self.lora_strengths:
+            ns += "|" + ",".join(f"{k}={v!r}"
+                                 for k, v in sorted(self.lora_strengths.items()))
+        return ns
 
     def count_tokens(self, text: str) -> int:
         """Exact token count via the model tokenizer; whitespace fallback."""
