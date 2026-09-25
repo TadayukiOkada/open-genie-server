@@ -3161,6 +3161,7 @@ def test_cli_passes_explicit_host_and_port_through(monkeypatch, argv,
                                                    expected):
     import sys
     import types
+
     from genie_server import bootstrap, cli
     from genie_server.config import ServerConfig
     ran = {}

@@ -212,8 +212,8 @@ class Node:
             try:
                 fn(feed(response, code in TERMINAL_SENTENCE_CODES),
                    SENTENCE_CODE.get(code, str(code)), got_bytes=bool(response))
-            except Exception as e:                     # never let an exception cross into C
-                logger.error(f"genie_node text callback raised: {e!r}")
+            except Exception:                          # never let an exception cross into C
+                logger.exception("genie_node text callback raised")
             return GENIE_STATUS_SUCCESS
 
         self._cb_ref = TEXT_CALLBACK(_trampoline)      # keep a reference alive

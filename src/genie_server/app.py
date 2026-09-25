@@ -333,6 +333,21 @@ async def _sse_stream(
         raise
 
 
+async def _drain_until_done(gen: Generation, timeout_s: float) -> None:
+    """Waits up to timeout_s for an aborted generation's worker to finish,
+    by reading its queue up to the final None it puts after releasing the
+    slot lock. On the loop, not in a thread: to_thread(gen.done.wait) held a
+    default-executor thread per disconnected client for up to the whole
+    timeout, and that pool also serves the handlers' other blocking work."""
+    async def drain() -> None:
+        while await gen.queue.get() is not None:
+            pass
+    try:
+        await asyncio.wait_for(drain(), timeout_s)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def _sse_body(
     request: Request,
     state: ServerState,
@@ -357,8 +372,7 @@ async def _sse_body(
             if abortable:
                 logger.info(f"Client disconnected; ABORT [{gen.request_id}]")
                 gen.abort()
-                await asyncio.to_thread(gen.done.wait,
-                                        state.config.abort_drain_timeout_s)
+                await _drain_until_done(gen, state.config.abort_drain_timeout_s)
             else:
                 logger.info(f"Client disconnected [{gen.request_id}]; VLM inference "
                             "continues server-side (no abort API for GenieNode)")
