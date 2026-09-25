@@ -93,7 +93,9 @@
   primary slot, which is what lets `lm_eval`'s fixed placeholder work, but a
   typo used to reach the wrong model without a trace. Any name other than
   `genie-local` that matches no loaded model is now logged once at WARNING,
-  together with the models that are loaded.
+  together with the models that are loaded. An image request that falls
+  back to the first VLM slot is logged the same way. Past 256 distinct names
+  it says so once and stops remembering them.
 - **Small fixes from the code review's Low list:**
   - `POST /v1/prefix/warmup` and `GET|POST /v1/server/performance_policy`
     take `slot`, as the other slot-addressed endpoints do. With `model`
