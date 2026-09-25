@@ -673,6 +673,13 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
     def worker() -> None:
         try:
             with vslot.lock:
+                if generation.aborted.is_set():
+                    # The caller gave up (a 504, or a client that left) while
+                    # this waited for the slot. There is no abort once the
+                    # pipeline runs, but it need not start at all.
+                    logger.info(f"[{vslot.name}] Request abandoned while waiting "
+                                f"for the slot; not running it [{generation.request_id}]")
+                    return
                 vslot.text_generator.set_text_callback(
                     vlm_layout.TEXT_GENERATOR_TEXT_OUTPUT_IO, on_text)
                 sampler_params = capi.make_sampler_params(

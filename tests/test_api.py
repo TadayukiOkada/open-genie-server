@@ -1283,3 +1283,149 @@ def test_a_request_whose_client_left_does_not_run_once_it_gets_the_lock(state):
     executor.shutdown(wait=True)   # the worker has now had the lock
     assert ran == []
     assert not slot.lock.locked()
+
+
+def _stall_after_partial_output(state, abort_status=None, abort_code=None):
+    """Makes the fake SDK emit 'partial ' and then hang until signalled.
+
+    By default an abort returns WARNING_ABORTED, as the runtimes measured so
+    far do. abort_status/abort_code model a runtime that instead reports it
+    through the callback (SENTENCE_ABORT) and returns SUCCESS."""
+    from genie_server import capi
+
+    released = threading.Event()
+    lib = state.lib
+
+    def query(handle, text, sentence_code, on_token):
+        on_token("partial ", capi.SENTENCE_CONTINUE)
+        released.wait(5)
+        if abort_code is not None:
+            on_token("", abort_code)
+        return capi.WARNING_ABORTED if abort_status is None else abort_status
+
+    def signal_abort(handle):
+        lib.abort_signals += 1
+        released.set()
+        return 0
+
+    lib.query = query
+    lib.signal_abort = signal_abort
+    return released
+
+
+def _short_timeout_client(state, timeout_s=0.2):
+    """A client whose app was built with a short inference_timeout_s (the app
+    captures the config at creation, so it cannot be changed afterwards)."""
+    import dataclasses
+
+    state.config = dataclasses.replace(state.config, inference_timeout_s=timeout_s)
+    return TestClient(create_app(state))
+
+
+def _slow(lib, name, seconds, only=None):
+    """Makes lib.<name> sleep first, e.g. to let the watchdog fire during
+    setup or teardown rather than during the query."""
+    orig = getattr(lib, name)
+
+    def slow(*args):
+        if only is None or only(*args):
+            time.sleep(seconds)
+        return orig(*args)
+
+    setattr(lib, name, slow)
+
+
+CHAT = {"messages": [{"role": "user", "content": "hi"}]}
+
+
+def test_inference_timeout_is_an_error_not_a_stop(state):
+    """H-2: a watchdog abort used to come back as 200 / finish_reason "stop"
+    with the truncated text."""
+    client = _short_timeout_client(state)
+    _stall_after_partial_output(state)
+    r = client.post("/v1/chat/completions", json=CHAT)
+    assert r.status_code == 504
+    assert "timed out" in r.json()["error"]["message"]
+
+
+def test_inference_timeout_mid_stream_emits_an_error_event(state):
+    client = _short_timeout_client(state)
+    _stall_after_partial_output(state)
+    r = client.post("/v1/chat/completions", json={**CHAT, "stream": True})
+    body = r.text
+    assert '"error"' in body and "timed out" in body
+    assert '"finish_reason": "stop"' not in body
+
+
+def test_a_timeout_reported_through_the_callback_is_still_a_timeout(state):
+    """A runtime may signal the abort with a SENTENCE_ABORT callback and
+    return SUCCESS instead of WARNING_ABORTED. Both paths must still see a
+    timeout — before, the stream said "stop" there."""
+    from genie_server import capi
+
+    client = _short_timeout_client(state)
+
+    def stall():   # a fresh stall per request: the first one's is spent
+        _stall_after_partial_output(state, abort_status=capi.STATUS_SUCCESS,
+                                    abort_code=capi.SENTENCE_ABORT)
+
+    stall()
+    assert client.post("/v1/chat/completions", json=CHAT).status_code == 504
+    stall()
+    r = client.post("/v1/chat/completions", json={**CHAT, "stream": True})
+    assert '"error"' in r.text and "timed out" in r.text
+    assert '"finish_reason": "stop"' not in r.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_timeout_before_the_query_starts_is_an_error_on_both_paths(state, stream):
+    """The watchdog can fire during setup (a slow reset or prefix restore).
+    The sync path answered 504 but the stream sent an empty "stop"."""
+    client = _short_timeout_client(state)
+    _slow(state.lib, "reset", 0.5)
+    r = client.post("/v1/chat/completions", json={**CHAT, "stream": stream})
+    if stream:
+        assert '"error"' in r.text and "timed out" in r.text
+        assert '"finish_reason": "stop"' not in r.text
+    else:
+        assert r.status_code == 504
+    assert state.lib.queries == []          # the query never ran
+
+
+def test_a_timer_that_fires_after_a_normal_finish_is_not_a_timeout(state):
+    """The query finished; the timer went off while the engine was still
+    restoring the basic sampler (before it cancels the watchdog). The output
+    is complete, so the answer is a 200, not a 504. (The delay stays under
+    the sync path's overall wait, 2x inference_timeout_s.)"""
+    client = _short_timeout_client(state, timeout_s=0.5)
+    _slow(state.lib, "apply_sampler_params", 0.8,
+          only=lambda handle, params: params.get("type") == "basic")
+    r = client.post("/v1/chat/completions", json={**CHAT, "logprobs": True})
+    assert r.status_code == 200, r.json()
+    assert r.json()["choices"][0]["finish_reason"] in ("stop", "length")
+
+
+def test_a_client_abort_is_not_reported_as_a_timeout(state):
+    """Only the watchdog's abort is a failure. A client abort ends the query
+    with the same WARNING_ABORTED, and must leave no timeout verdict."""
+    import asyncio
+
+    from genie_server import engine
+
+    _stall_after_partial_output(state)
+    slot = state.manager.slots[0]
+
+    async def main():
+        gen = engine.Generation("req-client-abort", slot, state.lib)
+        engine.start_generation(state.lib, slot, engine.QueryPlan(full_prompt="hi"),
+                                engine.GenParams(), gen, None,
+                                inference_timeout_s=10)
+        first = await asyncio.wait_for(gen.queue.get(), 5)
+        gen.abort()                         # the client, not the watchdog
+        rest = await gen.collect_text(5)
+        return gen, first + rest
+
+    gen, text = asyncio.run(main())
+    assert text == "partial "
+    assert not gen.timed_out and not gen.timeout_error
+    assert gen.error is None

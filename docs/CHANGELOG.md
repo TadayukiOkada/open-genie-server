@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- **An inference timeout is an error, not a normal stop.** When the watchdog
+  (`INFERENCE_TIMEOUT`) cut a query short, the SDK reported it as it reports
+  any abort, and the truncated text came back as a success: HTTP 200 with
+  `finish_reason: "stop"` and no error event on a stream. `lm_eval` scored
+  such a sample as finished. A timed-out request is now HTTP `504` on the
+  non-streaming path, and an `error` event with no `"stop"` chunk on a
+  stream. This includes a timeout that fires before the query starts, for
+  example during a slow prefix restore. A timer that goes off just after the
+  query already finished normally is not a timeout: that output is complete,
+  and it is returned as before.
+
+### Fixed
+
+- **Waiting for a slot no longer freezes the server.** `/v1/models/switch`,
+  the `/v1/lora/*` calls and `POST /v1/server/performance_policy` waited for
+  the slot lock (up to 600 s for a switch) and ran the SDK call on the event
+  loop. While one waited, `/health` and token delivery on every other slot
+  stalled. They now run on worker threads. Each call re-checks the slot for
+  a model once it holds the lock, and a call whose client disconnected while
+  it waited is not run.
+- **A request that answered `504` stops using its slot.** The generation is
+  now aborted, so it no longer waits for the slot lock and then runs to the
+  end with nobody listening. A VLM request abandoned before it gets its slot
+  never starts. There is still no way to stop a VLM request once it is
+  running.
+
 ## 1.4.0 — Ubuntu QAIRT-package targets, and an explicit error when logprobs can't be scored
 
 Adds a third target platform, `linux-ubuntu`, alongside `linux-oe` and
