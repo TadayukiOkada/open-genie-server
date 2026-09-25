@@ -9,6 +9,7 @@ prototype GenieLib itself binds, so every call goes through ctypes' own
 argument conversion, exactly as it does against libGenie.so.
 """
 import ctypes
+import os
 import re
 import types
 from pathlib import Path
@@ -92,14 +93,17 @@ def test_every_function_genielib_calls_has_argtypes():
 def test_every_function_genie_node_calls_has_argtypes():
     src = (SRC / "genie_node.py").read_text()
     used = _calls_in(src, r"_get_lib\(\)\.(\w+)\(")
-    bound = _calls_in(src, r'\("(\w+)", \[') | {"GenieNode_setTextCallback"}
+    # The signature table, plus any function given argtypes on its own
+    # (GenieNode_setTextCallback, whose argtype is the callback type).
+    bound = (_calls_in(src, r'\("(\w+)", \[')
+             | _calls_in(src, r"lib\.(\w+)\.argtypes\s*="))
     assert used and used <= bound, f"called without argtypes: {sorted(used - bound)}"
 
 
 def _header_arities(include_dir: Path) -> dict[str, int]:
     arity = {}
     for header in include_dir.glob("Genie*.h"):
-        text = re.sub(r"/\*.*?\*/|//[^\n]*", "", header.read_text(), flags=re.S)
+        text = re.sub(r"/\*.*?\*/|//[^\n]*", "", header.read_text(), flags=re.DOTALL)
         for name, params in re.findall(
                 r"Genie_Status_t\s+(Genie\w+)\s*\(([^;{]*?)\)\s*;", text):
             params = params.strip()
@@ -108,6 +112,11 @@ def _header_arities(include_dir: Path) -> dict[str, int]:
 
 
 def _sdk_include_dir() -> Path | None:
+    """QAIRT_SDK_ROOT (an unpacked SDK, as env_config.json points at), else
+    the newest /opt/qcom/aistack/qairt/* install."""
+    env_root = os.environ.get("QAIRT_SDK_ROOT")
+    if env_root and (Path(env_root) / "include" / "Genie").is_dir():
+        return Path(env_root) / "include" / "Genie"
     for root in sorted(Path("/opt/qcom/aistack/qairt").glob("*"), reverse=True):
         inc = root / "include" / "Genie"
         if inc.is_dir():
@@ -366,3 +375,187 @@ def test_set_text_sends_utf8_with_its_byte_length(node_stub):
                       received.append(ctypes.string_at(ptr, size)))
     genie_node.Node({"n": {}}).set_text(next(iter(genie_node.NODE_IO)), "東京")
     assert received == ["東京".encode()]
+
+
+# ---------------------------------------------------------------- the rest of GenieLib
+
+def test_create_logger_passes_the_level_code_and_returns_the_handle(stub, lib):
+    stub.install("GenieLog_create",
+                 lambda cfg, cb, level, out: _write_handle(out, 0x31))
+    handle = lib.create_logger("warn")
+    assert handle.value == 0x31
+    (cfg, cb, level, _), = stub.called("GenieLog_create")
+    assert (cfg, cb, level) == (None, None, capi.LOG_LEVELS["warn"])
+    with pytest.raises(ValueError, match="Unknown Genie log level"):
+        lib.create_logger("loud")
+    assert len(stub.called("GenieLog_create")) == 1   # refused before C
+
+
+def test_create_logger_and_profile_refuse_a_null_handle(stub, lib):
+    stub.install("GenieLog_create", lambda cfg, cb, level, out: 0)
+    stub.install("GenieProfile_create", lambda cfg, out: 0)
+    with pytest.raises(RuntimeError, match="GenieLog_create"):
+        lib.create_logger("error")
+    with pytest.raises(RuntimeError, match="GenieProfile_create"):
+        lib.create_profile()
+
+
+def test_create_profile_returns_the_handle(stub, lib):
+    stub.install("GenieProfile_create", lambda cfg, out: _write_handle(out, 0x41))
+    assert lib.create_profile().value == 0x41
+    (cfg, _), = stub.called("GenieProfile_create")
+    assert cfg is None
+
+
+@pytest.mark.parametrize("stop, payload", [
+    (None, b"{}"), ([], b"{}"),
+    (["</s>", "東"], b'{"stop-sequence": ["</s>", "\\u6771"]}'),
+])
+def test_stop_sequences_go_out_as_a_json_object(stub, lib, stop, payload):
+    """A bare JSON array parses but sets nothing, and an empty string is a
+    parse error in the SDK; "{}" is what clears."""
+    stub.install("GenieDialog_setStopSequence", lambda h, p: 0)
+    lib.set_stop_sequences(capi.DialogHandle(1), stop)
+    (_, sent), = stub.called("GenieDialog_setStopSequence")
+    assert sent == payload
+
+
+@pytest.mark.parametrize("method, fn", [
+    ("apply_lora", "GenieDialog_applyLora"),
+    ("release_lora_memory", "GenieDialog_releaseLoraMemory"),
+])
+def test_lora_calls_send_bytes_and_reset_only_on_success(stub, lib, method, fn):
+    stub.install(fn, lambda h, engine, adapter: 0 if adapter == b"good" else 5)
+    stub.install("GenieDialog_reset", lambda h: 0)
+    call = getattr(lib, method)
+    assert call(capi.DialogHandle(1), "primary", "good") == 0
+    (_, engine, adapter), = stub.called(fn)
+    assert (engine, adapter) == (b"primary", b"good")
+    assert len(stub.called("GenieDialog_reset")) == 1
+    assert call(capi.DialogHandle(1), "primary", "bad") == 5
+    assert len(stub.called("GenieDialog_reset")) == 1
+
+
+def test_performance_policy_round_trips_an_int(stub, lib):
+    stub.install("GenieDialog_setPerformancePolicy", lambda h, v: 0)
+    stored = {}
+
+    def get(h, out):
+        if "fail" in stored:
+            return 9
+        out[0] = 40
+        return 0
+
+    stub.install("GenieDialog_getPerformancePolicy", get)
+    assert lib.set_performance_policy(capi.DialogHandle(1), 30) == 0
+    (_, value), = stub.called("GenieDialog_setPerformancePolicy")
+    assert value == 30
+    assert lib.get_performance_policy(capi.DialogHandle(1)) == 40
+    stored["fail"] = True
+    assert lib.get_performance_policy(capi.DialogHandle(1)) is None
+
+
+def test_reset_abort_save_and_restore_pass_their_arguments(stub, lib):
+    for fn in ("GenieDialog_reset", "GenieDialog_signal", "GenieDialog_save",
+               "GenieDialog_restore"):
+        stub.install(fn, lambda *a: 0)
+    h = capi.DialogHandle(0x7)
+    lib.reset(h)
+    lib.signal_abort(h)
+    lib.save_state(h, "/tmp/kv/prefix_é.geniestate")
+    lib.restore_state(h, "/tmp/kv/prefix_é.geniestate")
+    assert [_value(a[0]) for a in stub.called("GenieDialog_reset")] == [0x7]
+    assert [a[1] for a in stub.called("GenieDialog_signal")] == [capi.ACTION_ABORT]
+    path = "/tmp/kv/prefix_é.geniestate".encode()
+    assert [a[1] for a in stub.called("GenieDialog_save")] == [path]
+    assert [a[1] for a in stub.called("GenieDialog_restore")] == [path]
+
+
+# ---------------------------------------------------------------- the rest of genie_node
+
+def test_node_sampler_reset_and_free(node_stub):
+    node_stub.install("GenieNode_create", lambda cfg, out: _write_handle(out, 0x20))
+    node_stub.install("GenieNode_getSampler", lambda h, out: _write_handle(out, 0x55))
+    node_stub.install("GenieNode_reset", lambda h: 0)
+    node_stub.install("GenieNode_free", lambda h: 0)
+    node = genie_node.Node({"n": {}})
+    assert node.get_sampler().value == 0x55
+    node.reset()
+    node.free()
+    node.free()                                     # idempotent
+    assert [_value(a[0]) for a in node_stub.called("GenieNode_free")] == [0x20]
+    assert node.handle is None
+
+
+def test_node_get_sampler_failure_is_raised(node_stub):
+    node_stub.install("GenieNode_create", lambda cfg, out: _write_handle(out, 0x20))
+    node_stub.install("GenieNode_getSampler", lambda h, out: -2)
+    with pytest.raises(genie_node.GenieStatusError, match="GenieNode_getSampler"):
+        genie_node.Node({"n": {}}).get_sampler()
+
+
+@pytest.fixture
+def pipeline_stub(node_stub):
+    node_stub.install("GeniePipelineConfig_createFromJson",
+                      lambda json_, out: _write_handle(out, 0x60))
+    node_stub.install("GeniePipelineConfig_free", lambda cfg: 0)
+    return node_stub
+
+
+def test_a_pipeline_is_created_wired_run_and_freed(pipeline_stub):
+    """The VLM path's own C calls: nodes added by handle, connections by IO
+    enum (WILDCARD included), execute with a NULL user pointer."""
+    handles = iter([0x21, 0x22])
+    pipeline_stub.install("GenieNode_create",
+                          lambda cfg, out: _write_handle(out, next(handles)))
+    pipeline_stub.install("GeniePipelineConfig_bindLogger", lambda cfg, log: 0)
+    pipeline_stub.install("GeniePipeline_create",
+                          lambda cfg, out: _write_handle(out, 0x70))
+    for fn in ("GeniePipeline_addNode", "GeniePipeline_connect",
+               "GeniePipeline_execute", "GeniePipeline_reset",
+               "GeniePipeline_free"):
+        pipeline_stub.install(fn, lambda *a: 0)
+    enc, gen = genie_node.Node({"enc": {}}), genie_node.Node({"gen": {}})
+
+    p = genie_node.Pipeline(log_handle=capi.LogHandle(0x9))
+    (json_arg, _), = pipeline_stub.called("GeniePipelineConfig_createFromJson")
+    assert json_arg == b"{}"
+    (cfg, log), = pipeline_stub.called("GeniePipelineConfig_bindLogger")
+    assert (_value(cfg), _value(log)) == (0x60, 0x9)
+    assert [_value(a[0]) for a in pipeline_stub.called("GeniePipelineConfig_free")] == [0x60]
+
+    p.add(enc)
+    p.add(gen)
+    assert [(_value(a[0]), _value(a[1]))
+            for a in pipeline_stub.called("GeniePipeline_addNode")] == [
+        (0x70, 0x21), (0x70, 0x22)]
+    p.connect(enc, "IMAGE_ENCODER_EMBEDDING_OUTPUT",
+              gen, "TEXT_GENERATOR_EMBEDDING_INPUT")
+    p.connect(enc, "WILDCARD", gen, "WILDCARD")
+    assert [tuple(_value(x) for x in a)
+            for a in pipeline_stub.called("GeniePipeline_connect")] == [
+        (0x70, 0x21, 201, 0x22, 1), (0x70, 0x21, 1000, 0x22, 1000)]
+    p.execute()
+    (handle, user), = pipeline_stub.called("GeniePipeline_execute")
+    assert (_value(handle), user) == (0x70, None)
+    p.reset()
+    p.free()
+    p.free()                                        # idempotent
+    assert len(pipeline_stub.called("GeniePipeline_free")) == 1
+
+
+def test_a_failed_pipeline_create_still_frees_its_config(pipeline_stub):
+    pipeline_stub.install("GeniePipeline_create", lambda cfg, out: -4)
+    with pytest.raises(genie_node.GenieStatusError, match="GeniePipeline_create"):
+        genie_node.Pipeline({"pipeline": {}})
+    (json_arg, _), = pipeline_stub.called("GeniePipelineConfig_createFromJson")
+    assert json_arg == b'{"pipeline": {}}'
+    assert len(pipeline_stub.called("GeniePipelineConfig_free")) == 1
+
+
+def test_a_failed_pipeline_step_names_what_failed(pipeline_stub):
+    pipeline_stub.install("GeniePipeline_create",
+                          lambda cfg, out: _write_handle(out, 0x70))
+    pipeline_stub.install("GeniePipeline_execute", lambda h, user: -1)
+    with pytest.raises(genie_node.GenieStatusError, match="execute"):
+        genie_node.Pipeline().execute()
