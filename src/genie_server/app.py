@@ -71,6 +71,54 @@ class ServerState:
 
 # ---------------------------------------------------------------- body parsing
 
+# The SDK reads the seed with std::stoi, and the logprobs sampler hands it to
+# numpy, which refuses a negative one.
+_MAX_SEED = 2**31 - 1
+
+
+def _number(body: dict, key: str, *, lo: float | None = None,
+            hi: float | None = None, integer: bool = False):
+    """body[key] as a validated number, or None when it is absent (or null).
+
+    Checked here, before anything reaches a worker thread: a string there
+    used to be a 500 (float("hot")) or, worse, pass (top_k 1.5 was cut to 1
+    by int(), turning a sampled request greedy without a word). A bool is not
+    a number, whatever Python says; a float with an integral value (2.0, as
+    some clients serialize every number) counts as an integer."""
+    value = body.get(key)
+    if value is None:
+        return None
+    ok = (not isinstance(value, bool) and isinstance(value, (int, float))
+          and math.isfinite(value))
+    if ok and integer:
+        ok = float(value).is_integer()
+        value = int(value) if ok else value
+    if ok and ((lo is not None and value < lo) or (hi is not None and value > hi)):
+        ok = False
+    if not ok:
+        kind = "an integer" if integer else "a number"
+        if lo is not None and hi is not None:
+            rng = f" between {lo:g} and {hi:g}"
+        elif lo is not None:
+            rng = f" >= {lo:g}"
+        else:
+            rng = ""
+        raise InvalidRequestError(f"{key} must be {kind}{rng}, got {value!r}",
+                                  key)
+    return value
+
+
+def _flag(body: dict, key: str, default: bool = False) -> bool:
+    """A boolean field. bool() alone read the string "false" as true."""
+    value = body.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise InvalidRequestError(f"{key} must be true or false, got {value!r}",
+                                  key)
+    return value
+
+
 def _parse_gen_params(body: dict, allow_stop: bool = True) -> GenParams:
     """Extracts/validates OpenAI generation parameters from a request body.
     max_completion_tokens (current OpenAI name) takes priority over the
@@ -94,13 +142,20 @@ def _parse_gen_params(body: dict, allow_stop: bool = True) -> GenParams:
     else:
         raise InvalidRequestError("stop must be a string or an array of strings", "stop")
 
+    top_k = body.get("top_k")
+    if (isinstance(top_k, (int, float)) and not isinstance(top_k, bool)
+            and top_k < 0):
+        # vLLM's "no limit"; the SDK reads top-k as unsigned.
+        raise InvalidRequestError(
+            f"top_k must be an integer >= 0 (0 means no top-k limit), got "
+            f"{top_k!r}", "top_k")
     return GenParams(
         max_tokens=max_tokens,
         stop=stop_list,
-        temperature=body.get("temperature"),
-        top_p=body.get("top_p"),
-        top_k=body.get("top_k"),
-        seed=body.get("seed"),
+        temperature=_number(body, "temperature", lo=0),
+        top_p=_number(body, "top_p", lo=0, hi=1),
+        top_k=_number(body, "top_k", lo=0, integer=True),
+        seed=_number(body, "seed", lo=0, hi=_MAX_SEED, integer=True),
     )
 
 
@@ -114,7 +169,7 @@ _SUPPORTED_TOOL_CHOICE = (None, "auto", "none")
 
 
 def _reject_unsupported(body: dict, endpoint: str) -> None:
-    if (body.get("n") or 1) > 1:
+    if (_number(body, "n", lo=1, integer=True) or 1) > 1:
         raise InvalidRequestError(
             "n > 1 is not supported by this server (one NPU handle per slot "
             "serves one completion at a time).", "n")
@@ -133,7 +188,8 @@ def _reject_unsupported(body: dict, endpoint: str) -> None:
                   "tool_calls.", "tool_choice")
     if endpoint == "completions" and body.get("suffix"):
         raise InvalidRequestError("suffix (fill-in-the-middle) is not supported", "suffix")
-    if endpoint == "completions" and (body.get("best_of") or 1) > 1:
+    if endpoint == "completions" and (
+            _number(body, "best_of", lo=1, integer=True) or 1) > 1:
         raise InvalidRequestError("best_of > 1 is not supported", "best_of")
 
 
@@ -193,7 +249,7 @@ def _completions_top_n(body: dict) -> int | None:
 def _chat_top_n(body: dict) -> int | None:
     """OpenAI chat `logprobs`: a bool, plus `top_logprobs` (0-20). Returns
     the top-N to record, or None when logprobs are off."""
-    if not body.get("logprobs"):
+    if not _flag(body, "logprobs"):
         return None
     top = body.get("top_logprobs", 0)
     if not isinstance(top, int) or top < 0 or top > _MAX_TOP_LOGPROBS:
@@ -708,8 +764,8 @@ def create_app(state: ServerState) -> FastAPI:
         model_name = slot.active_model_id
         _reject_unsupported(body, "completions")
         params = _parse_gen_params(body)
-        stream = bool(body.get("stream", False))
-        echo = bool(body.get("echo", False))
+        stream = _flag(body, "stream")
+        echo = _flag(body, "echo")
         top_n = _completions_top_n(body)
 
         prompts = _normalize_prompts(body.get("prompt", ""), slot)
@@ -833,7 +889,7 @@ def create_app(state: ServerState) -> FastAPI:
             return openai_error(
                 503, "VLM support is not available on this server "
                      "(numpy/Pillow missing at startup).", "server_error")
-        if body.get("logprobs"):
+        if _flag(body, "logprobs"):
             raise InvalidRequestError(
                 "logprobs are not supported for VLM (image) requests", "logprobs")
         vslot = manager.select_vlm_for_request(body, requested_model)
@@ -912,7 +968,7 @@ def create_app(state: ServerState) -> FastAPI:
         if not isinstance(messages, list) or not messages:
             raise InvalidRequestError("'messages' must be a non-empty array", "messages")
         requested_model = body.get("model", KNOWN_MODEL_ID)
-        stream = bool(body.get("stream", False))
+        stream = _flag(body, "stream")
         _reject_unsupported(body, "chat")
         params = _parse_gen_params(body)
         _require_positive_max_tokens(params)
@@ -923,8 +979,11 @@ def create_app(state: ServerState) -> FastAPI:
         # clients already written for vLLM/SGLang-served Qwen3 work here
         # unchanged. chat_template_kwargs takes priority if both are given.
         chat_template_kwargs = body.get("chat_template_kwargs") or {}
-        enable_thinking = chat_template_kwargs.get(
-            "enable_thinking", body.get("enable_thinking", True))
+        if not isinstance(chat_template_kwargs, dict):
+            raise InvalidRequestError(
+                "chat_template_kwargs must be an object", "chat_template_kwargs")
+        enable_thinking = _flag(chat_template_kwargs, "enable_thinking",
+                                _flag(body, "enable_thinking", True))
 
         # tools: OpenAI function calling. tool_choice is already validated
         # down to "auto"/"none"/absent by _reject_unsupported.
@@ -1133,7 +1192,7 @@ def create_app(state: ServerState) -> FastAPI:
         # cached prefix and therefore its key. Warming the raw prompt and then
         # sending enable_thinking=false is a silent, permanent MISS — so take
         # the same flag here and warm the variant the caller will actually use.
-        enable_thinking = bool(body.get("enable_thinking", True))
+        enable_thinking = _flag(body, "enable_thinking", True)
         messages = templates.prepare_messages(
             [{"role": "system", "content": system_prompt}],
             enable_thinking=enable_thinking)

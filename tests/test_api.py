@@ -1884,3 +1884,90 @@ def test_a_lora_alpha_is_checked_against_the_model_that_holds_the_lock(state):
     assert result["r"].status_code == 400
     assert "declares no LoRA adapters" in result["r"].json()["error"]["message"]
     assert state.lib.lora_strengths == []
+
+
+# ---------------------------------------------------------------- parameter types
+
+def _chat(client, **extra):
+    return client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4,
+        **extra})
+
+
+@pytest.mark.parametrize("extra, param", [
+    ({"temperature": "hot"}, "temperature"),     # was a 500 from float()
+    ({"temperature": -0.1}, "temperature"),
+    ({"temperature": True}, "temperature"),
+    ({"top_p": 7}, "top_p"),                     # was passed to the SDK
+    ({"top_p": "0.9"}, "top_p"),
+    ({"top_k": 1.5}, "top_k"),                   # was int()-ed to 1: greedy
+    ({"top_k": "5"}, "top_k"),
+    ({"seed": "x"}, "seed"),                     # was a 500 from int()
+    ({"seed": -1}, "seed"),                      # numpy refuses it
+    ({"seed": 2**31}, "seed"),                   # the SDK's stoi overflows
+    ({"n": "2"}, "n"),                           # was a plain-text 500
+    ({"n": 0}, "n"),
+    ({"chat_template_kwargs": [1]}, "chat_template_kwargs"),  # plain-text 500
+    ({"chat_template_kwargs": {"enable_thinking": "false"}}, "enable_thinking"),
+    ({"enable_thinking": "false"}, "enable_thinking"),  # "false" read as true
+    ({"stream": "false"}, "stream"),             # likewise: it streamed
+    ({"logprobs": "yes"}, "logprobs"),
+])
+def test_a_generation_parameter_of_the_wrong_type_is_a_400(state, client,
+                                                            extra, param):
+    r = _chat(client, **extra)
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["type"], err["param"]) == ("invalid_request_error", param)
+    assert state.lib.queries == []
+
+
+def test_top_k_minus_one_is_refused_with_the_value_that_means_no_limit(client):
+    """vLLM spells "no top-k limit" -1; the SDK reads top-k as unsigned."""
+    r = _chat(client, top_k=-1)
+    assert r.status_code == 400
+    assert "0 means no top-k limit" in r.json()["error"]["message"]
+
+
+def test_a_nan_temperature_is_a_400(state, client):
+    """Python's json reads NaN, and NaN passes every range comparison."""
+    r = client.post("/v1/chat/completions", headers={
+        "Content-Type": "application/json"}, content=(
+        '{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4, '
+        '"temperature": NaN}'))
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "temperature"
+
+
+@pytest.mark.parametrize("extra, param", [
+    ({"echo": "false"}, "echo"),
+    ({"stream": 1}, "stream"),
+    ({"best_of": "2"}, "best_of"),
+    ({"n": "2"}, "n"),                           # was a plain-text 500
+])
+def test_completions_parameters_of_the_wrong_type_are_a_400(state, client,
+                                                             extra, param):
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 4,
+                                             **extra})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["param"] == param
+    assert state.lib.queries == []
+
+
+def test_valid_edge_values_reach_the_sdk(state, client):
+    """The bounds themselves are allowed, and an integral float is an
+    integer (some clients serialize every number as a float)."""
+    r = _chat(client, temperature=0.7, top_p=1, top_k=2.0, seed=2**31 - 1,
+              n=1, stream=False, logprobs=False,
+              chat_template_kwargs={"enable_thinking": False})
+    assert r.status_code == 200, r.text
+    params = state.lib.sampler_params[state.manager.slots[0].handle.value]
+    assert (params["top-k"], params["top-p"], params["seed"]) == (
+        "2", "1.0", str(2**31 - 1))
+
+
+def test_warmup_enable_thinking_must_be_a_bool(client):
+    r = client.post("/v1/prefix/warmup", json={"system_prompt": "s",
+                                               "enable_thinking": "false"})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "enable_thinking"

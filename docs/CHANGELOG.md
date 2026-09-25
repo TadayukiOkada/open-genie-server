@@ -44,6 +44,20 @@
 
 ### Fixed
 
+- **Generation parameters of the wrong type are a `400`.** They reached the
+  worker thread unchecked. A string `temperature` or `seed` was a `500`, and
+  a string `n` or a list `chat_template_kwargs` was a plain-text `500`.
+  Others passed silently: `top_k: 1.5` was cut to 1, turning a sampled
+  request greedy, `top_p: 7` went to the SDK, and `stream`, `echo`,
+  `enable_thinking` and chat `logprobs` went through `bool()`, so the string
+  `"false"` meant true. Now:
+  - `temperature` must be ≥ 0, `top_p` from 0 to 1, and `top_k` an integer
+    ≥ 0. vLLM's `-1` is refused with a message naming `0`.
+  - `seed` must be an integer from 0 to 2³¹−1.
+  - `n` and `best_of` must be integers ≥ 1.
+  - `chat_template_kwargs` must be an object, and the flags must be
+    booleans.
+  - An integral float such as `2.0` counts as an integer.
 - **`/v1/lora/strength` refuses an alpha the model does not have.** The SDK
   answers success for any name: on an engine with an inference scheduler, a
   name it does not know is kept as a CB multi-LoRA adapter-order name, and no
