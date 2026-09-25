@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from . import engine, logprobs as logprobs_mod, protocol, templates, \
     vlm
 from .capi import (GenieLib, PERFORMANCE_POLICIES, PERFORMANCE_POLICY_NAMES,
-                   STATUS_SUCCESS)
+                   STATUS_SUCCESS, resolve_sampler_values)
 from .config import ServerConfig, resolve_model_path
 from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
@@ -252,6 +252,18 @@ def _logprobs_unsupported_error() -> InvalidRequestError:
         "logprobs are not supported by this QAIRT runtime: the logits "
         "callback was not invoked during generation.",
         "logprobs", code="logprobs_not_supported")
+
+
+def _sampling_collector(top_n: int, params: GenParams, slot) -> LogprobsCollector:
+    """A collector for a request that samples (not prompt scoring), with the
+    sampler values the request would get without logprobs: the model's
+    defaults fill what the request leaves out, as make_sampler_params does.
+    It used to fall back to temperature 1.0 with no top-k or top-p, so adding
+    logprobs: true changed the output distribution."""
+    temp, top_k, top_p = resolve_sampler_values(
+        slot.sampler_defaults, params.temperature, params.top_p, params.top_k)
+    return LogprobsCollector(top_n=top_n, temperature=temp, top_p=top_p,
+                             top_k=top_k, seed=params.seed)
 
 
 def _completions_top_n(body: dict) -> int | None:
@@ -921,9 +933,7 @@ def create_app(state: ServerState) -> FastAPI:
                 slot, prompt, params.max_tokens, cfg.default_max_tokens_cap))
             collector = None
             if top_n is not None:
-                collector = LogprobsCollector(
-                    top_n=top_n, temperature=params.temperature,
-                    top_p=params.top_p, top_k=params.top_k, seed=params.seed)
+                collector = _sampling_collector(top_n, params, slot)
             gen = Generation(f"{request_id}-{index}", slot, state.lib, epoch=epoch)
             engine.start_generation(
                 state.lib, slot, QueryPlan(full_prompt=prompt), req_params, gen,
@@ -1087,9 +1097,7 @@ def create_app(state: ServerState) -> FastAPI:
                 raise InvalidRequestError(
                     "logprobs are not supported with stream=true on this "
                     "server", "logprobs")
-            collector = LogprobsCollector(
-                top_n=top_n, temperature=params.temperature,
-                top_p=params.top_p, top_k=params.top_k, seed=params.seed)
+            collector = _sampling_collector(top_n, params, slot)
 
         # Template comes from the SELECTED SLOT's actually-loaded model —
         # never from the client-supplied model_name (lm_eval sends a fixed

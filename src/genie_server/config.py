@@ -635,6 +635,41 @@ def _parse_tool_format(raw: dict) -> str:
     return name
 
 
+def _check_slot_names(specs) -> None:
+    """Slot names are unique across TEXT_SLOTS and VLM_SLOTS together.
+
+    A name is a key in more places than it looks: request routing and
+    /v1/server/status (one slot of a pair would be unreachable), the custom
+    sampler's callback name (the second slot's registration is skipped, so
+    its logits reach the first slot's collector -- corrupting a logprobs
+    request running there), and the per-slot copy of the HTP extension
+    config (one slot's device_id pin would overwrite the other's). It also
+    names a file, so it may not contain a path separator.
+
+    Nor a control character: the callback name reaches the SDK as a C
+    string, so "a\\x00b" would reach it as "a": the same callback name as
+    slot "a", the clash this check exists to prevent. Nor "|", which separates the fields of the prefix
+    cache namespace. Nor surrounding whitespace, which a request naming
+    the slot would not send, and would then get a puzzling 404."""
+    seen: dict[str, str] = {}
+    for spec in specs:
+        kind = "VLM_SLOTS" if isinstance(spec, VLMSlotSpec) else "TEXT_SLOTS"
+        name = spec.name
+        if (not isinstance(name, str) or not name.strip()
+                or name != name.strip() or name in (".", "..")
+                or any(c in "/\\|" or ord(c) < 32 or ord(c) == 127
+                       for c in name)):
+            raise ValueError(
+                f"{kind}: slot name must be a non-empty string with no "
+                f"surrounding whitespace, path separator, '|' or control "
+                f"character, got {name!r}")
+        if name in seen:
+            raise ValueError(
+                f"slot name {name!r} is used twice ({seen[name]} and {kind}); "
+                "every slot, text or VLM, needs its own name")
+        seen[name] = kind
+
+
 def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
     """Loads and validates env_config.json. Raises FileNotFoundError /
     json.JSONDecodeError / KeyError on a broken config file."""
@@ -645,6 +680,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
     models_base_dir = Path(models_base).resolve() if models_base else None
     text_slots = _parse_text_slots(raw, models_base_dir)
     vlm_slots = _parse_vlm_slots(raw, models_base_dir)
+    _check_slot_names([*text_slots, *vlm_slots])
     if not text_slots and not vlm_slots:
         raise ValueError(
             f"{path}: no models configured. Set TEXT_SLOTS, VLM_SLOTS, or both. "

@@ -134,21 +134,26 @@ def make_sampler_params(defaults: dict, temperature=None, top_p=None, top_k=None
     internal greedy flag, and temp=0 would blow up softmax(temp) — so greedy
     is implemented as top-k=1 with a safe temp instead.
     """
+    temp, k, p = resolve_sampler_values(defaults, temperature, top_p, top_k)
+    return {"type": "basic", "temp": str(temp), "top-k": str(k),
+            "top-p": str(p),
+            "seed": str(secrets.randbits(31) if seed is None else int(seed))}
+
+
+def resolve_sampler_values(defaults: dict, temperature=None, top_p=None,
+                           top_k=None) -> tuple[float, int, float]:
+    """(temp, top-k, top-p) a request actually samples with: its own value,
+    else the model's genie_config.json default, else the SDK's; greedy
+    (temperature <= 0) as top-k 1. make_sampler_params sends these to the
+    SDK, and the logprobs path, which samples on the host, uses the same
+    ones -- otherwise asking for logprobs would change what gets sampled."""
     base = {**SDK_SAMPLER_DEFAULTS,
             **{k: v for k, v in defaults.items() if k in SDK_SAMPLER_DEFAULTS}}
-    params: dict[str, str] = {"type": "basic"}
-
+    p = float(base["top-p"] if top_p is None else top_p)
     if temperature is not None and float(temperature) <= 0.0:
-        params["temp"] = "1.0"
-        params["top-k"] = "1"
-    else:
-        params["temp"] = str(float(base["temp"] if temperature is None
-                                   else temperature))
-        params["top-k"] = str(int(base["top-k"] if top_k is None else top_k))
-
-    params["top-p"] = str(float(base["top-p"] if top_p is None else top_p))
-    params["seed"] = str(secrets.randbits(31) if seed is None else int(seed))
-    return params
+        return 1.0, 1, p
+    return (float(base["temp"] if temperature is None else temperature),
+            int(base["top-k"] if top_k is None else top_k), p)
 
 
 def sampler_defaults_from(sampler_cfg: dict | None) -> dict:

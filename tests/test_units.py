@@ -478,6 +478,16 @@ def test_collector_greedy_records_logsoftmax():
     assert [t for t, _ in top] == [1, 2]  # top-2, descending
 
 
+def test_collector_top_k_larger_than_the_vocab_means_no_limit():
+    """argpartition used to raise, and the sampler callback then emitted
+    token 0 at every step."""
+    from genie_server.logprobs import LogprobsCollector
+
+    c = LogprobsCollector(top_n=0, temperature=0.5, top_k=100, seed=0)
+    addr, n, _keep = _fake_logits([0.0, 0.0, 9.0, 0.0])
+    assert c.on_logits(addr, n, 1) == [2]
+
+
 def test_collector_force_mode():
     from genie_server.logprobs import LogprobsCollector
 
@@ -2711,11 +2721,9 @@ def test_lora_alpha_names_leaves_it_to_the_sdk_when_it_cannot_tell(cfg, role):
 
 
 def _config_with(tmp_path, **raw):
-    path = tmp_path / "env_config.json"
-    path.write_text(json.dumps({"QAIRT_SDK_ROOT": "/opt/qairt",
-                                "TEXT_SLOTS": [{"model_root": str(tmp_path)}],
-                                **raw}))
-    return str(path)
+    """_write_config (below) with one text slot, for tests about other keys."""
+    return _write_config(
+        tmp_path, **{"TEXT_SLOTS": [{"model_root": str(tmp_path)}], **raw})
 
 
 @pytest.mark.parametrize("key", ["PROMPT_LOGPROBS", "GENIE_PROFILE",
@@ -2761,3 +2769,46 @@ def test_known_template_and_tool_format_names_load(tmp_path, key, value, attr,
     from genie_server.config import load_config
     cfg = load_config(_config_with(tmp_path, **{key: value}))
     assert getattr(cfg, attr) == expected
+
+
+def _write_config(tmp_path, **raw):
+    path = tmp_path / "env_config.json"
+    path.write_text(json.dumps({"QAIRT_SDK_ROOT": "/opt/qairt", **raw}))
+    return str(path)
+
+
+@pytest.mark.parametrize("text, vlm, clash", [
+    ([{"name": "a"}, {"name": "a"}], [], "TEXT_SLOTS and TEXT_SLOTS"),
+    ([{"name": "a"}], [{"name": "a", "spec": "qwen3_vl"}], "TEXT_SLOTS and VLM_SLOTS"),
+    # A default name collides with an explicit one just the same.
+    ([{}, {"name": "slot0"}], [], "TEXT_SLOTS and TEXT_SLOTS"),
+])
+def test_a_slot_name_used_twice_is_refused_at_startup(tmp_path, text, vlm,
+                                                      clash):
+    """Routing, status, the logprobs callback name and the per-slot HTP
+    config copy are all keyed by it: a shared name misroutes logits."""
+    from genie_server.config import load_config
+    for s in text + vlm:
+        s["model_root"] = str(tmp_path)
+    with pytest.raises(ValueError, match=f"used twice \\({clash}\\)"):
+        load_config(_write_config(tmp_path, TEXT_SLOTS=text, VLM_SLOTS=vlm))
+
+
+@pytest.mark.parametrize("name", ["", "  ", "a/b", "a\\b", "..", 3,
+                                  "a\x00b", "a\tb", "a|b", " a", "a "])
+def test_an_unusable_slot_name_is_refused(tmp_path, name):
+    from genie_server.config import load_config
+    with pytest.raises(ValueError, match="slot name must be"):
+        load_config(_write_config(tmp_path, TEXT_SLOTS=[
+            {"name": name, "model_root": str(tmp_path)}]))
+
+
+def test_distinct_slot_names_load(tmp_path):
+    from genie_server.config import load_config
+    cfg = load_config(_write_config(
+        tmp_path,
+        TEXT_SLOTS=[{"model_root": str(tmp_path)}, {"name": "chat",
+                                                    "model_root": str(tmp_path)}],
+        VLM_SLOTS=[{"model_root": str(tmp_path), "spec": "qwen3_vl"}]))
+    assert [s.name for s in cfg.text_slots] == ["slot0", "chat"]
+    assert [s.name for s in cfg.vlm_slots] == ["vlm0"]

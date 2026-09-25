@@ -99,7 +99,11 @@ class LogprobsCollector:
             return int(logits.argmax())
 
         scaled = logits.astype(np.float64) / temp
-        if self.top_k and self.top_k > 0:
+        # A top-k as large as the vocab keeps everything. Larger, it made
+        # argpartition raise, and the callback then emitted token 0 at every
+        # step. Now that a genie_config.json default reaches here too, an
+        # oversized value can come from the model, not only the request.
+        if self.top_k and 0 < self.top_k < scaled.shape[0]:
             keep = np.argpartition(scaled, -self.top_k)[-self.top_k:]
         else:
             keep = np.arange(scaled.shape[0])
