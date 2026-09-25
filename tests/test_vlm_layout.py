@@ -620,3 +620,25 @@ def test_vlm_slot_builds_from_the_deepstack_layout(monkeypatch, tmp_path):
     assert len(slot.pipeline.connections) == 3
     assert slot.static_tensors == {}
     assert (slot.spec.image_width, slot.spec.image_height) == (34 * 16, 34 * 16)
+
+
+def test_vlm_sampler_defaults_come_from_the_text_generator_config():
+    """H-4: the VLM path passed {} as the model defaults, so a request that
+    omitted a parameter inherited the previous request's value."""
+    from genie_server import vlm
+    cfgs = {"text_generator": {"text-generator": {
+        "sampler": {"temp": 0.3, "top-p": 0.9, "seed": 11, "type": "basic"}}}}
+    # seed is not a per-request default (see capi.make_sampler_params).
+    assert vlm._sampler_defaults(cfgs) == {"temp": 0.3, "top-p": 0.9}
+    assert vlm._sampler_defaults({}) == {}
+    assert vlm._sampler_defaults({"text_generator": {"text-generator": {}}}) == {}
+
+
+def test_vlm_slot_reads_its_sampler_defaults(monkeypatch, tmp_path):
+    _patch_genie_node(monkeypatch)
+    from genie_server import vlm
+    slot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=FIXTURES / "ai_hub",
+                       spec_name=None, htp_ext_cache_dir=tmp_path / "htpcache")
+    # The AI Hub fixture's text-generator config has no sampler section, so
+    # every default comes from the SDK: nothing is read, nothing invented.
+    assert slot.sampler_defaults == {}

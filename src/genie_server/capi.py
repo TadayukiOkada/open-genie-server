@@ -8,6 +8,7 @@ implementation with the same method surface (see tests/fake_genie.py).
 import ctypes
 import json
 import logging
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,12 @@ def status_to_finish_reason(ret: int, default: str = "stop") -> str:
     return default
 
 
+# What the SDK's basic sampler uses for a key that neither the model config nor
+# a request sets. Sent explicitly for every key so nothing is inherited from an
+# earlier request. seed is not here: see make_sampler_params.
+SDK_SAMPLER_DEFAULTS = {"temp": 0.1, "top-k": 0, "top-p": 0.8}
+
+
 def make_sampler_params(defaults: dict, temperature=None, top_p=None, top_k=None,
                         seed=None) -> dict[str, str]:
     """Builds the {sdk_key: value_string} dict for GenieSamplerConfig_setParam.
@@ -101,9 +108,21 @@ def make_sampler_params(defaults: dict, temperature=None, top_p=None, top_k=None
     Sampler state persists across requests on a GenieDialog handle
     (GenieSampler_applyConfig is a partial merge), so every request must
     re-apply a COMPLETE parameter set: request value if given, else the
-    model's own genie_config.json default (`defaults`, SDK-key form). A
-    request that omits temperature therefore gets the model default back
-    instead of inheriting whatever the previous request set.
+    model's own genie_config.json default (`defaults`, SDK-key form), else
+    the SDK's own default (SDK_SAMPLER_DEFAULTS). A key the config omits is
+    still sent: otherwise the previous request's value (greedy's top-k=1, a
+    seed) would survive into a request that never asked for it.
+
+    seed is the exception to "else the model's default". It is the request's
+    seed if it gave one, and otherwise a fresh random one, never the config's:
+    applying a seed re-seeds the sampler, so re-sending a config's "seed": 42
+    on every request would give every unseeded request the same random
+    stream. Repeated sampling (pass@k, self-consistency) would then return
+    one answer n times, silently. A config's seed seeds the dialog once,
+    when it is created; a caller who wants reproducible output sends seed.
+    The random seed is drawn here rather than left to the SDK's own "unset"
+    value, so what an unseeded request gets does not depend on how a given
+    SDK version reads that value.
 
     "type": "basic" is always included so that a preceding logprobs request
     (which switches the dialog's sampler to "custom" — see
@@ -115,29 +134,29 @@ def make_sampler_params(defaults: dict, temperature=None, top_p=None, top_k=None
     internal greedy flag, and temp=0 would blow up softmax(temp) — so greedy
     is implemented as top-k=1 with a safe temp instead.
     """
+    base = {**SDK_SAMPLER_DEFAULTS,
+            **{k: v for k, v in defaults.items() if k in SDK_SAMPLER_DEFAULTS}}
     params: dict[str, str] = {"type": "basic"}
 
     if temperature is not None and float(temperature) <= 0.0:
         params["temp"] = "1.0"
         params["top-k"] = "1"
     else:
-        if temperature is not None:
-            params["temp"] = str(float(temperature))
-        elif "temp" in defaults:
-            params["temp"] = str(float(defaults["temp"]))
-        if top_k is not None:
-            params["top-k"] = str(int(top_k))
-        elif "top-k" in defaults:
-            params["top-k"] = str(int(defaults["top-k"]))
+        params["temp"] = str(float(base["temp"] if temperature is None
+                                   else temperature))
+        params["top-k"] = str(int(base["top-k"] if top_k is None else top_k))
 
-    if top_p is not None:
-        params["top-p"] = str(float(top_p))
-    elif "top-p" in defaults:
-        params["top-p"] = str(float(defaults["top-p"]))
-
-    if seed is not None:
-        params["seed"] = str(int(seed))
+    params["top-p"] = str(float(base["top-p"] if top_p is None else top_p))
+    params["seed"] = str(secrets.randbits(31) if seed is None else int(seed))
     return params
+
+
+def sampler_defaults_from(sampler_cfg: dict | None) -> dict:
+    """The keys of a config's "sampler" section that make_sampler_params
+    treats as the model's defaults: temp, top-k and top-p. Not seed, which
+    applies once, at dialog creation (see make_sampler_params)."""
+    return {k: sampler_cfg[k] for k in SDK_SAMPLER_DEFAULTS
+            if sampler_cfg and k in sampler_cfg}
 
 
 # ---------------------------------------------------------------- ctypes types

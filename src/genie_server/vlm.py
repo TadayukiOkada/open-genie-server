@@ -179,6 +179,17 @@ def _context_size(node_cfgs: dict) -> int:
         return 0
 
 
+def _sampler_defaults(node_cfgs: dict) -> dict:
+    """The text-generator config's own sampler settings (same shape as a text
+    bundle's genie_config.json, one level down), so a request that omits a
+    parameter gets the bundle's value back rather than a previous request's."""
+    cfg = node_cfgs.get("text_generator")
+    if not cfg:
+        return {}
+    inner = next(iter(cfg.values()), {})
+    return capi.sampler_defaults_from(inner.get("sampler"))
+
+
 def _text_encoder_bos(node_cfgs: dict) -> int | None:
     """The bos-token the text-encoder config names, or None."""
     cfg = node_cfgs.get("text_encoder")
@@ -287,6 +298,7 @@ class VLMSlot:
         # number is the real ceiling — plan_segments budgets vision tokens
         # against it. 0 disables that check rather than guessing.
         self.context_size = _context_size(node_cfgs)
+        self.sampler_defaults = _sampler_defaults(node_cfgs)
         self.image_encoder = nodes["image_encoder"]
         self.text_encoder = nodes["text_encoder"]
         self.text_generator = nodes["text_generator"]
@@ -683,13 +695,13 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                 vslot.text_generator.set_text_callback(
                     vlm_layout.TEXT_GENERATOR_TEXT_OUTPUT_IO, on_text)
                 sampler_params = capi.make_sampler_params(
-                    {}, params.temperature, params.top_p, params.top_k, params.seed)
-                if sampler_params:
-                    try:
-                        lib.apply_sampler_params_to_handle(
-                            vslot.text_generator.get_sampler(), sampler_params)
-                    except Exception as e:
-                        logger.warning(f"VLM sampling params not applied: {e}")
+                    vslot.sampler_defaults, params.temperature, params.top_p,
+                    params.top_k, params.seed)
+                try:
+                    lib.apply_sampler_params_to_handle(
+                        vslot.text_generator.get_sampler(), sampler_params)
+                except Exception as e:
+                    logger.warning(f"VLM sampling params not applied: {e}")
 
                 vslot.pipeline.reset()
                 spec = vslot.spec

@@ -56,7 +56,7 @@ curl $base_url/v1/models
 | `max_completion_tokens` / `max_tokens` | int | 前者が優先(OpenAIの非推奨方針に準拠)。どちらも未指定の場合、`genie_config.json`の`dialog.context.size`からプロンプトのトークン数を引いた値(=残りコンテキスト容量)がデフォルトになる — Qualcomm自身のqai-appbuilderリファレンスサーバと同じ挙動。`DEFAULT_MAX_TOKENS`(`env_config.json`)を正の値に設定した場合は、その値と残りコンテキスト容量のうち小さい方が使われる。詳細は[トラブルシューティング](./MANUAL.ja.md#トラブルシューティング)参照。 |
 | `stop` | string \| string[] | 停止シーケンス。マッチングはSDK内で行われ、ストリーミング中は部分一致テキストをホールドバックし、一致した停止シーケンス自体は出力からトリムされる(OpenAIセマンティクス)。 |
 | `temperature` / `top_p` / `top_k` | number | サンプリングパラメータ。リクエストごとに再適用され、省略したパラメータは**モデル自身の`genie_config.json`既定値**に戻る(直前のリクエストの設定が漏れない)。`temperature=0` で貪欲デコード(SDKのランタイムサンプラ設定はtemp=0を受け付けないため、`top-k=1`として実装)。 |
-| `seed` | int | ベストエフォートのサンプリングシード。SDKサンプラに転送される。 |
+| `seed` | int | ベストエフォートのサンプリングシード。SDKサンプラに転送される。省略するとリクエストごとに新しい乱数シードを使い、前のリクエストのシードを引き継がない。バンドルの sampler 設定にある `seed` は、ダイアログ作成時に一度だけ使われる。出力を再現したい場合は `seed` を指定する。 |
 | `logprobs` | int (0-20) | **生成**トークンのトークン単位logprobsと、各位置の上位N候補を返す([Logprobs](./MANUAL.ja.md#logprobs)参照)。非ストリーミングのみ。`echo`と組み合わせると**プロンプトスコアリング**(lm_eval loglikelihood)に切り替わる — `POST /v1/server/prompt_logprobs`によるゲートあり。logits callbackを呼ばないQAIRTランタイムではHTTP 400 `logprobs_not_supported`。 |
 | `suffix` / `best_of` | — | 非対応 → `400`。 |
 | `echo` | bool | trueならプロンプトを応答に前置(ストリーミング時は最初のchunkとして送出)。 |

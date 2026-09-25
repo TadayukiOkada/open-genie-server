@@ -388,9 +388,17 @@ def test_stream_filter_false_alarm_lt():
 
 # ---------------------------------------------------------------- sampler params
 
+def _without_seed(params):
+    """make_sampler_params draws a fresh seed for an unseeded request, so
+    exact comparisons leave it out (it is checked on its own below)."""
+    assert int(params["seed"]) >= 0
+    return {k: v for k, v in params.items() if k != "seed"}
+
+
 def test_sampler_greedy_mapping():
     params = make_sampler_params({}, temperature=0.0)
-    assert params == {"type": "basic", "temp": "1.0", "top-k": "1"}
+    assert _without_seed(params) == {"type": "basic", "temp": "1.0",
+                                     "top-k": "1", "top-p": "0.8"}
 
 
 def test_sampler_defaults_reset():
@@ -399,7 +407,8 @@ def test_sampler_defaults_reset():
     # from a previous request's settings). "type": "basic" always included
     # so a preceding logprobs request's custom sampler can't leak either.
     params = make_sampler_params(defaults)
-    assert params == {"type": "basic", "temp": "0.8", "top-k": "40", "top-p": "0.95"}
+    assert _without_seed(params) == {"type": "basic", "temp": "0.8",
+                                     "top-k": "40", "top-p": "0.95"}
     # Request overrides only temperature.
     params = make_sampler_params(defaults, temperature=0.2)
     assert params["temp"] == "0.2"
@@ -408,6 +417,42 @@ def test_sampler_defaults_reset():
 
 def test_sampler_seed():
     assert make_sampler_params({}, seed=42)["seed"] == "42"
+
+
+def test_sampler_params_are_always_complete():
+    """H-4: with a config that omits a key, that key used to be left out, so
+    the SDK kept the previous request's value (greedy's top-k=1, a seed)."""
+    full = {"type", "temp", "top-k", "top-p", "seed"}
+    for kwargs in ({}, {"temperature": 0.7}, {"temperature": 0.0},
+                   {"top_p": 0.5}, {"seed": 7}):
+        assert set(make_sampler_params({}, **kwargs)) == full
+    # A request after a greedy one gets the SDK's own defaults back.
+    after_greedy = make_sampler_params({}, temperature=0.7)
+    assert after_greedy["top-k"] == "0"
+    assert after_greedy["top-p"] == "0.8"
+
+
+def test_an_unseeded_request_gets_a_fresh_seed_every_time():
+    """Not the SDK's "unset" and not a fixed value: each unseeded request
+    re-seeds with a new random one, so an earlier request's seed cannot
+    carry over and repeated sampling stays random."""
+    seeds = {make_sampler_params({})["seed"] for _ in range(20)}
+    assert len(seeds) > 1
+    assert all(0 <= int(s) < 2 ** 31 for s in seeds)
+    assert make_sampler_params({}, seed=7)["seed"] == "7"
+
+
+def test_a_config_seed_is_not_resent_on_every_request():
+    """A config's "seed": 42 re-sent per request would re-seed the sampler
+    identically each time: every unseeded request would sample the same
+    stream. It seeds the dialog at creation only."""
+    from genie_server.capi import sampler_defaults_from
+    cfg = {"temp": 0.5, "seed": 42, "type": "basic", "version": 1}
+    defaults = sampler_defaults_from(cfg)
+    assert defaults == {"temp": 0.5}
+    assert sampler_defaults_from(None) == {}
+    seeds = {make_sampler_params(defaults)["seed"] for _ in range(20)}
+    assert "42" not in seeds and len(seeds) > 1
 
 
 # ---------------------------------------------------------------- logprobs

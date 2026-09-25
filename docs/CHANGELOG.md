@@ -17,6 +17,20 @@
 
 ### Fixed
 
+- **A request no longer inherits the previous request's sampler settings.**
+  The SDK merges partial sampler updates, and a parameter the request and the
+  model config both left out was simply not sent, so it kept the last value:
+  after a `temperature: 0` request (top-k 1) or one with a `seed`, the next
+  request that only set `temperature` stayed greedy or kept the seed. The
+  VLM path passed no model defaults at all, so every parameter carried over.
+  Every request now sends the full set. `temp`, `top-k` and `top-p` are the
+  request's value, else the model config's, else the SDK's own default
+  (0.1, 0, 0.8). `seed` is the request's, else a fresh random one for every
+  request. The VLM path reads the text-generator config's `sampler` section.
+  A `seed` in a model config still seeds the dialog only once, when it is
+  created. Re-sending it on every request would give every unseeded request
+  the same random stream, so repeated sampling would return one answer n
+  times. For reproducible output, send `seed` in the request.
 - **Waiting for a slot no longer freezes the server.** `/v1/models/switch`,
   the `/v1/lora/*` calls and `POST /v1/server/performance_policy` waited for
   the slot lock (up to 600 s for a switch) and ran the SDK call on the event

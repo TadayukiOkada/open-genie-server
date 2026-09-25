@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import templates, tool_formats
+from . import capi, templates, tool_formats
 from .config import DEFAULT_DIALOG_CONFIG, ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -313,9 +313,6 @@ def load_dialog_config(model_dir: Path, device_id: int | None, slot_name: str,
     return json.dumps(genie_config_data).encode("utf-8"), dcfg
 
 
-_SAMPLER_DEFAULT_KEYS = ("temp", "top-k", "top-p")
-
-
 class SlotManager:
     """Owns every text Slot (and the VLM slot list), routes requests to
     them, and performs model hot-swaps."""
@@ -369,8 +366,7 @@ class SlotManager:
             tool_format=tool_formats.get(
                 self.config.tool_format_override or tool_formats.detect(template)),
             model_dir=model_dir,
-            sampler_defaults={k: sampler_cfg[k] for k in _SAMPLER_DEFAULT_KEYS
-                              if k in sampler_cfg},
+            sampler_defaults=capi.sampler_defaults_from(sampler_cfg),
         )
 
     def load_all(self) -> None:

@@ -1443,3 +1443,17 @@ def test_every_system_message_reaches_the_sdk(state, client):
     prompt = state.lib.queries[-1]
     assert "SYS-A" in prompt and "SYS-B" in prompt
     assert prompt.index("a1") < prompt.index("SYS-B") < prompt.index("q2")
+
+
+def test_sampler_settings_do_not_leak_into_the_next_request(state, client):
+    """H-4: after a greedy request, one that only sets temperature kept
+    top-k=1 (the config has no top-k), so it stayed greedy."""
+    handle_id = state.manager.slots[0].handle.value
+    msg = [{"role": "user", "content": "hi"}]
+    client.post("/v1/chat/completions",
+                json={"messages": msg, "temperature": 0.0, "seed": 5})
+    assert state.lib.sampler_params[handle_id]["top-k"] == "1"
+    client.post("/v1/chat/completions", json={"messages": msg, "temperature": 0.7})
+    params = state.lib.sampler_params[handle_id]
+    assert params["top-k"] == "0" and params["seed"] != "5"
+    assert params["temp"] == "0.7"
