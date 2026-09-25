@@ -48,7 +48,8 @@
   `ok` whatever the slots hold, so a slot left empty by a failed
   `unload_first` switch was invisible to monitoring while every request to it
   failed. `/ready` is `200` when every slot holds a model and `503` with the
-  empty ones listed otherwise. It does not detect a wedged slot: the stock
+  empty ones listed otherwise. `?slot=<name>` checks one slot, for a monitor
+  that routes per slot. It does not detect a wedged slot: the stock
   library's wedge is reported, not detected, by design.
 
 ### Fixed

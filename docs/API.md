@@ -28,6 +28,9 @@ Two conventions apply everywhere:
   and a `not_loaded` list when one does not. That happens during a model
   switch, and after a failed `unload_first` switch leaves a slot empty, which
   `/health` does not show. It is a status body, not an error envelope.
+  `?slot=<name>` checks that one slot only (`404` for an unknown name). Without
+  it, one empty slot makes the whole server not ready, which on a multi-slot
+  server takes every slot out of a load balancer's rotation.
   **It reports only whether a model is loaded.** A slot the stock library has
   wedged still reads as ready: this server does not detect the wedge (see
   [QAIRT Version Issues](./QAIRT_VERSIONS.md)).

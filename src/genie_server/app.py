@@ -44,7 +44,8 @@ from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
 from .prefix_cache import PrefixCache
 from .protocol import InvalidRequestError, openai_error, read_json_body, sse
-from .slots import SlotManager, canonical_engine_role, lora_alpha_names
+from .slots import (SlotManager, UnknownSlotError, canonical_engine_role,
+                    lora_alpha_names)
 
 logger = logging.getLogger(__name__)
 
@@ -566,12 +567,18 @@ def create_app(state: ServerState) -> FastAPI:
 
     @app.get("/ready")
     @app.get("/v1/ready")
-    async def ready():
+    async def ready(request: Request):
         """Readiness probe: 200 when every slot holds a model, 503 when one
         does not -- mid-switch, or left empty by a failed unload_first switch,
         after which /health still says ok and every request to that slot
         fails. Startup never shows here: the server does not listen until
         every slot has loaded.
+
+        ?slot=<name> narrows it to one slot (404 for an unknown name). Without
+        it one empty slot makes the whole server not ready, which is right for
+        a single-slot server but takes every slot out of a load balancer's
+        rotation on a multi-slot one; a monitor that routes per slot asks per
+        slot.
 
         "Loaded" is all it knows. A slot the stock library has wedged still
         holds its model and still reads as ready: telling a wedge from a slow
@@ -579,11 +586,21 @@ def create_app(state: ServerState) -> FastAPI:
         wedge or paper over it (README, principle 3)."""
         slots = [{"name": s.name, "loaded": s.handle is not None}
                  for s in manager.slots]
+        # A VLM slot builds its pipeline once, at startup, and nothing ever
+        # takes it away (there is no VLM model switch), so this reads true for
+        # as long as the server runs. It is listed so the probe covers every
+        # slot a client can reach, and so it stays right if VLM slots ever
+        # gain a switch that can leave them empty.
         slots += [{"name": v.name, "loaded": v.pipeline is not None}
                   for v in manager.vlm_slots]
+        wanted = request.query_params.get("slot")
+        if wanted is not None:
+            slots = [s for s in slots if s["name"] == wanted]
+            if not slots:
+                raise UnknownSlotError(f"Unknown slot '{wanted}'.")
         not_loaded = [s["name"] for s in slots if not s["loaded"]]
-        body = {"status": "not ready" if not_loaded else "ready",
-                "slots": slots}
+        body: dict[str, object] = {
+            "status": "not ready" if not_loaded else "ready", "slots": slots}
         if not_loaded:
             body["not_loaded"] = not_loaded
             return JSONResponse(status_code=503, content=body)
