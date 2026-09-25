@@ -99,7 +99,7 @@ Qualcomm のスタックは1つのハードウェアに3通りの名前を付け
 | `tests/` | オフラインテストスイート(`FakeGenieLib` — NPU・`libGenie.so`なしで動作) |
 
 - サーバは1つ以上の**スロット**(`Slot`)から成ります。1スロット = 1つの独立した`GenieDialog`ハンドル + 専用の`threading.Lock` + 専用のトークナイザ/テンプレート/LoRA状態です。`TEXT_SLOTS`を設定しなければスロットは1つ(`"default"`)だけになり、旧バージョンと完全に同じ挙動になります。
-- 各リクエストはボディ(または `?model=` クエリ)の `model` フィールドで**どのスロットに送るか**が決まります(`SlotManager.select`)。一致するスロットが無ければ常にプライマリスロットにフォールバックするため、`lm_eval`の固定文字列 `"genie-local"` や単一スロット運用ではクライアント側の変更は不要です。
+- 各リクエストはボディ(または `?model=` クエリ)の `model` フィールドで**どのスロットに送るか**が決まります(`SlotManager.select`)。一致するスロットが無ければ常にプライマリスロットにフォールバックするため、`lm_eval`の固定文字列 `"genie-local"` や単一スロット運用ではクライアント側の変更は不要です。それ以外の、何にも一致しない名前は WARNING で 1 回だけログに出るので、typo は埋もれません。
 - スロット内の推論・パラメータ変更・LoRA操作・モデル切り替えは、**そのスロット自身の**`threading.Lock`で直列化されます。**別スロットへの操作はブロックしません** — 2NSP構成では文字通り2リクエストを同時処理できます。
 - 各リクエストは呼び出し前に必ず対象スロットの `GenieDialog_reset` を行います。つまり本サーバは**マルチターン会話をSDK側で保持しません**。会話履歴はクライアント側(`messages` 配列)で管理してください。
 - ストリーミングは `threading.Thread` + `asyncio.Queue` でCコールバックスレッドとASGIイベントループを橋渡ししています。クライアント切断は `GenieDialog_signal(ACTION_ABORT)` で能動的に中断されます。
@@ -661,10 +661,11 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | 操作 | スロット選択方法 | 未指定/不一致時のフォールバック |
 |---|---|---|
 | `/v1/completions`, `/v1/chat/completions` | body の `model`、または body の `slot`(スロット**名**)で上書き | プライマリスロット(`slots[0]`) |
-| `/v1/prefix/warmup`, `/v1/lora/*` | body の `model` | プライマリスロット |
-| `/v1/server/performance_policy`(GET) | クエリパラメータ `?model=`(`?slot=` は不可) | プライマリスロット |
+| `/v1/prefix/warmup`、`/v1/lora/*`(POST)、`POST /v1/server/performance_policy` | body の `slot`(スロット**名**)、無ければ `model` | プライマリスロット |
+| `GET /v1/server/performance_policy` | クエリパラメータ `?slot=`(スロット**名**)、無ければ `?model=` | プライマリスロット |
 | `/v1/lora/current` | クエリパラメータ `?slot=`(スロット**名**)、無ければ `?model=` | プライマリスロット |
 | `/v1/server/idle` | クエリパラメータ `?slot=`(スロット**名**) | プライマリスロット |
+| `/ready` | クエリパラメータ `?slot=`(スロット**名**) | 全スロット |
 | `POST /v1/models/switch` | body の `slot`(スロット**名**、モデルIDではない) | プライマリスロット |
 
 `model` によるルーティングは「現在そのスロットにロードされているモデルの `active_model_id`(= モデルディレクトリ名)と完全一致するか」で決まります(`SlotManager.select`)。`POST /v1/models/switch` だけは対象が「これからモデルを入れ替えるハードウェアスロット」そのものなので、モデルIDではなく**スロット名**で選びます。
@@ -1000,7 +1001,7 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 
 `messages` に `system` ロールが含まれ、かつテンプレートが分割可能(llama3/chatml/gemma4)な場合、system プロンプト部分だけを別途KVキャッシュとして保存・復元します。
 
-- キャッシュキー: `sha256(f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}\x1f{prefix_prompt}")[:16]`
+- キャッシュキー: `sha256(f"{namespace}\x1f{prefix_prompt}")[:16]`。`namespace` は `f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}"` で、LoRA の強さを設定した後はその後ろに `|tensor=alpha,...` が付く(`Slot.cache_namespace`)
 - **スロット/モデル/LoRAでnamespace化**されているため、`/v1/models/switch` や `/v1/lora/apply` で状態を切り替えても、別スロット/別モデル/別LoRA用に保存されたKVキャッシュを誤って復元することはありません(単にキーが変わるため自然にmiss扱いになります)。
 - 保存形式: `GenieDialog_save`/`GenieDialog_restore` が書き出すファイル(またはディレクトリ)を `PREFIX_CACHE_DIR/prefix_<key>.geniestate` として管理(全スロット共通のディレクトリですが、キーが分かれているため衝突しません)。隣の `prefix_<key>.json` に namespace を記録しており、これを使って `DELETE /v1/prefix/cache?scope=unreachable` が、モデルや LoRA の変更で取り残されたエントリを見つけます([API](./API.ja.md#prefix-kvキャッシュ)を参照)。
 
@@ -1364,6 +1365,8 @@ indices 無しで元動画のレートを渡されると尺全体を取り違え
 1つしか無いので、動画を受けるスロットには小さい格子を与えること。
 
 ### 視覚入力の上限
+
+この節で扱うのは text-generator のコンテキストです。メモリには別に、既定で有効な上限があります: `MAX_REQUEST_BODY_MB` が本文を、`VLM_MAX_IMAGE_PIXELS` / `VLM_MAX_TOTAL_PIXELS` が画像 1 枚とリクエスト全体の画素数を、画像のヘッダからデコードの前に抑えます。これらはサーバ自身のメモリを使い尽くすものを断るだけで、コンテキストを超えるリクエストが SDK に届くのは止めません。[設定の表](#設定-env_configjson)を参照。
 
 `VLM_VISION_BUDGET_GUARD`は、視覚トークンを**NPUに届く前に**text-generatorの
 `context.size`と突き合わせて検査し、収まらないリクエストを`400`で返す
