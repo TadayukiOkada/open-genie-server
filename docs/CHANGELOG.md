@@ -92,7 +92,10 @@
 - **A Qwen3-VL bundle whose `temporal_patch_size` is not 2 is refused at
   startup.** The patchify stacks exactly two frames, but `metadata.json`
   could set any value. The slot then loaded and failed a reshape with a
-  `500` on every request. No export uses anything but 2.
+  `500` on every request. No export uses anything but 2. A side that is not
+  a whole number of patches (`image_width: 392` at patch 16) failed the same
+  way and is refused too, and so is a metadata number that is not an
+  integer, which `int()` used to truncate (2.7 became 2).
 - **Tool round trips render consistently across chat templates.**
   - llama3 wrote tool calls in Hermes whatever the slot's tool format was.
   - gemma4 took a tool result's function name only from `name`, which OpenAI
