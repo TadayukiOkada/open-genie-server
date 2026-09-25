@@ -2748,6 +2748,9 @@ def test_config_flags_default_off_and_accept_booleans(tmp_path):
     ("CHAT_TEMPLATE", "chatlm"),      # used to render as chatml anyway
     ("CHAT_TEMPLATE", "qwen"),
     ("CHAT_TEMPLATE", 3),
+    ("CHAT_TEMPLATE", 0),             # falsy, but not "unset" either
+    ("CHAT_TEMPLATE", False),
+    ("TOOL_FORMAT", []),
     ("TOOL_FORMAT", "hermes2"),       # used to fall back to hermes
     ("TOOL_FORMAT", "gemma"),
 ])
@@ -2763,6 +2766,8 @@ def test_an_unknown_template_or_tool_format_is_refused(tmp_path, key, value):
     ("CHAT_TEMPLATE", "", "chat_template_override", ""),
     ("TOOL_FORMAT", "Gemma4", "tool_format_override", "gemma4"),
     ("TOOL_FORMAT", "", "tool_format_override", ""),
+    ("CHAT_TEMPLATE", None, "chat_template_override", ""),   # null = unset
+    ("TOOL_FORMAT", None, "tool_format_override", ""),
 ])
 def test_known_template_and_tool_format_names_load(tmp_path, key, value, attr,
                                                    expected):

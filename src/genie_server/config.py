@@ -606,8 +606,24 @@ def _parse_bool(raw: dict, key: str, default: bool = False) -> bool:
     workaround that hides what the SDK or the bundle does."""
     value = raw.get(key, default)
     if not isinstance(value, bool):
-        raise ValueError(f"{key} must be true or false, got {value!r}")
+        # ValueError, not TypeError: load_config reports every bad value
+        # in the file that way (see _parse_poll).
+        raise ValueError(f"{key} must be true or false, got {value!r}")  # noqa: TRY004
     return value
+
+
+def _parse_choice(raw: dict, key: str, allowed, unset: str) -> str:
+    """A name from `allowed`, ignoring case and surrounding spaces, or ""
+    when the key is absent, empty or null. Any other type is refused: 0 or
+    false used to pass as "unset" while 3 was an error."""
+    value = raw.get(key)
+    if value is None:
+        return ""
+    name = value.strip().lower() if isinstance(value, str) else None
+    if name is None or (name and name not in allowed):
+        raise ValueError(f"{key} must be one of {tuple(allowed)} "
+                         f"(or unset to {unset}), got {value!r}")
+    return name
 
 
 def _parse_chat_template(raw: dict) -> str:
@@ -615,24 +631,14 @@ def _parse_chat_template(raw: dict) -> str:
     fall through detection to chatml, which renders any model's prompt in
     the wrong turn markers without an error anywhere."""
     from .templates import TEMPLATE_FAMILIES
-    value = raw.get("CHAT_TEMPLATE", "")
-    name = value.strip().lower() if isinstance(value, str) else value
-    if name and name not in TEMPLATE_FAMILIES:
-        raise ValueError(f"CHAT_TEMPLATE must be one of {TEMPLATE_FAMILIES} "
-                         f"(or unset to detect it), got {value!r}")
-    return name
+    return _parse_choice(raw, "CHAT_TEMPLATE", TEMPLATE_FAMILIES, "detect it")
 
 
 def _parse_tool_format(raw: dict) -> str:
     """TOOL_FORMAT: "" (derive from the template) or a dialect name. A typo
     used to fall back to hermes."""
     from .tool_formats import FORMATS
-    value = raw.get("TOOL_FORMAT", "")
-    name = value.strip().lower() if isinstance(value, str) else value
-    if name and name not in FORMATS:
-        raise ValueError(f"TOOL_FORMAT must be one of {tuple(FORMATS)} "
-                         f"(or unset to derive it), got {value!r}")
-    return name
+    return _parse_choice(raw, "TOOL_FORMAT", FORMATS, "derive it")
 
 
 def _check_slot_names(specs) -> None:
