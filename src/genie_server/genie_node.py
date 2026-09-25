@@ -199,9 +199,12 @@ class Node:
 
     def set_text_callback(self, io_name, fn):
         """fn(text: str, code: str) -> None"""
+        from .capi import TERMINAL_SENTENCE_CODES, utf8_stream
+        feed = utf8_stream()   # one per node; reset at every terminal code
+
         def _trampoline(response, code, user_data):
             try:
-                fn(response.decode("utf-8", "replace") if response else "",
+                fn(feed(response, code in TERMINAL_SENTENCE_CODES),
                    SENTENCE_CODE.get(code, str(code)))
             except Exception as e:                     # never let an exception cross into C
                 print(f"[genie_node callback error] {e}")

@@ -2817,3 +2817,79 @@ def test_distinct_slot_names_load(tmp_path):
         VLM_SLOTS=[{"model_root": str(tmp_path), "spec": "qwen3_vl"}]))
     assert [s.name for s in cfg.text_slots] == ["slot0", "chat"]
     assert [s.name for s in cfg.vlm_slots] == ["vlm0"]
+
+
+# ---------------------------------------------------------------- UTF-8 across callbacks
+
+SPLIT = ["日".encode()[:2], "日".encode()[2:] + "本".encode()[:1],
+         "本".encode()[1:] + b"!"]     # two characters cut mid-sequence
+
+
+def test_utf8_stream_joins_a_character_split_across_callbacks():
+    from genie_server.capi import utf8_stream
+    feed = utf8_stream()
+    assert [feed(b, False) for b in SPLIT] == ["", "日", "本!"]
+
+
+def test_utf8_stream_shows_what_never_completes_and_starts_over():
+    """errors="ignore" used to drop it without a trace."""
+    from genie_server.capi import utf8_stream
+    feed = utf8_stream()
+    assert feed("日".encode()[:2], False) == ""
+    assert feed(None, True) == "�"
+    assert feed(b"ok", True) == "ok"          # nothing carried over
+    assert feed(b"a\xffb", False) == "a�b"
+
+
+def _fake_cdll(**fns):
+    class CDLL:
+        def __getattr__(self, name):
+            def fn(*args):
+                return 0
+            setattr(self, name, fn)
+            return fn
+    lib = CDLL()
+    for name, fn in fns.items():
+        setattr(lib, name, fn)
+    return lib
+
+
+def test_a_dialog_query_joins_split_bytes_through_the_real_trampoline():
+    from genie_server import capi
+
+    def query(handle, text, code, cb, user_data):
+        for i, chunk in enumerate(SPLIT):
+            cb(chunk, capi.SENTENCE_END if i == len(SPLIT) - 1
+               else capi.SENTENCE_CONTINUE, None)
+        return 0
+
+    lib = capi.GenieLib(_fake_cdll(GenieDialog_query=query))
+    got = []
+    lib.query(None, "hi", capi.SENTENCE_COMPLETE,
+              lambda t, c: got.append(t))
+    assert "".join(got) == "日本!"
+
+
+def test_a_vlm_text_callback_joins_split_bytes_and_resets_per_answer(
+        monkeypatch):
+    from genie_server import capi, genie_node
+    captured = {}
+
+    def set_cb(handle, io, cb):
+        captured["cb"] = cb
+        return 0
+
+    monkeypatch.setattr(genie_node, "_lib",
+                        _fake_cdll(GenieNode_setTextCallback=set_cb))
+    node = object.__new__(genie_node.Node)
+    node._handle = 1
+    got = []
+    node.set_text_callback(next(iter(genie_node.NODE_IO)),
+                           lambda t, c: got.append((t, c)))
+    cb = captured["cb"]
+    cb(SPLIT[0], capi.SENTENCE_CONTINUE, None)
+    cb(SPLIT[1], capi.SENTENCE_CONTINUE, None)
+    cb("日".encode()[:1], capi.SENTENCE_END, None)   # cut off at the end
+    cb(b"!", capi.SENTENCE_COMPLETE, None)            # next answer starts clean
+    assert got == [("", "continue"), ("日", "continue"),
+                   ("��", "end"), ("!", "complete")]

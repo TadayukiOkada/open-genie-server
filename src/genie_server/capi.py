@@ -5,6 +5,7 @@ server never touches ctypes directly — and so tests can substitute a fake
 implementation with the same method surface (see tests/fake_genie.py).
 """
 
+import codecs
 import ctypes
 import json
 import logging
@@ -24,6 +25,29 @@ SENTENCE_REWIND = 5    # KV cache rewind for prefix match
 SENTENCE_RESUME = 6    # Resumed after pause
 
 TERMINAL_SENTENCE_CODES = frozenset({SENTENCE_COMPLETE, SENTENCE_END, SENTENCE_ABORT})
+
+
+def utf8_stream():
+    """A decoder for one stream of token callbacks: feed(data, final) -> str.
+
+    A callback's bytes are not guaranteed to end on a character boundary.
+    The SDK's own detokenizer holds back an incomplete sequence in the cases
+    we could read, but a split that reached us used to be dropped by
+    errors="ignore" (the dialog path) or turned into U+FFFD at the split
+    (the VLM path). Here the bytes are joined across callbacks; what is
+    still incomplete at the end of the stream (final=True, then the decoder
+    starts over), or plain invalid, shows up as U+FFFD instead of vanishing.
+    A callback whose bytes are all held back yields "".
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    def feed(data: bytes | None, final: bool) -> str:
+        text = decoder.decode(data or b"", final)
+        if final:
+            decoder.reset()
+        return text
+
+    return feed
 
 # GenieDialog_Action_t
 ACTION_ABORT = 0x01
@@ -457,9 +481,10 @@ class GenieLib:
         invoked from inside the C call for every generated piece of text.
         Returns the Genie_Status_t (0 success, >0 warning, <0 error)."""
 
+        feed = utf8_stream()
+
         def trampoline(token_bytes, code, _user_data):
-            on_token(token_bytes.decode("utf-8", errors="ignore") if token_bytes else "",
-                     code)
+            on_token(feed(token_bytes, code in TERMINAL_SENTENCE_CODES), code)
 
         cb = QUERY_CALLBACK(trampoline)  # local ref keeps it alive for the call
         return self._lib.GenieDialog_query(
@@ -592,7 +617,7 @@ class GenieLib:
             return None
         if dtype.value != DATATYPE_STRING or not value.stringValue:
             return ""
-        return value.stringValue.decode("utf-8", errors="ignore")
+        return value.stringValue.decode("utf-8", errors="replace")
 
     def get_context_occupancy(self, handle) -> int | None:
         """The dialog's current KV-cache/context occupancy (tokens), or None."""

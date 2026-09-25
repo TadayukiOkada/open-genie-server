@@ -79,6 +79,15 @@
 
 ### Fixed
 
+- **A character split across two token callbacks is joined, not dropped.**
+  The dialog path decoded each callback with `errors="ignore"`, so a
+  multibyte character (Japanese, an emoji) that arrived in two pieces
+  vanished from the output without a trace. The VLM path used `replace`,
+  which turned the split into U+FFFD. The SDK's detokenizer holds back an
+  incomplete sequence in the paths we read, so this should be rare, but both
+  paths now keep an incremental decoder per stream: pieces are joined, and
+  bytes that never complete, or are invalid, show as U+FFFD instead of
+  disappearing.
 - **Two slots with the same name are a startup error.** Nothing checked
   it, across `TEXT_SLOTS` and `VLM_SLOTS` or within one list, and a slot's
   name is a key in several places. Routing and `/v1/server/status` reached
