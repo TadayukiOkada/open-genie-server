@@ -22,6 +22,15 @@ Two conventions apply everywhere:
   a misconfigured base URL.
 - `GET /health` and `GET /v1/health` return `{"status": "ok"}` (liveness
   probe, vLLM-compatible shape).
+- `GET /ready` and `GET /v1/ready` are the readiness probe: `200`
+  `{"status": "ready", "slots": [{"name", "loaded"}, ...]}` when every slot,
+  VLM slots included, holds a model, and `503` with `"status": "not ready"`
+  and a `not_loaded` list when one does not. That happens during a model
+  switch, and after a failed `unload_first` switch leaves a slot empty, which
+  `/health` does not show. It is a status body, not an error envelope.
+  **It reports only whether a model is loaded.** A slot the stock library has
+  wedged still reads as ready: this server does not detect the wedge (see
+  [QAIRT Version Issues](./QAIRT_VERSIONS.md)).
 
 Everything outside the first group is this server's own; an OpenAI client
 never sees it.

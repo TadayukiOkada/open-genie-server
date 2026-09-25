@@ -42,6 +42,15 @@
   query already finished normally is not a timeout: that output is complete,
   and it is returned as before.
 
+### Added
+
+- **`GET /ready` (and `/v1/ready`), a readiness probe.** `/health` answers
+  `ok` whatever the slots hold, so a slot left empty by a failed
+  `unload_first` switch was invisible to monitoring while every request to it
+  failed. `/ready` is `200` when every slot holds a model and `503` with the
+  empty ones listed otherwise. It does not detect a wedged slot: the stock
+  library's wedge is reported, not detected, by design.
+
 ### Fixed
 
 - **Generation parameters of the wrong type are a `400`.** They reached the

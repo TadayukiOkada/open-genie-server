@@ -564,6 +564,31 @@ def create_app(state: ServerState) -> FastAPI:
         """Liveness probe (vLLM-compatible shape)."""
         return {"status": "ok"}
 
+    @app.get("/ready")
+    @app.get("/v1/ready")
+    async def ready():
+        """Readiness probe: 200 when every slot holds a model, 503 when one
+        does not -- mid-switch, or left empty by a failed unload_first switch,
+        after which /health still says ok and every request to that slot
+        fails. Startup never shows here: the server does not listen until
+        every slot has loaded.
+
+        "Loaded" is all it knows. A slot the stock library has wedged still
+        holds its model and still reads as ready: telling a wedge from a slow
+        answer means sending a request, and this server does not detect the
+        wedge or paper over it (README, principle 3)."""
+        slots = [{"name": s.name, "loaded": s.handle is not None}
+                 for s in manager.slots]
+        slots += [{"name": v.name, "loaded": v.pipeline is not None}
+                  for v in manager.vlm_slots]
+        not_loaded = [s["name"] for s in slots if not s["loaded"]]
+        body = {"status": "not ready" if not_loaded else "ready",
+                "slots": slots}
+        if not_loaded:
+            body["not_loaded"] = not_loaded
+            return JSONResponse(status_code=503, content=body)
+        return body
+
     # ------------------------------------------------------------ models
 
     @app.get("/models")
