@@ -26,6 +26,7 @@ import logging
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 
@@ -333,12 +334,113 @@ async def _collect_or_raise(gen: Generation, state: ServerState,
     return text
 
 
+# ---------------------------------------------------------------- slot-locked work
+
+class SlotBusyError(HTTPException):
+    """The slot's lock was not free in time (503). A type of its own so a
+    caller can tell "busy" apart from an HTTPException the work raised."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=503, detail=detail)
+
+
+class ClientGoneError(HTTPException):
+    """The client disconnected while its request waited for the slot. Nobody
+    reads this response; the type exists so the handler stops cleanly."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=499, detail=detail)
+
+
+# How often a request waiting for a slot lock checks whether its client is
+# still there.
+_DISCONNECT_POLL_S = 0.5
+
+# Threads for management calls that wait on a slot lock. Separate from the
+# loop's default executor, which /v1/server/idle, the warmup join and media
+# decoding share: a switch can wait 600 s for its slot, and a few of those
+# queued behind a long generation must not starve the rest.
+_SLOT_ADMIN_WORKERS = 8
+
+
+async def run_with_slot_lock(slot, fn, *, timeout: float, executor=None,
+                             request: Request | None = None,
+                             require_loaded: bool = True,
+                             busy_detail: str | None = None):
+    """Runs fn() holding slot.lock, on a worker thread, and returns its result.
+
+    Waiting for the lock (a generation can hold it for inference_timeout_s)
+    and the SDK call itself both block, so neither may run on the event loop:
+    that would stall every other slot's token delivery and /health.
+
+    - SlotBusyError (503) if the lock is not acquired within `timeout`,
+      counted from this call — time spent queued for an executor thread
+      counts against it.
+    - With `require_loaded`, the slot is checked for a model AFTER the lock
+      is acquired. Checking before is not enough: a failed unload_first
+      switch can empty the slot while this call waits, and fn() would then
+      hand a null handle to the SDK. A switch passes False, since it is how
+      an empty slot gets its model back.
+    - With `request`, the client is polled while the call waits. If it has
+      gone, fn() is not run once the lock is acquired, and ClientGoneError is
+      raised. Starlette does not cancel a plain request's handler on
+      disconnect, and a thread cannot be cancelled, so without this a switch
+      the client gave up on would still happen up to 600 s later. A
+      disconnect after fn() has started cannot be undone.
+    """
+    deadline = time.monotonic() + timeout
+    abandoned = threading.Event()
+
+    def _run():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not slot.lock.acquire(timeout=remaining):
+            raise SlotBusyError(
+                busy_detail or f"Slot '{slot.name}' busy; could not acquire lock.")
+        try:
+            if abandoned.is_set():
+                logger.info(f"[{slot.name}] Client disconnected while waiting "
+                            "for the slot; not running the request.")
+                return None
+            if require_loaded:
+                SlotManager.require_loaded(slot)
+            return fn()
+        finally:
+            slot.lock.release()
+
+    fut = asyncio.get_running_loop().run_in_executor(executor, _run)
+
+    def _abandon():
+        abandoned.set()
+        # Nobody awaits the future any more; retrieve its outcome so asyncio
+        # does not log "exception was never retrieved" for it.
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+
+    try:
+        if request is None:
+            return await fut
+        while True:
+            done, _ = await asyncio.wait({fut}, timeout=_DISCONNECT_POLL_S)
+            if done:
+                return fut.result()
+            if await request.is_disconnected():
+                _abandon()
+                raise ClientGoneError(
+                    f"Client disconnected while waiting for slot '{slot.name}'.")
+    except asyncio.CancelledError:
+        _abandon()
+        raise
+
+
 # ---------------------------------------------------------------- app factory
 
 def create_app(state: ServerState) -> FastAPI:
+    slot_admin_executor = ThreadPoolExecutor(
+        max_workers=_SLOT_ADMIN_WORKERS, thread_name_prefix="slot-admin")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        slot_admin_executor.shutdown(wait=False, cancel_futures=True)
         logger.info("Releasing HTP context memory...")
         state.manager.free_all()
 
@@ -391,6 +493,13 @@ def create_app(state: ServerState) -> FastAPI:
         (with a fallback), so there is no fixed allow-list."""
         return protocol.model_object(model_id)
 
+    async def _admin_with_slot_lock(request, slot, fn, timeout, **kwargs):
+        """A management call that changes the slot: on the dedicated
+        executor, and dropped if its client leaves while it waits."""
+        return await run_with_slot_lock(
+            slot, fn, timeout=timeout, executor=slot_admin_executor,
+            request=request, **kwargs)
+
     @app.post("/v1/models/switch")
     async def switch_model(request: Request):
         """Hot-swaps the model loaded into one hardware slot (NSP core).
@@ -423,12 +532,7 @@ def create_app(state: ServerState) -> FastAPI:
                 f"'config_file' if this bundle names its dialog config "
                 f"something else.", "model_dir", status_code=404)
 
-        if not slot.lock.acquire(timeout=cfg.warmup_join_timeout_s):
-            raise HTTPException(
-                status_code=503,
-                detail=f"Slot '{slot.name}' busy; could not acquire lock for "
-                       f"model switch within {cfg.warmup_join_timeout_s}s.")
-        try:
+        def _switch():
             try:
                 # Set before the load, since switch_model reads it; restored
                 # on failure so a slot never advertises a config it is not
@@ -439,9 +543,14 @@ def create_app(state: ServerState) -> FastAPI:
                 slot.config_file = previous_config_file
                 logger.error(f"[{slot.name}] Model switch to {candidate} failed: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
-        finally:
-            manager.status[slot.name] = {"phase": "idle", "detail": ""}
-            slot.lock.release()
+            finally:
+                manager.status[slot.name] = {"phase": "idle", "detail": ""}
+
+        await _admin_with_slot_lock(
+            request, slot, _switch, cfg.warmup_join_timeout_s,
+            require_loaded=False,
+            busy_detail=f"Slot '{slot.name}' busy; could not acquire lock for "
+                        f"model switch within {cfg.warmup_join_timeout_s}s.")
 
         return {"status": "switched", "slot": slot.name,
                 "model": slot.active_model_id, "template": slot.chat_template}
@@ -735,7 +844,7 @@ def create_app(state: ServerState) -> FastAPI:
             segments = vlm.plan_segments(vslot, system_text, parts,
                                          vlm.extract_video_meta(body),
                                          guard=cfg.vlm_vision_budget_guard)
-            images = vlm.decode_media_sources(sources)
+            images = await asyncio.to_thread(vlm.decode_media_sources, sources)
         except ValueError as e:
             raise InvalidRequestError(str(e), "messages")
 
@@ -1122,12 +1231,6 @@ def create_app(state: ServerState) -> FastAPI:
 
     # ------------------------------------------------------------ LoRA
 
-    def _locked_slot(slot):
-        if not slot.lock.acquire(timeout=cfg.inference_timeout_s):
-            raise HTTPException(
-                status_code=503,
-                detail=f"Slot '{slot.name}' busy; could not acquire lock.")
-
     @app.post("/v1/lora/apply")
     async def apply_lora(request: Request):
         """Body: {"slot": "...", "model": "...", "engine": "primary",
@@ -1149,16 +1252,15 @@ def create_app(state: ServerState) -> FastAPI:
         if not adapter:
             raise InvalidRequestError("'lora_adapter_name' is required.",
                                       "lora_adapter_name")
-        _locked_slot(slot)
-        try:
+        def _apply():
             ret = state.lib.apply_lora(slot.handle, engine_role, adapter)
             if ret != STATUS_SUCCESS:
                 raise HTTPException(status_code=500,
                                     detail=f"GenieDialog_applyLora failed: {ret}")
             # Read back from the SDK rather than trust the request blindly.
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
-        finally:
-            slot.lock.release()
+
+        await _admin_with_slot_lock(request, slot, _apply, cfg.inference_timeout_s)
         return {"status": "applied", "slot": slot.name, "engine": engine_role,
                 "lora_adapter_name": slot.active_lora_adapter}
 
@@ -1173,15 +1275,14 @@ def create_app(state: ServerState) -> FastAPI:
         alpha = body.get("alpha")
         if not tensor_name or alpha is None:
             raise InvalidRequestError("'tensor_name' and 'alpha' are required.")
-        _locked_slot(slot)
-        try:
+        def _set():
             ret = state.lib.set_lora_strength(slot.handle, engine_role,
                                               tensor_name, float(alpha))
             if ret != STATUS_SUCCESS:
                 raise HTTPException(status_code=500,
                                     detail=f"GenieDialog_setLoraStrength failed: {ret}")
-        finally:
-            slot.lock.release()
+
+        await _admin_with_slot_lock(request, slot, _set, cfg.inference_timeout_s)
         return {"status": "applied", "slot": slot.name, "engine": engine_role,
                 "tensor_name": tensor_name, "alpha": alpha}
 
@@ -1196,16 +1297,15 @@ def create_app(state: ServerState) -> FastAPI:
         if not adapter:
             raise InvalidRequestError("'lora_adapter_name' is required.",
                                       "lora_adapter_name")
-        _locked_slot(slot)
-        try:
+        def _release():
             ret = state.lib.release_lora_memory(slot.handle, engine_role, adapter)
             if ret != STATUS_SUCCESS:
                 raise HTTPException(
                     status_code=500,
                     detail=f"GenieDialog_releaseLoraMemory failed: {ret}")
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
-        finally:
-            slot.lock.release()
+
+        await _admin_with_slot_lock(request, slot, _release, cfg.inference_timeout_s)
         return {"status": "released", "slot": slot.name, "engine": engine_role,
                 "lora_adapter_name": adapter}
 
@@ -1218,14 +1318,13 @@ def create_app(state: ServerState) -> FastAPI:
         slot = manager.select_for_request({"slot": qp.get("slot", "")},
                                           qp.get("model", ""))
         manager.require_loaded(slot)
-        if not slot.lock.acquire(timeout=1.0):
+        try:
+            name = await run_with_slot_lock(
+                slot, lambda: state.lib.get_applied_lora(slot.handle), timeout=1.0)
+        except SlotBusyError:
             # Don't stall a status check behind a long generation.
             return {"slot": slot.name,
                     "lora_adapter_name": slot.active_lora_adapter, "live": False}
-        try:
-            name = state.lib.get_applied_lora(slot.handle)
-        finally:
-            slot.lock.release()
         return {"slot": slot.name, "lora_adapter_name": name, "live": True}
 
     # ------------------------------------------------------------ performance
@@ -1235,12 +1334,12 @@ def create_app(state: ServerState) -> FastAPI:
         """?model= selects the slot."""
         slot = manager.select(request.query_params.get("model", ""))
         manager.require_loaded(slot)
-        if not slot.lock.acquire(timeout=1.0):
-            return {"slot": slot.name, "policy": None, "live": False}
         try:
-            val = state.lib.get_performance_policy(slot.handle)
-        finally:
-            slot.lock.release()
+            val = await run_with_slot_lock(
+                slot, lambda: state.lib.get_performance_policy(slot.handle),
+                timeout=1.0)
+        except SlotBusyError:
+            return {"slot": slot.name, "policy": None, "live": False}
         return {"slot": slot.name,
                 "policy": PERFORMANCE_POLICY_NAMES.get(val, val),
                 "raw_value": val, "live": True}
@@ -1256,16 +1355,15 @@ def create_app(state: ServerState) -> FastAPI:
         if policy not in PERFORMANCE_POLICIES:
             raise InvalidRequestError(
                 f"'policy' must be one of: {sorted(PERFORMANCE_POLICIES)}", "policy")
-        _locked_slot(slot)
-        try:
+        def _set():
             ret = state.lib.set_performance_policy(slot.handle,
                                                    PERFORMANCE_POLICIES[policy])
             if ret != STATUS_SUCCESS:
                 raise HTTPException(
                     status_code=500,
                     detail=f"GenieDialog_setPerformancePolicy failed: {ret}")
-        finally:
-            slot.lock.release()
+
+        await _admin_with_slot_lock(request, slot, _set, cfg.inference_timeout_s)
         return {"status": "applied", "slot": slot.name, "policy": policy}
 
     return app
