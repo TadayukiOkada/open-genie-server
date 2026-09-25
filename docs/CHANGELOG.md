@@ -44,6 +44,24 @@
 
 ### Fixed
 
+- **Generation parameters of the wrong type are a `400`.** They reached the
+  worker thread unchecked. A string `temperature` or `seed` was a `500`, and
+  a string `n` or a list `chat_template_kwargs` was a plain-text `500`.
+  Others passed silently: `top_k: 1.5` was cut to 1, turning a sampled
+  request greedy, `top_p: 7` went to the SDK, and `stream`, `echo`,
+  `enable_thinking` and chat `logprobs` went through `bool()`, so the string
+  `"false"` meant true. Now:
+  - `temperature` must be ≥ 0, `top_p` from 0 to 1, and `top_k` an integer
+    ≥ 0. vLLM's `-1` ("no limit") is accepted and sent as `0`, which means
+    the same here.
+  - `seed` must be an integer from 0 to 2³¹−1.
+  - `n` and `best_of` must be integers ≥ 1.
+  - `max_tokens`, `max_completion_tokens` and `top_logprobs` must be
+    integers. `true` used to be read as 1.
+  - `chat_template_kwargs` and `stream_options` must be objects, and the
+    flags must be booleans. This includes `stream_options.include_usage`:
+    the string `"false"` used to send the usage chunk anyway.
+  - An integral float such as `2.0` counts as an integer.
 - **An unexpected exception is an OpenAI error, not plain text.** A bug
   reached by a request (a string `n`, a list for `chat_template_kwargs`)
   answered `500` with the body `Internal Server Error` as `text/plain`, which

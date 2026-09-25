@@ -1886,6 +1886,149 @@ def test_a_lora_alpha_is_checked_against_the_model_that_holds_the_lock(state):
     assert state.lib.lora_strengths == []
 
 
+# ---------------------------------------------------------------- parameter types
+
+def _chat(client, **extra):
+    return client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4,
+        **extra})
+
+
+@pytest.mark.parametrize("extra, param", [
+    ({"temperature": "hot"}, "temperature"),     # was a 500 from float()
+    ({"temperature": -0.1}, "temperature"),
+    ({"temperature": True}, "temperature"),
+    ({"top_p": 7}, "top_p"),                     # was passed to the SDK
+    ({"top_p": "0.9"}, "top_p"),
+    ({"top_k": 1.5}, "top_k"),                   # was int()-ed to 1: greedy
+    ({"top_k": "5"}, "top_k"),
+    ({"seed": "x"}, "seed"),                     # was a 500 from int()
+    ({"seed": -1}, "seed"),                      # numpy refuses it
+    ({"seed": 2**31}, "seed"),                   # the SDK's stoi overflows
+    ({"n": "2"}, "n"),                           # was a plain-text 500
+    ({"n": 0}, "n"),
+    ({"chat_template_kwargs": [1]}, "chat_template_kwargs"),  # plain-text 500
+    ({"chat_template_kwargs": {"enable_thinking": "false"}}, "enable_thinking"),
+    ({"enable_thinking": "false"}, "enable_thinking"),  # "false" read as true
+    ({"stream": "false"}, "stream"),             # likewise: it streamed
+    ({"logprobs": "yes"}, "logprobs"),
+])
+def test_a_generation_parameter_of_the_wrong_type_is_a_400(state, client,
+                                                            extra, param):
+    r = _chat(client, **extra)
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["type"], err["param"]) == ("invalid_request_error", param)
+    assert state.lib.queries == []
+
+
+def test_vllms_top_k_minus_one_means_no_limit(state, client):
+    """vLLM spells "no top-k limit" -1; here it is 0, since the SDK reads
+    top-k as unsigned. Same meaning, so it is accepted and sent as 0."""
+    r = _chat(client, top_k=-1)
+    assert r.status_code == 200, r.text
+    handle = state.manager.slots[0].handle.value
+    assert state.lib.sampler_params[handle]["top-k"] == "0"
+
+
+@pytest.mark.parametrize("top_k", [-2, -1.5])
+def test_other_negative_top_k_is_refused(client, top_k):
+    r = _chat(client, top_k=top_k)
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "top_k"
+    assert "vLLM's -1" in r.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens"])
+def test_a_max_tokens_of_true_is_not_one(client, key):
+    """isinstance(True, int) let true through as max_tokens = 1."""
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], key: True})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == key
+
+
+def test_an_integral_float_max_tokens_is_accepted(state, client):
+    """8.0 is how some clients serialize every number; it was refused while
+    true was accepted."""
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8.0})
+    assert r.status_code == 200, r.text
+    assert state.lib.max_tokens[state.manager.slots[0].handle.value] == 8
+
+
+def test_top_logprobs_of_true_is_not_one(client):
+    r = _chat(client, logprobs=True, top_logprobs=True)
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "top_logprobs"
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/completions", {"prompt": "hi"}),
+])
+@pytest.mark.parametrize("options, param", [
+    ("x", "stream_options"),
+    (["include_usage"], "stream_options"),
+    ({"include_usage": "false"}, "stream_options.include_usage"),
+])
+def test_stream_options_are_checked_before_the_generation_starts(
+        state, client, path, body, options, param):
+    """bool("false") sent a usage chunk to a client that asked for none, and
+    a non-object was a 500. Both are refused before any generation starts:
+    a 400 raised while the stream was being set up would have left that
+    generation holding the slot."""
+    r = client.post(path, json={**body, "stream": True,
+                                "stream_options": options})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == param
+    assert state.lib.queries == []
+
+
+def test_a_nan_temperature_is_a_400(state, client):
+    """Python's json reads NaN, and NaN passes every range comparison."""
+    r = client.post("/v1/chat/completions", headers={
+        "Content-Type": "application/json"}, content=(
+        '{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4, '
+        '"temperature": NaN}'))
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "temperature"
+
+
+@pytest.mark.parametrize("extra, param", [
+    ({"echo": "false"}, "echo"),
+    ({"stream": 1}, "stream"),
+    ({"best_of": "2"}, "best_of"),
+    ({"n": "2"}, "n"),                           # was a plain-text 500
+])
+def test_completions_parameters_of_the_wrong_type_are_a_400(state, client,
+                                                             extra, param):
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 4,
+                                             **extra})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["param"] == param
+    assert state.lib.queries == []
+
+
+def test_valid_edge_values_reach_the_sdk(state, client):
+    """The bounds themselves are allowed, and an integral float is an
+    integer (some clients serialize every number as a float)."""
+    r = _chat(client, temperature=0.7, top_p=1, top_k=2.0, seed=2**31 - 1,
+              n=1, stream=False, logprobs=False,
+              chat_template_kwargs={"enable_thinking": False})
+    assert r.status_code == 200, r.text
+    params = state.lib.sampler_params[state.manager.slots[0].handle.value]
+    assert (params["top-k"], params["top-p"], params["seed"]) == (
+        "2", "1.0", str(2**31 - 1))
+
+
+def test_warmup_enable_thinking_must_be_a_bool(client):
+    r = client.post("/v1/prefix/warmup", json={"system_prompt": "s",
+                                               "enable_thinking": "false"})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "enable_thinking"
+
+
 # ---------------------------------------------------------------- unexpected errors
 
 _ERROR_ID = r"err-[0-9a-f]{8}"
