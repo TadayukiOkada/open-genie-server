@@ -454,18 +454,19 @@ def create_app(state: ServerState) -> FastAPI:
 
     app = FastAPI(title="Genie OpenAI-Compatible Server", lifespan=lifespan)
 
-    # CORS: allow browser-based clients (e.g. Open WebUI) to call this server
-    # directly. Wide open by default since this server typically runs on a
-    # local/private network; tighten allow_origins for exposed deployments.
-    # (allow_credentials must be False with a wildcard origin — browsers
-    # reject the "*" + credentials combination.)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS: off unless CORS_ALLOW_ORIGINS names the origins a browser page may
+    # call from (see ServerConfig.cors_allow_origins). With no middleware a
+    # cross-origin page cannot read a reply or pass a preflight; the simple
+    # requests a browser sends without asking are refused by read_json_body.
+    # (allow_credentials stays False: browsers reject "*" with credentials.)
+    if state.config.cors_allow_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(state.config.cors_allow_origins),
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     protocol.install_error_handlers(app)
 

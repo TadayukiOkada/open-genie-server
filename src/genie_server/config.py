@@ -244,6 +244,15 @@ class ServerConfig:
     vlm_vision_budget_guard: bool = False
     host: str = "0.0.0.0"
     port: int = 8080
+    # Origins a browser page may call this server from (CORS). Empty, the
+    # default, sends no CORS headers at all, so a page on another origin can
+    # neither read a response nor get a preflighted request (a JSON POST, a
+    # DELETE) past the browser. None of the documented clients need it: lm_eval,
+    # curl and the OpenAI SDK are not browsers, and Open WebUI calls from its
+    # backend. "*" allows every origin, which is what every release up to 1.4.0
+    # did -- it let any web page a user on the same network happened to open
+    # drive the management endpoints and read the replies.
+    cors_allow_origins: tuple[str, ...] = ()
     text_slots: tuple[SlotSpec, ...] = field(default_factory=tuple)
     vlm_slots: tuple[VLMSlotSpec, ...] = field(default_factory=tuple)
     # Which kind of slot is created first at startup. Only matters when both
@@ -508,6 +517,20 @@ def _parse_slot_load_order(raw: dict) -> str:
     return order
 
 
+def _parse_cors_allow_origins(raw: dict) -> tuple[str, ...]:
+    """CORS_ALLOW_ORIGINS: a list of origins such as
+    ["http://localhost:3000"], or ["*"]. A bare string is refused rather than
+    split, so "http://a, http://b" fails at startup instead of matching
+    nothing."""
+    origins = raw.get("CORS_ALLOW_ORIGINS", [])
+    if not isinstance(origins, list) or not all(
+            isinstance(o, str) and o.strip() for o in origins):
+        raise ValueError(
+            "CORS_ALLOW_ORIGINS must be a list of origin strings, e.g. "
+            f'["http://localhost:3000"] or ["*"], got {origins!r}')
+    return tuple(o.strip().rstrip("/") for o in origins)
+
+
 def _parse_genie_log_level(raw: dict) -> str:
     """GENIE_LOG_LEVEL: "" (off) or a name from capi.LOG_LEVELS. Validated
     here rather than at GenieLog_create time so a typo fails at startup
@@ -558,6 +581,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         vlm_vision_budget_guard=bool(raw.get("VLM_VISION_BUDGET_GUARD", False)),
         host=raw.get("HOST", "0.0.0.0"),
         port=int(raw.get("PORT", 8080)),
+        cors_allow_origins=_parse_cors_allow_origins(raw),
         text_slots=text_slots,
         vlm_slots=vlm_slots,
         slot_load_order=_parse_slot_load_order(raw),

@@ -2530,3 +2530,36 @@ def test_an_unknown_level_never_reaches_genielog_create():
 
     with pytest.raises(ValueError, match="log level"):
         FakeGenieLib().create_logger("trace")
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, ()),
+    ([], ()),
+    (["http://localhost:3000/", "*"], ("http://localhost:3000", "*")),
+])
+def test_cors_allow_origins_is_a_list_and_defaults_to_none(tmp_path, value,
+                                                           expected):
+    from genie_server.config import load_config
+
+    raw = {"QAIRT_SDK_ROOT": "/opt/qairt",
+           "TEXT_SLOTS": [{"model_root": str(tmp_path)}]}
+    if value is not None:
+        raw["CORS_ALLOW_ORIGINS"] = value
+    path = tmp_path / "env_config.json"
+    path.write_text(json.dumps(raw))
+    assert load_config(str(path)).cors_allow_origins == expected
+
+
+@pytest.mark.parametrize("value", ["*", "http://a, http://b", [""], [3]])
+def test_cors_allow_origins_that_is_not_a_list_of_origins_is_refused(
+        tmp_path, value):
+    """A string is not split: "http://a, http://b" would match no origin and
+    fail silently in the browser."""
+    from genie_server.config import load_config
+
+    path = tmp_path / "env_config.json"
+    path.write_text(json.dumps({"QAIRT_SDK_ROOT": "/opt/qairt",
+                                "TEXT_SLOTS": [{"model_root": str(tmp_path)}],
+                                "CORS_ALLOW_ORIGINS": value}))
+    with pytest.raises(ValueError, match="CORS_ALLOW_ORIGINS"):
+        load_config(str(path))

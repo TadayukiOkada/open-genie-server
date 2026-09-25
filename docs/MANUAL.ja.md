@@ -693,6 +693,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `DEFAULT_MAX_TOKENS` | 任意 | `0`(無効) | `/v1/completions`/`/v1/chat/completions`で`max_tokens`/`max_completion_tokens`が未指定の場合に、モデル自身の残りコンテキスト容量に加えて適用される追加の上限([APIリファレンス](./API.ja.md)の`max_tokens`項目参照)。`0`は追加上限なし(コンテキストサイズのみで制限 — Qualcomm自身のqai-appbuilderリファレンスサーバと同じ挙動)を意味する。特定のモデル/構成が暴走しやすいと分かっていて、より小さい安全マージンが欲しい場合に正の値を設定する([トラブルシューティング](#トラブルシューティング)参照)。クライアントが明示的に`max_tokens`を指定した場合は常にそちらが優先される。 |
 | `INFERENCE_TIMEOUT` | 任意 | `120` | 1回の`GenieDialog_query`に対するウォッチドッグ制限(秒)。遅いターゲットでの長い生成にはこの値を上げる。`GET /v1/server/idle`や同期パスの全体待ち時間(この2倍)にも使われる。 |
 | `HOST` / `PORT` | 任意 | `"0.0.0.0"` / `8080` | 待受アドレス/ポート。CLIの`--host`/`--port`が優先。 |
+| `CORS_ALLOW_ORIGINS` | 任意 | `[]` | ブラウザ上のページがこのサーバを呼んでよいオリジン。例: `["http://localhost:3000"]`。`["*"]` なら全オリジン。**既定は空で、CORS ヘッダを一切返さない**。文書にあるクライアントはどれも要らない(`lm_eval`・`curl`・OpenAI SDK はブラウザではなく、[Open WebUI](#open-webui) はバックエンドから呼ぶ)。ブラウザから直接このサーバを呼ぶページのときだけ載せる。載せたページはモデルの切り替えを含む全エンドポイントを使える。1.4.0 までは全オリジンを許していた。 |
 | `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は`<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。SDKルートなしの`linux-ubuntu`ではシステムの`libGenie.so`。 |
 | `GENIE_PROFILE` | 任意 | `false` | 各テキストスロットに `GenieProfile` をバインドし、SDK自身が計測したTTFT/プレフィル/デコードのKPIを `GET /v1/server/profile` で取得できるようにする([プロファイリング](#プロファイリングsdk側のkpi)参照)。変更には再起動が必要。 |
 | `GENIE_LOG_LEVEL` | 任意 | `""`(無効) | libGenie 自身のログを `"error"` / `"warn"` / `"info"` / `"verbose"` で有効化します。`GenieLog` を1つ作り、本サーバが作る全ての dialog / node / pipeline のコンフィグにバインドします。**無効は「静か」ではなく「無音」です**: SDK 内の `__INFO`/`__ERROR` はロガーがバインドされているかで完全に止まるため、未設定だと SDK 自身の診断は1行も見えません(ロード失敗の理由すら見えません)。`"error"` は安価で、`"info"` にするとエンジンの構成判断(そのバンドルがどの推論経路に乗るか等)も出ます。ただし `"info"` は多く、0.6B の4スロット構成の起動1回で **1,836 行**が出ました(大半はバッファ単位のメモリ登録)。有用な行は少数かつ先頭付近にあり、例えば `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128` はエンジンがそのバンドルに対してどう構成されたかを教えてくれます。行を書くのは SDK 自身で、Linux では本プロセスの stdout(`Genie:  <ms> [ LEVEL ] ...`)、Android では logcat に出ます — Python の logging を通らないので、サーバ自身のログ書式にはなりません。コンフィグにバインドするため、変更には再起動が必要です。 |
@@ -1636,10 +1637,10 @@ curl $base_url/v1/server/status
 curl "$base_url/v1/server/idle?slot=chat"
 
 # 3. chatスロットのモデルを切り替え(tool_callは無停止で稼働継続)
-curl -X POST $base_url/v1/models/switch -d '{"slot": "chat", "model_dir": "llama3-8b-htp"}'
+curl -X POST $base_url/v1/models/switch -H 'Content-Type: application/json' -d '{"slot": "chat", "model_dir": "llama3-8b-htp"}'
 
 # 4. そのスロットにLoRAを適用
-curl -X POST $base_url/v1/lora/apply -d '{"model": "llama3-8b-htp", "engine": "primary", "lora_adapter_name": "finetune-v2"}'
+curl -X POST $base_url/v1/lora/apply -H 'Content-Type: application/json' -d '{"model": "llama3-8b-htp", "engine": "primary", "lora_adapter_name": "finetune-v2"}'
 
 # 5. 適用確認
 curl "$base_url/v1/lora/current?model=llama3-8b-htp"

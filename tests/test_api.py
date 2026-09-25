@@ -1614,3 +1614,56 @@ def test_a_failed_strength_change_leaves_the_namespace_alone(state, client):
     r = client.post("/v1/lora/strength", json={"tensor_name": "t", "alpha": 0.5})
     assert r.status_code == 500
     assert slot.cache_namespace == ns0 and slot.epoch == e0
+
+
+# ---------------------------------------------------------------- cross-origin
+
+EVIL = "http://evil.example"
+
+
+@pytest.mark.parametrize("headers", [
+    {"Content-Type": "text/plain"},
+    {"Content-Type": "application/x-www-form-urlencoded"},
+    {"Content-Type": "multipart/form-data; boundary=x"},
+    {},
+])
+def test_a_body_a_browser_sends_without_preflight_is_refused(client, headers):
+    """A page on any origin can POST these three content types, or none,
+    without asking the browser first. Parsing them as JSON let that page
+    change the server's state; nothing may happen before the 415."""
+    r = client.post("/v1/server/prompt_logprobs", content=b'{"enabled": true}',
+                    headers={"Origin": EVIL, **headers})
+    assert r.status_code == 415
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    assert client.get("/v1/server/prompt_logprobs").json()["enabled"] is False
+
+
+def test_a_json_media_type_with_parameters_is_accepted(client):
+    r = client.post("/v1/server/prompt_logprobs", content=b'{"enabled": true}',
+                    headers={"Content-Type": "application/json; charset=utf-8"})
+    assert r.status_code == 200
+
+
+def _preflight(client, origin):
+    return client.options("/v1/models/switch", headers={
+        "Origin": origin, "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type"})
+
+
+def test_no_origin_is_allowed_by_default(client):
+    """With no CORS_ALLOW_ORIGINS, another origin can neither pass the
+    preflight a JSON POST needs nor read a reply."""
+    assert "access-control-allow-origin" not in _preflight(client, EVIL).headers
+    r = client.get("/v1/models", headers={"Origin": EVIL})
+    assert r.status_code == 200
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_cors_allows_only_the_configured_origins(state):
+    import dataclasses
+    state.config = dataclasses.replace(
+        state.config, cors_allow_origins=("http://localhost:3000",))
+    client = TestClient(create_app(state))
+    ok = _preflight(client, "http://localhost:3000")
+    assert ok.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "access-control-allow-origin" not in _preflight(client, EVIL).headers

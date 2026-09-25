@@ -28,7 +28,7 @@ Qualcomm Genie C API (`libGenie.so`) を OpenAI互換のREST APIとして公開�
 - **Function calling(`tools`)対応** — プロンプトの方言を2つ実装し、スロットのチャットテンプレートから自動で選択。Qwen3系向けの Hermes `<tool_call>` JSON と、gemma4 独自の `<|tool_call>call:NAME{...}` トークン。どちらでもワイヤー形式はOpenAIのままで、`message.tool_calls` / `finish_reason: "tool_calls"` に変換し、ストリーミング中にテキストとして漏らさない
 - `lm_eval`(`local-completions` / `local-chat-completions`)にそのまま対応。トークンID形式のプロンプトもサーバ側でデコード
 - **Logprobs対応**(SDKのカスタムサンプラーフック経由): 生成トークンの`logprobs`/`top_logprobs`(トークンあたり数msのオーバーヘッド、未使用時はゼロ)に加え、**プロンプトスコアリング**(`echo`+`logprobs`のteacher forcing)でlm_evalのloglikelihoodタスク(hellaswag, arc, mmlu等)も実行可能 — デコード速度で走るため`POST /v1/server/prompt_logprobs`によるゲート付き
-- Open WebUIフレンドリー — parts配列形式 `content` のフラット化、`GET /health`、CORS、ストリーミング `usage` チャンク(`stream_options.include_usage`)
+- Open WebUIフレンドリー — parts配列形式 `content` のフラット化、`GET /health`、明示で有効にする CORS(`CORS_ALLOW_ORIGINS`)、ストリーミング `usage` チャンク(`stream_options.include_usage`)
 - システムプロンプトのprefix KVキャッシュ(モデル/LoRAごとにnamespace化)
 - `GenieDialog_applyLora` 等によるLoRAアダプタのホットスワップ — 適用・強度・解放・読み戻しとも**実機で確認済み**
 - `/v1/models/switch` によるモデルのホットスワップ(既定では旧モデルを解放してから新モデルをロードします。この順序が確実に切り替わりますが、ロードに失敗するとスロットは空になります。`"unload_first": false` は新旧を同時に載せることで旧モデルをフォールバックとして残せます — 使う前に下記の注意を参照)

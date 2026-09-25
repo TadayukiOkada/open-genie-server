@@ -28,7 +28,7 @@ See [MANUAL.md](https://github.com/TadayukiOkada/open-genie-server/blob/master/d
 - **Function calling (`tools`)** — two prompt dialects, chosen per slot from its chat template: Hermes `<tool_call>` JSON for Qwen3-class models, and gemma4's own `<|tool_call>call:NAME{...}` tokens. Either way the wire shape is OpenAI's — parsed into `message.tool_calls` / `finish_reason: "tool_calls"`, and never leaked as text mid-stream
 - Works out of the box with `lm_eval` (`local-completions` / `local-chat-completions`; token-id prompts are decoded server-side)
 - **Logprobs** via the SDK's custom-sampler hook: per-token `logprobs`/`top_logprobs` for generated tokens (a few ms/token overhead, zero when unused), and **prompt scoring** (`echo`+`logprobs` teacher forcing) that makes lm_eval loglikelihood tasks (hellaswag, arc, mmlu, ...) work — gated behind `POST /v1/server/prompt_logprobs` since it runs at decode speed
-- Open WebUI-friendly: parts-array `content` flattening, `GET /health`, CORS, streaming `usage` chunks (`stream_options.include_usage`)
+- Open WebUI-friendly: parts-array `content` flattening, `GET /health`, opt-in CORS (`CORS_ALLOW_ORIGINS`), streaming `usage` chunks (`stream_options.include_usage`)
 - Prefix KV cache for system prompts (namespaced per model/LoRA)
 - LoRA adapter hot-swapping via `GenieDialog_applyLora` etc. — apply, strength, release and read-back, verified on hardware
 - Model hot-swapping via `/v1/models/switch` (by default the old model is freed before the new one loads, which is the order that switches reliably; a failed load then leaves the slot empty. `"unload_first": false` keeps the old model as a fallback by holding both at once — see the caveat below before using it)
