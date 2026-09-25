@@ -136,18 +136,27 @@ class Generation:
         self.timed_out = True
         self.abort()
 
-    def on_token(self, token: str, code: int) -> None:
-        """SDK token callback (worker thread, inside GenieDialog_query)."""
+    def on_token(self, token: str, code: int,
+                 got_bytes: bool | None = None) -> None:
+        """SDK token callback (worker thread, inside GenieDialog_query).
+        got_bytes: whether the SDK's callback carried bytes (see
+        GenieLib.query); None, from a caller that passes text only, means
+        a non-empty token."""
         try:
             if code == capi.SENTENCE_ABORT:
                 self.abort_seen = True
-            if token and code != capi.SENTENCE_ABORT:
+                return
+            # Counted by callback, not by visible text: a token whose bytes
+            # end mid-character arrives as "", and completion_tokens is
+            # what finish_reason="length" is inferred from.
+            if bool(token) if got_bytes is None else got_bytes:
+                self.completion_tokens += 1
+            if token:
                 if not self.ttft_logged and self.query_started_at is not None:
                     ms = (time.perf_counter() - self.query_started_at) * 1000
                     logger.info(f"TTFT [{self.request_id}] slot={self.slot.name} "
                                 f"cache={self.cache_state:4s} {ms:.1f}ms")
                     self.ttft_logged = True
-                self.completion_tokens += 1
                 self.put_threadsafe(token)
         except Exception as e:
             logger.error(f"Exception in token callback [{self.request_id}]: {e}")
@@ -358,10 +367,11 @@ def _logits_checked_on_token(lib: GenieLib, slot: Slot, generation: Generation,
     for up to max_tokens steps, so the first token decides. The result is
     remembered on the slot, and later requests fail before they queue."""
 
-    def on_token(token: str, code: int) -> None:
+    def on_token(token: str, code: int, got_bytes: bool | None = None) -> None:
         if generation.logprobs_unsupported:
             return
-        if token and code != capi.SENTENCE_ABORT and collector.step == 0:
+        if ((token or got_bytes) and code != capi.SENTENCE_ABORT
+                and collector.step == 0):
             logger.error(f"[{slot.name}] logits callback was not invoked before "
                          f"the first token; logprobs are unsupported by this "
                          f"runtime [{generation.request_id}]")
@@ -374,7 +384,7 @@ def _logits_checked_on_token(lib: GenieLib, slot: Slot, generation: Generation,
                 logger.warning(f"GenieDialog_signal failed "
                                f"[{generation.request_id}]: {ret}")
             return
-        generation.on_token(token, code)
+        generation.on_token(token, code, got_bytes)
 
     return on_token
 
@@ -386,9 +396,9 @@ def warm_up_prefix(lib: GenieLib, slot: Slot, prefix_prompt: str, cache_key: str
     slot.lock held. Updates status[slot.name] for /v1/server/status polling."""
     token_count = 0
 
-    def on_token(token: str, code: int) -> None:
+    def on_token(token: str, code: int, got_bytes: bool | None = None) -> None:
         nonlocal token_count
-        if token:
+        if bool(token) if got_bytes is None else got_bytes:
             token_count += 1
             status[slot.name]["detail"] = f"{token_count} tokens"
 

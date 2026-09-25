@@ -726,10 +726,15 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
     GeniePipeline abort or signal API: a disconnected client's pipeline keeps
     running server-side (holding vslot.lock) until it finishes naturally."""
 
-    def on_text(text: str, code: str) -> None:
+    def on_text(text: str, code: str, got_bytes: bool | None = None) -> None:
         try:
-            if text and code != "abort":
+            if code == "abort":
+                return
+            # By callback, not by visible text (see Generation.on_token):
+            # finish_reason="length" is inferred from this count.
+            if bool(text) if got_bytes is None else got_bytes:
                 generation.completion_tokens += 1
+            if text:
                 generation.put_threadsafe(text)
         except Exception as e:
             logger.error(f"Exception in VLM callback [{generation.request_id}]: {e}")

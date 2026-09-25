@@ -198,11 +198,17 @@ class Node:
                f"setData(buffer, {io_name})")
 
     def set_text_callback(self, io_name, fn):
-        """fn(text: str, code: str) -> None"""
+        """fn(text: str, code: str, got_bytes: bool) -> None. got_bytes says
+        whether the callback carried bytes (was a generated token): bytes
+        that end mid-character are held back and arrive as "" (see
+        capi.GenieLib.query)."""
+        from .capi import TERMINAL_SENTENCE_CODES, utf8_stream
+        feed = utf8_stream()   # one per node; reset at every terminal code
+
         def _trampoline(response, code, user_data):
             try:
-                fn(response.decode("utf-8", "replace") if response else "",
-                   SENTENCE_CODE.get(code, str(code)))
+                fn(feed(response, code in TERMINAL_SENTENCE_CODES),
+                   SENTENCE_CODE.get(code, str(code)), got_bytes=bool(response))
             except Exception as e:                     # never let an exception cross into C
                 print(f"[genie_node callback error] {e}")
             return GENIE_STATUS_SUCCESS

@@ -79,6 +79,18 @@
 
 ### Fixed
 
+- **A character split across two token callbacks is joined, not dropped.**
+  The dialog path decoded each callback with `errors="ignore"`, so a
+  multibyte character (Japanese, an emoji) that arrived in two pieces
+  vanished from the output without a trace. The VLM path used `replace`,
+  which turned the split into U+FFFD. The SDK's detokenizer holds back an
+  incomplete sequence in the paths we read, so this should be rare, but both
+  paths now keep an incremental decoder per stream: pieces are joined, and
+  bytes that never complete, or are invalid, show as U+FFFD instead of
+  disappearing, including when a query returns without a terminal code.
+  Tokens are counted by callback, not by visible text, so a token whose
+  bytes were held back still counts toward `max_tokens`, and a generation
+  that hit the cap reports `finish_reason: "length"`.
 - **Shutdown no longer frees a dialog under a running call, and frees what
   it used to leak.** `free_all` called `GenieDialog_free` without the slot's
   lock, so a thread still inside the SDK hit a use-after-free. That could be

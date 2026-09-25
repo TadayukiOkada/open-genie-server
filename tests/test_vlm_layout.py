@@ -571,6 +571,14 @@ def test_vlm_generation_runs_end_to_end_on_the_ai_hub_layout(monkeypatch, tmp_pa
     assert sent_texts and all(io == vlm.vlm_layout.TEXT_ENCODER_TEXT_INPUT_IO for io in sent_texts)
     assert vlm.vlm_layout.IMAGE_ENCODER_IMAGE_INPUT_IO in slot.image_encoder.buffers
 
+    # A token whose bytes were all held back (a split character) arrives as
+    # "" but still counts: finish_reason="length" is inferred from the count.
+    on_text = slot.text_generator.text_callback[1]
+    before = generation.completion_tokens
+    on_text("", "continue", got_bytes=True)
+    assert generation.completion_tokens == before + 1
+    assert generation.put_calls.count("") == 0
+
 
 
 def test_a_vlm_request_abandoned_while_waiting_never_runs(monkeypatch, tmp_path):
