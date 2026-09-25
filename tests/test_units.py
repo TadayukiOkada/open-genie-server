@@ -2743,8 +2743,9 @@ def test_a_slot_name_used_twice_is_refused_at_startup(tmp_path, text, vlm,
         load_config(_write_config(tmp_path, TEXT_SLOTS=text, VLM_SLOTS=vlm))
 
 
-@pytest.mark.parametrize("name", ["", "  ", "a/b", "a\\b", "..", 3])
-def test_a_slot_name_that_cannot_be_a_file_name_is_refused(tmp_path, name):
+@pytest.mark.parametrize("name", ["", "  ", "a/b", "a\\b", "..", 3,
+                                  "a\x00b", "a\tb", "a|b", " a", "a "])
+def test_an_unusable_slot_name_is_refused(tmp_path, name):
     from genie_server.config import load_config
     with pytest.raises(ValueError, match="slot name must be"):
         load_config(_write_config(tmp_path, TEXT_SLOTS=[

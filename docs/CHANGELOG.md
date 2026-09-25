@@ -75,7 +75,10 @@
   skipped, so its logits went to the first slot's collector and could
   corrupt a logprobs request running there. The per-slot copy of the HTP
   extension config (the `device_id` pin) was overwritten. A name that is
-  empty or holds a path separator is refused too, since it names that file.
+  empty or holds a path separator is refused too, since it names that file,
+  and so is one with a control character (the callback name reaches the SDK
+  as a C string, so a NUL cut it short onto another slot's), a `|` (the prefix cache
+  namespace separator) or surrounding whitespace.
 - **Asking for logprobs no longer changes what gets sampled.** With
   `logprobs`, sampling moves into the server. There, a `temperature`,
   `top_k` or `top_p` the request left out fell back to 1.0, no top-k and no
