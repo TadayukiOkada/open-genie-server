@@ -2318,3 +2318,83 @@ def test_ready_for_an_unknown_slot_is_a_404(client):
     r = client.get("/ready", params={"slot": "nope"})
     assert r.status_code == 404
     assert r.json()["error"]["param"] == "slot"
+
+
+# ---------------------------------------------------------------- logprobs sampling
+
+@pytest.fixture
+def collectors(monkeypatch):
+    """Every LogprobsCollector the handlers build, with its arguments."""
+    from genie_server import app as app_mod
+    made = []
+
+    class Recording(app_mod.LogprobsCollector):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(app_mod, "LogprobsCollector", Recording)
+    return made
+
+
+MODEL_SAMPLER = {"temp": 0.3, "top-k": 5, "top-p": 0.7}
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}],
+                              "logprobs": True}),
+    ("/v1/completions", {"prompt": "hi", "logprobs": 1}),
+])
+def test_logprobs_sample_with_the_models_defaults(state, client, collectors,
+                                                   path, body):
+    """What a request leaves out comes from genie_config.json, as it does
+    without logprobs. It used to be temperature 1.0, no top-k, no top-p."""
+    pytest.importorskip("numpy")
+    state.manager.slots[0].sampler_defaults = dict(MODEL_SAMPLER)
+    r = client.post(path, json={**body, "max_tokens": 2})
+    assert r.status_code == 200, r.text
+    c = collectors[-1]
+    assert (c.temperature, c.top_k, c.top_p) == (0.3, 5, 0.7)
+    # ...and the same values the SDK sampler gets on the plain path.
+    from genie_server.capi import make_sampler_params
+    sdk = make_sampler_params(MODEL_SAMPLER)
+    assert (float(sdk["temp"]), int(sdk["top-k"]), float(sdk["top-p"])) == (
+        c.temperature, c.top_k, c.top_p)
+
+
+def test_logprobs_keep_what_the_request_sets(state, client, collectors):
+    pytest.importorskip("numpy")
+    state.manager.slots[0].sampler_defaults = dict(MODEL_SAMPLER)
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "logprobs": True,
+        "max_tokens": 2, "temperature": 0.9, "top_p": 0.5})
+    assert r.status_code == 200, r.text
+    c = collectors[-1]
+    assert (c.temperature, c.top_k, c.top_p) == (0.9, 5, 0.5)
+
+
+def test_logprobs_fall_back_to_the_sdk_defaults(state, client, collectors):
+    """A model whose genie_config.json sets no sampler values gets the SDK's
+    own defaults, the ones make_sampler_params falls back to."""
+    pytest.importorskip("numpy")
+    from genie_server.capi import SDK_SAMPLER_DEFAULTS
+    state.manager.slots[0].sampler_defaults = {}
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "logprobs": True,
+        "max_tokens": 2})
+    assert r.status_code == 200, r.text
+    c = collectors[-1]
+    assert (c.temperature, c.top_k, c.top_p) == (
+        SDK_SAMPLER_DEFAULTS["temp"], SDK_SAMPLER_DEFAULTS["top-k"],
+        SDK_SAMPLER_DEFAULTS["top-p"])
+
+
+def test_greedy_logprobs_are_greedy(state, client, collectors):
+    """temperature 0 is top-k 1 on both paths."""
+    pytest.importorskip("numpy")
+    state.manager.slots[0].sampler_defaults = dict(MODEL_SAMPLER)
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "logprobs": True,
+        "max_tokens": 2, "temperature": 0})
+    assert r.status_code == 200, r.text
+    assert collectors[-1].top_k == 1
