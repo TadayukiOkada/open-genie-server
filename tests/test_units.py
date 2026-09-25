@@ -2668,3 +2668,43 @@ def test_size_ceilings_that_are_not_non_negative_numbers_are_refused(
                                 key: value}))
     with pytest.raises(ValueError, match=key):
         load_config(str(path))
+
+
+def test_lora_alpha_names_follow_how_the_sdk_fills_them_in():
+    """An adapter's own alphas; the lora block's alpha-tensor-name for one
+    that lists none; CB adapter-order names at either level."""
+    from genie_server.slots import lora_alpha_names
+    cfg = {"engine": {"model": {"binary": {"lora": {
+        "alpha-tensor-name": "lora_alpha",
+        "adapter-order": ["top"],
+        "adapters": [{"name": "a", "alphas": ["alpha0"]},
+                     {"name": "b"},
+                     {"name": "cb", "alphas": ["x"],
+                      "adapter-order": ["elementary", "advanced"]}]}}}}}
+    assert lora_alpha_names(cfg, "primary") == {
+        "alpha0", "lora_alpha", "x", "elementary", "advanced", "top"}
+    assert lora_alpha_names(cfg, "target") == lora_alpha_names(cfg, "primary")
+
+
+def test_lora_alpha_names_picks_the_engine_by_role():
+    from genie_server.slots import lora_alpha_names
+
+    def engine(role, alphas):
+        return {"role": role, "model": {"binary": {"lora": {
+            "adapters": [{"name": "a", "alphas": alphas}]}}}}
+
+    cfg = {"engine": [engine("target", ["t0"]), engine("draft", ["d0"])]}
+    assert lora_alpha_names(cfg, "primary") == {"t0"}
+    assert lora_alpha_names(cfg, "draft") == {"d0"}
+    assert lora_alpha_names(cfg, "secondary") == {"d0"}
+
+
+@pytest.mark.parametrize("cfg, role", [
+    ({}, "primary"),                                          # no engine at all
+    ({"engine": {"model": {}}}, "tertiary"),                  # unknown role
+    ({"engine": {"model": {}}}, "draft"),                     # no such engine
+    ({"engine": [{"role": "target"}, {"role": "primary"}]}, "primary"),  # two
+])
+def test_lora_alpha_names_leaves_it_to_the_sdk_when_it_cannot_tell(cfg, role):
+    from genie_server.slots import lora_alpha_names
+    assert lora_alpha_names(cfg, role) is None

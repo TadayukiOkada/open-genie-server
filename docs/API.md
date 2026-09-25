@@ -382,6 +382,8 @@ curl -X POST $base_url/v1/lora/apply \
 
 Changes a LoRA's alpha strength (calls `GenieDialog_reset` afterward). `slot` selects the slot, `model` routes by loaded model name (see [Selecting a slot](#selecting-a-slot)).
 
+`tensor_name` must be an alpha the model's `genie_config.json` declares for that engine: an adapter's `alphas`, the lora block's `alpha-tensor-name` for an adapter that lists none, or a CB multi-LoRA `adapter-order` name. Anything else is a `400` that lists the declared names — the SDK itself answers success for a name it does not have and changes nothing. `alpha` must be a finite number. Setting an alpha before its adapter is applied is allowed; the SDK keeps the value and writes it when the adapter is applied.
+
 ```bash
 curl -X POST $base_url/v1/lora/strength \
   -H "Content-Type: application/json" \

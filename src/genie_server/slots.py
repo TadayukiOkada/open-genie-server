@@ -197,6 +197,56 @@ class Slot:
 
 # ---------------------------------------------------------------- model loading
 
+# GenieDialog_setLoraStrength's engine names, as the SDK folds them together.
+_ENGINE_ROLES = {"primary": "primary", "target": "primary",
+                 "secondary": "secondary", "draft": "secondary"}
+
+
+def lora_alpha_names(dialog_cfg: dict, engine_role: str) -> set[str] | None:
+    """The names GenieDialog_setLoraStrength can act on for one engine, from
+    the dialog config: each adapter's `alphas`, or the lora block's
+    `alpha-tensor-name` for an adapter that lists none (which is how the SDK
+    fills it in), plus the `adapter-order` names a CB multi-LoRA adapter
+    takes. Empty when the engine has no LoRA at all.
+
+    The SDK cannot be relied on to refuse any other name: on an engine with an
+    inference scheduler, a name it does not recognise is kept as a CB
+    adapter-order name and the call succeeds without touching any tensor.
+
+    None when the engine cannot be found in the config (an unknown role, or a
+    shape this reader does not know): the caller should leave the name to the
+    SDK rather than refuse on a guess."""
+    role = _ENGINE_ROLES.get(engine_role)
+    engines = dialog_cfg.get("engine")
+    if role is None or not isinstance(engines, (dict, list)):
+        return None
+    engines = engines if isinstance(engines, list) else [engines]
+    matches = [e for e in engines if isinstance(e, dict)
+               and _ENGINE_ROLES.get(e.get("role", "primary")) == role]
+    if len(matches) != 1:
+        return None
+    lora = matches[0].get("model", {}).get("binary", {}).get("lora")
+    if not isinstance(lora, dict):
+        return set()
+    names: set[str] = set()
+    fallback = lora.get("alpha-tensor-name")
+    for adapter in lora.get("adapters") or []:
+        if not isinstance(adapter, dict):
+            continue
+        alphas = adapter.get("alphas")
+        if isinstance(alphas, list) and alphas:
+            names.update(a for a in alphas if isinstance(a, str))
+        elif isinstance(fallback, str) and fallback:
+            names.add(fallback)
+        order = adapter.get("adapter-order")
+        if isinstance(order, list):
+            names.update(a for a in order if isinstance(a, str))
+    order = lora.get("adapter-order")
+    if isinstance(order, list):
+        names.update(a for a in order if isinstance(a, str))
+    return names
+
+
 def load_tokenizer_file(tok_path: str):
     """Best-effort HF tokenizer load from a tokenizer.json path; None on any
     failure. Shared with vlm.VLMSlot, whose tokenizer.json comes out of a

@@ -23,6 +23,7 @@ Server management:
 import asyncio
 import json
 import logging
+import math
 import threading
 import time
 import uuid
@@ -43,7 +44,7 @@ from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
 from .prefix_cache import PrefixCache
 from .protocol import InvalidRequestError, openai_error, read_json_body, sse
-from .slots import SlotManager
+from .slots import SlotManager, lora_alpha_names
 
 logger = logging.getLogger(__name__)
 
@@ -1308,6 +1309,26 @@ def create_app(state: ServerState) -> FastAPI:
         alpha = body.get("alpha")
         if not tensor_name or alpha is None:
             raise InvalidRequestError("'tensor_name' and 'alpha' are required.")
+        if not isinstance(tensor_name, str):
+            raise InvalidRequestError("'tensor_name' must be a string.",
+                                      "tensor_name")
+        if (isinstance(alpha, bool) or not isinstance(alpha, (int, float))
+                or not math.isfinite(alpha)):
+            raise InvalidRequestError(
+                f"'alpha' must be a finite number, got {alpha!r}.", "alpha")
+        # The SDK answers success for a name the model does not have (on an
+        # engine with a scheduler it is taken as a CB adapter-order name and
+        # changes nothing), so the name is checked against the config here.
+        # A name set before its adapter is applied is fine: the SDK keeps it
+        # and writes it when the adapter is applied.
+        known = lora_alpha_names(slot.dialog_cfg, engine_role)
+        if known is not None and tensor_name not in known:
+            raise InvalidRequestError(
+                f"'{tensor_name}' is not a LoRA alpha of engine "
+                f"'{engine_role}' on slot '{slot.name}'. "
+                + (f"Its config declares: {sorted(known)}." if known else
+                   "Its config declares no LoRA adapters."),
+                "tensor_name")
         def _set():
             ret = state.lib.set_lora_strength(slot.handle, engine_role,
                                               tensor_name, float(alpha))
