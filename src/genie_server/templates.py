@@ -164,7 +164,8 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
         # <<SYS>>. Consecutive system messages share that one block rather
         # than overwriting each other, and system text with no user turn
         # after it gets an [INST] of its own instead of being dropped.
-        out, pending = "", []
+        out = ""
+        pending: list[str] = []
 
         def sys_block() -> str:
             if not pending:
@@ -191,7 +192,8 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
         # assistant role is named "model". As with llama2, consecutive system
         # messages are joined rather than overwritten, and system text with no
         # user turn after it becomes a user turn of its own.
-        out, pending = ("<bos>" if bos else ""), []
+        out = "<bos>" if bos else ""
+        pending = []
 
         def sys_text() -> str:
             body = "\n\n".join(pending)
