@@ -14,13 +14,13 @@
 
 このレビューのあと、指摘ごとに PR を作って修正しました。この節はその記録です。レビュー本文（1〜5 節）はレビュー時点のまま残し、各指摘の見出しと Low の表に対応状況の印を付けています。
 
-- 更新時点: `master` HEAD `0577dbd`（#43 の merge）
-- **解決**: Critical 1 件、High 6 件、Medium 11 件（M-1〜M-11）、Low 14 件（L-1〜L-14）
-- **未対応**: M-12、M-13。**一部対応**: M-14
+- 更新時点: `master` HEAD `2d72210`（#44 の merge）
+- **解決**: Critical 1 件、High 6 件、Medium 12 件（M-1〜M-11、M-14）、Low 14 件（L-1〜L-14）
+- **未対応**: M-12、M-13
 - **レビュー後に見つかった問題**: 6 節（N-1〜N-7）。どれも未対応です。
 - PR #29（`/v1/lora/strength` が存在しないテンソル名を受け付ける問題）は、このレビューの指摘ではありません。実機検証で見つかった問題の修正です。
 
-凡例: ✅ 解決、🔶 一部対応、⬜ 未対応。PR 番号は `TadayukiOkada/open-genie-server` の PR です（例: #27 → https://github.com/TadayukiOkada/open-genie-server/pull/27）。
+凡例: ✅ 解決、⬜ 未対応。PR 番号は `TadayukiOkada/open-genie-server` の PR です（例: #27 → https://github.com/TadayukiOkada/open-genie-server/pull/27）。
 
 | ID | 状態 | PR | 対応の要点 |
 |---|---|---|---|
@@ -44,7 +44,7 @@
 | M-11 | ✅ | #40 | `temporal_patch_size` ≠ 2、patch で割り切れない解像度、整数でない metadata の値を、起動時に拒否。patchify の N フレームへの一般化はしない |
 | M-12 | ⬜ | — | 依存関係の固定・lock ファイルはまだない |
 | M-13 | ⬜ | — | CI はまだ pytest だけ。各 PR では、ruff と mypy の指摘件数が base から増えていないことを手元で確認した |
-| M-14 | 🔶 | #38, #42 | ctypes の trampoline（`GenieLib.query`、`Node.set_text_callback`）を偽の CDLL で通すテストと、CLI のテストを追加。バッファの寿命や alloc callback の検証はまだない |
+| M-14 | ✅ | #44（ほかに #38、#42） | `tests/test_ctypes_layer.py`：`GenieLib` と `genie_node` は本物のまま C 関数だけを `CFUNCTYPE` のスタブに差し替え、argtypes、out 引数、alloc callback、バッファの寿命、`None` ハンドル、UTF-8 の境界、Pipeline の呼び出しを検証。SDK ヘッダがあれば引数の数も照合する。カバレッジは `capi.py` 89%、`genie_node.py` 85%（レビュー時点は 33% / 30%）。5 節の 5 にある C のスタブ `.so` を CI でビルドする案は未着手 |
 | L-1〜L-5 | ✅ | #41 | 古くなったコメントや README の記述を直した。L-1 の「311 offline tests」は、最初の 11 日間の記述であることを明記して残した |
 | L-6〜L-8、L-11、L-12、L-14 | ✅ | #42 | L-14 は推奨した `asyncio.to_thread` ではなく、キューの終端を待つ形にした（スレッドを占有しないため） |
 | L-9、L-10 | ✅（文書化） | #43 | 挙動は変えない。SECURITY と MANUAL に明記した |
@@ -245,7 +245,7 @@ open-genie-server は、Qualcomm の `libGenie.so`（QAIRT Genie C API）を cty
   - `permissions:` ブロックがない（GITHUB_TOKEN が既定権限のまま）。
 - 推奨修正: ruff と mypy（まずは `--ignore-missing-imports`）の job を追加し、`permissions: contents: read` を付け、アクションを SHA で固定する。
 
-#### M-14. リスクが最も高い ctypes 層のテストが最も薄い **[再現]** — 🔶 一部対応（#38、#42）
+#### M-14. リスクが最も高い ctypes 層のテストが最も薄い **[再現]** — ✅ 解決（#44）
 - カバレッジ（`coverage run -m pytest tests`）: **`capi.py` 33%、`genie_node.py` 30%**、`cli.py` 23%、`asgi.py` 0%。全体は 81%。
 - さらに、今回見つけた H-2（watchdog、`grep watchdog tests/` は 0 件）、H-3（複数 system）、H-4（サンプラーの持ち越し）、H-5（競合）、H-1（ループのブロック）はテストでカバーされていません。
 - 推奨修正: ctypes 層は `ctypes.CDLL` を差し替えるスタブ（関数ポインタを Python の CFUNCTYPE で差し込む）で、引数の型、バッファの寿命、`None` ハンドルの扱いを単体テストする。上の各バグには回帰テストを追加する。
