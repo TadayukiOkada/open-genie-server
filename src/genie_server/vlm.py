@@ -298,6 +298,8 @@ class VLMSlot:
         for node_key in node_keys:
             built[node_key] = genie_node.Node(node_cfgs[node_key], log_handle=log_handle)
         nodes = {k: built[k] for k in self.spec.node_config_files}
+        # Every node created, used or not, so free() can release them all.
+        self._nodes = list(built.values())
         self.tokenizer = _load_pipeline_tokenizer(node_cfgs)
         # Baked into the context binaries at export time, so the config's
         # number is the real ceiling — plan_segments budgets vision tokens
@@ -320,6 +322,17 @@ class VLMSlot:
         for io_name, rel_path in self.spec.static_tensor_files.items():
             with open(resolve_and_verify(rel_path, model_root), "rb") as f:
                 self.static_tensors[io_name] = f.read()
+
+    def free(self) -> None:
+        """Releases the pipeline, then its nodes. The pipeline holds the
+        nodes by shared_ptr, so freeing it first leaves each node owned only
+        by its handle. Call with self.lock held (SlotManager.free_all)."""
+        if self.pipeline is not None:
+            self.pipeline.free()
+            self.pipeline = None
+        for node in self._nodes:
+            node.free()
+        self._nodes = []
 
     def count_tokens(self, text: str) -> int:
         """Exact token count via the pipeline's own tokenizer.json; whitespace

@@ -320,6 +320,13 @@ class ServerConfig:
     def warmup_join_timeout_s(self) -> float:
         return 600.0
 
+    @property
+    def shutdown_drain_timeout_s(self) -> float:
+        """How long shutdown waits, in total, for the slots' locks before it
+        frees their handles: long enough for the watchdog to abort a running
+        text query and for that abort to drain."""
+        return self.inference_timeout_s + self.abort_drain_timeout_s
+
     @functools.cached_property
     def platform(self) -> str:
         """The resolved target platform — never "auto". Detected once, so

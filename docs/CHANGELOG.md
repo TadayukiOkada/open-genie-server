@@ -79,6 +79,16 @@
 
 ### Fixed
 
+- **Shutdown no longer frees a dialog under a running call, and frees what
+  it used to leak.** `free_all` called `GenieDialog_free` without the slot's
+  lock, so a thread still inside the SDK hit a use-after-free. That could be
+  a disconnected client's worker, a warmup answered with `202`, or the worker
+  behind a `504`. Each slot's lock is now taken first, all within
+  `INFERENCE_TIMEOUT` + 5 s, which is long enough for the watchdog to abort a
+  text query. A slot still busy then is left allocated and logged, and so is
+  the logger bound to it. A `GenieProfile` is now freed after its dialog, and
+  a VLM slot's pipeline and nodes are freed too: they never were, although
+  the shutdown log said HTP memory was being released.
 - **Two slots with the same name are a startup error.** Nothing checked
   it, across `TEXT_SLOTS` and `VLM_SLOTS` or within one list, and a slot's
   name is a key in several places. Routing and `/v1/server/status` reached

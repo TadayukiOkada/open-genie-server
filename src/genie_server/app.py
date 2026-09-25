@@ -539,7 +539,9 @@ def create_app(state: ServerState) -> FastAPI:
         yield
         slot_admin_executor.shutdown(wait=False, cancel_futures=True)
         logger.info("Releasing HTP context memory...")
-        state.manager.free_all()
+        # Off the loop: it waits for busy slots (up to
+        # shutdown_drain_timeout_s) before freeing anything under them.
+        await asyncio.to_thread(state.manager.free_all)
 
     app = FastAPI(title="Genie OpenAI-Compatible Server", lifespan=lifespan)
     app.state.max_request_body_bytes = int(

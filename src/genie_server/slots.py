@@ -11,6 +11,7 @@ of queueing behind one lock.
 import json
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -482,12 +483,49 @@ class SlotManager:
         request 'slot' field) if that ambiguity matters."""
         self._by_model_id = {s.active_model_id: s for s in self.slots}
 
-    def free_all(self) -> None:
-        for s in self.slots:
-            self.lib.free_dialog(s.handle)
-        # After the dialogs. GenieLog_free will not refuse while bound (see
-        # GenieLib.free_logger), which is exactly why the order has to be
-        # kept here rather than left to the SDK to enforce.
+    def free_all(self, timeout: float | None = None) -> None:
+        """Frees every handle at shutdown, each under its slot's lock.
+
+        A request thread can still be inside the SDK: a disconnected client's
+        worker, a warmup answered with 202, a worker whose request got its
+        504. Freeing a dialog under a running GenieDialog_query is a
+        use-after-free, so each slot's lock is taken first, all of them
+        within one deadline (ServerConfig.shutdown_drain_timeout_s by
+        default). A slot still busy at the deadline is left allocated and
+        logged: the process is exiting, and a leak is the safe failure.
+
+        Order: a dialog, then the profile bound to its config; a VLM
+        pipeline, then its nodes; the logger last, and only if everything it
+        is bound to was freed -- GenieLog_free does not refuse while bound
+        (see GenieLib.free_logger)."""
+        if timeout is None:
+            timeout = self.config.shutdown_drain_timeout_s
+        deadline = time.monotonic() + timeout
+        left_busy = []
+        for s in [*self.slots, *self.vlm_slots]:
+            if not s.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                left_busy.append(s.name)
+                logger.warning(
+                    f"[{s.name}] still busy at shutdown after {timeout:g}s; "
+                    "leaving its handles allocated rather than freeing them "
+                    "under a running call")
+                continue
+            try:
+                if isinstance(s, Slot):
+                    if s.handle is not None:
+                        self.lib.free_dialog(s.handle)
+                        s.handle = None
+                    if s.profile is not None:
+                        self.lib.free_profile(s.profile)
+                        s.profile = None
+                else:
+                    s.free()
+            finally:
+                s.lock.release()
+        if left_busy:
+            logger.warning("Not freeing the Genie logger: still bound to "
+                           f"{', '.join(left_busy)}")
+            return
         self.lib.free_logger(self.log_handle)
         self.log_handle = None
 
