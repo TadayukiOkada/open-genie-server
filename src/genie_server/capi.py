@@ -477,18 +477,34 @@ class GenieLib:
     # ------------------------------------------------------------ inference
 
     def query(self, handle, text: str, sentence_code: int, on_token) -> int:
-        """Blocking GenieDialog_query. on_token(token_str, sentence_code) is
-        invoked from inside the C call for every generated piece of text.
-        Returns the Genie_Status_t (0 success, >0 warning, <0 error)."""
+        """Blocking GenieDialog_query. on_token(token_str, sentence_code,
+        got_bytes=...) is invoked from inside the C call for every generated
+        piece of text. Returns the Genie_Status_t (0 success, >0 warning, <0
+        error).
+
+        got_bytes says whether the SDK's callback carried any bytes, i.e.
+        whether it was a generated token. It is not the same as a non-empty
+        token_str: bytes that end mid-character are held back and arrive as
+        "". Count tokens by got_bytes, or a generation that hit max_tokens
+        with a split character in it reads as having stopped short."""
 
         feed = utf8_stream()
 
         def trampoline(token_bytes, code, _user_data):
-            on_token(feed(token_bytes, code in TERMINAL_SENTENCE_CODES), code)
+            on_token(feed(token_bytes, code in TERMINAL_SENTENCE_CODES), code,
+                     got_bytes=bool(token_bytes))
 
         cb = QUERY_CALLBACK(trampoline)  # local ref keeps it alive for the call
-        return self._lib.GenieDialog_query(
+        ret = self._lib.GenieDialog_query(
             handle, text.encode("utf-8"), ctypes.c_int(sentence_code), cb, None)
+        # A terminal code flushes the decoder. If the query returned without
+        # one (an error), bytes still held back would vanish here; show them
+        # as U+FFFD instead. Not a token of its own: its bytes were counted
+        # when they arrived.
+        tail = feed(None, True)
+        if tail:
+            on_token(tail, SENTENCE_CONTINUE, got_bytes=False)
+        return ret
 
     def reset(self, handle) -> int:
         return self._lib.GenieDialog_reset(handle)

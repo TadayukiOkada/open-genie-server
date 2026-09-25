@@ -2866,8 +2866,50 @@ def test_a_dialog_query_joins_split_bytes_through_the_real_trampoline():
     lib = capi.GenieLib(_fake_cdll(GenieDialog_query=query))
     got = []
     lib.query(None, "hi", capi.SENTENCE_COMPLETE,
-              lambda t, c: got.append(t))
-    assert "".join(got) == "日本!"
+              lambda t, c, got_bytes: got.append((t, got_bytes)))
+    assert "".join(t for t, _ in got) == "日本!"
+    # The first callback's bytes were all held back, but it was a token.
+    assert got[0] == ("", True)
+
+
+def test_a_held_back_token_still_counts_toward_max_tokens():
+    """finish_reason="length" is inferred from completion_tokens: a token
+    counted by its visible text read as one short when a character was
+    split, and a generation that hit the cap reported "stop"."""
+    import asyncio
+
+    from genie_server import capi, engine
+
+    def query(handle, text, code, cb, user_data):
+        for chunk in SPLIT:
+            cb(chunk, capi.SENTENCE_CONTINUE, None)
+        cb(None, capi.SENTENCE_END, None)
+        return 0
+
+    async def run():
+        slot = type("Slot", (), {"name": "s", "epoch": 0})()
+        lib = capi.GenieLib(_fake_cdll(GenieDialog_query=query))
+        gen = engine.Generation("r", slot, lib)
+        lib.query(None, "hi", capi.SENTENCE_COMPLETE, gen.on_token)
+        return gen.completion_tokens
+
+    assert asyncio.run(run()) == len(SPLIT)
+
+
+def test_bytes_held_back_when_a_query_returns_without_a_terminal_code():
+    """An error return sends no END: what was held back is shown, not lost,
+    and it is not counted a second time."""
+    from genie_server import capi
+
+    def query(handle, text, code, cb, user_data):
+        cb("日".encode()[:2], capi.SENTENCE_CONTINUE, None)
+        return -1
+
+    lib = capi.GenieLib(_fake_cdll(GenieDialog_query=query))
+    got = []
+    assert lib.query(None, "hi", capi.SENTENCE_COMPLETE,
+                     lambda t, c, got_bytes: got.append((t, got_bytes))) == -1
+    assert got == [("", True), ("\ufffd", False)]
 
 
 def test_a_vlm_text_callback_joins_split_bytes_and_resets_per_answer(
@@ -2885,7 +2927,7 @@ def test_a_vlm_text_callback_joins_split_bytes_and_resets_per_answer(
     node._handle = 1
     got = []
     node.set_text_callback(next(iter(genie_node.NODE_IO)),
-                           lambda t, c: got.append((t, c)))
+                           lambda t, c, got_bytes: got.append((t, c)))
     cb = captured["cb"]
     cb(SPLIT[0], capi.SENTENCE_CONTINUE, None)
     cb(SPLIT[1], capi.SENTENCE_CONTINUE, None)

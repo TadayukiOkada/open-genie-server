@@ -87,7 +87,10 @@
   incomplete sequence in the paths we read, so this should be rare, but both
   paths now keep an incremental decoder per stream: pieces are joined, and
   bytes that never complete, or are invalid, show as U+FFFD instead of
-  disappearing.
+  disappearing, including when a query returns without a terminal code.
+  Tokens are counted by callback, not by visible text, so a token whose
+  bytes were held back still counts toward `max_tokens`, and a generation
+  that hit the cap reports `finish_reason: "length"`.
 - **Shutdown no longer frees a dialog under a running call, and frees what
   it used to leak.** `free_all` called `GenieDialog_free` without the slot's
   lock, so a thread still inside the SDK hit a use-after-free. That could be
