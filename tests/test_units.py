@@ -390,7 +390,8 @@ def test_stream_filter_false_alarm_lt():
 
 def test_sampler_greedy_mapping():
     params = make_sampler_params({}, temperature=0.0)
-    assert params == {"type": "basic", "temp": "1.0", "top-k": "1"}
+    assert params == {"type": "basic", "temp": "1.0", "top-k": "1",
+                      "top-p": "0.8", "seed": "-1"}
 
 
 def test_sampler_defaults_reset():
@@ -399,7 +400,8 @@ def test_sampler_defaults_reset():
     # from a previous request's settings). "type": "basic" always included
     # so a preceding logprobs request's custom sampler can't leak either.
     params = make_sampler_params(defaults)
-    assert params == {"type": "basic", "temp": "0.8", "top-k": "40", "top-p": "0.95"}
+    assert params == {"type": "basic", "temp": "0.8", "top-k": "40",
+                      "top-p": "0.95", "seed": "-1"}
     # Request overrides only temperature.
     params = make_sampler_params(defaults, temperature=0.2)
     assert params["temp"] == "0.2"
@@ -408,6 +410,28 @@ def test_sampler_defaults_reset():
 
 def test_sampler_seed():
     assert make_sampler_params({}, seed=42)["seed"] == "42"
+
+
+def test_sampler_params_are_always_complete():
+    """H-4: with a config that omits a key, that key used to be left out, so
+    the SDK kept the previous request's value (greedy's top-k=1, a seed)."""
+    full = {"type", "temp", "top-k", "top-p", "seed"}
+    for kwargs in ({}, {"temperature": 0.7}, {"temperature": 0.0},
+                   {"top_p": 0.5}, {"seed": 7}):
+        assert set(make_sampler_params({}, **kwargs)) == full
+    # A request after a greedy one gets the SDK's own defaults back.
+    after_greedy = make_sampler_params({}, temperature=0.7)
+    assert after_greedy["top-k"] == "0"
+    assert after_greedy["seed"] == "-1"
+    assert after_greedy["top-p"] == "0.8"
+
+
+def test_sampler_defaults_from_config_include_seed():
+    from genie_server.capi import sampler_defaults_from
+    cfg = {"temp": 0.5, "seed": 3, "type": "basic", "version": 1}
+    assert sampler_defaults_from(cfg) == {"temp": 0.5, "seed": 3}
+    assert sampler_defaults_from(None) == {}
+    assert make_sampler_params(sampler_defaults_from(cfg))["seed"] == "3"
 
 
 # ---------------------------------------------------------------- logprobs
