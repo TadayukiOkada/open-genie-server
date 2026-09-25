@@ -84,7 +84,7 @@ async def read_json_body(request: Request) -> dict:
     if not _is_json_media_type(content_type):
         raise InvalidRequestError(
             "Request body must be sent with Content-Type: application/json, "
-            f"got {content_type or 'no Content-Type'!r}",
+            + (f"got {content_type!r}" if content_type else "got no Content-Type"),
             status_code=415)
     try:
         body = await request.json()

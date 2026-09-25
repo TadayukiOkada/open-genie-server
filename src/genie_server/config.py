@@ -249,7 +249,9 @@ class ServerConfig:
     # neither read a response nor get a preflighted request (a JSON POST, a
     # DELETE) past the browser. None of the documented clients need it: lm_eval,
     # curl and the OpenAI SDK are not browsers, and Open WebUI calls from its
-    # backend. "*" allows every origin, which is what every release up to 1.4.0
+    # backend -- except through its Direct Connections, where the browser calls
+    # this server itself and Open WebUI's origin has to be listed here. "*"
+    # allows every origin, which is what every release up to 1.4.0
     # did -- it let any web page a user on the same network happened to open
     # drive the management endpoints and read the replies.
     cors_allow_origins: tuple[str, ...] = ()

@@ -1638,6 +1638,16 @@ def test_a_body_a_browser_sends_without_preflight_is_refused(client, headers):
     assert client.get("/v1/server/prompt_logprobs").json()["enabled"] is False
 
 
+def test_the_415_names_what_was_sent(client):
+    """The message says which Content-Type came in, and reads plainly when
+    there was none."""
+    r = client.post("/v1/server/prompt_logprobs", content=b'{"enabled": true}',
+                    headers={"Content-Type": "text/plain"})
+    assert r.json()["error"]["message"].endswith("got 'text/plain'")
+    r = client.post("/v1/server/prompt_logprobs", content=b'{"enabled": true}')
+    assert r.json()["error"]["message"].endswith("got no Content-Type")
+
+
 def test_a_json_media_type_with_parameters_is_accepted(client):
     r = client.post("/v1/server/prompt_logprobs", content=b'{"enabled": true}',
                     headers={"Content-Type": "application/json; charset=utf-8"})

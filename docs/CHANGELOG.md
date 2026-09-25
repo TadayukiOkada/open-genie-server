@@ -15,7 +15,9 @@
   `-H 'Content-Type: application/json'` is refused where it used to work.
   And CORS is off unless the new `CORS_ALLOW_ORIGINS` lists the origins
   allowed, as in `["http://localhost:3000"]`; `["*"]` restores the old
-  behaviour. `lm_eval`, the OpenAI SDK and Open WebUI need neither change.
+  behaviour. `lm_eval`, the OpenAI SDK and Open WebUI need neither change,
+  except for Open WebUI's Direct Connections, where the browser calls this
+  server itself and Open WebUI's origin has to be listed.
   What is still open (DNS rebinding) is in `SECURITY.md`.
 - **An inference timeout is an error, not a normal stop.** When the watchdog
   (`INFERENCE_TIMEOUT`) cut a query short, the SDK reported it as it reports
