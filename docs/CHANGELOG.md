@@ -34,7 +34,10 @@
   strength was restored at another, and generation continued from the wrong
   KV. The strengths are now part of the namespace, and a strength change
   bumps the slot's epoch like an adapter change does. With no strength set,
-  the namespace, and so every existing cache key, is unchanged.
+  the namespace, and so every existing cache key, is unchanged. Strengths are
+  forgotten on a release and on a model switch, not when another adapter is
+  applied: on the board, applying a second adapter kept the alphas set for the
+  first, since `alpha0`/`alpha1` belong to the dialog.
 - **A request no longer inherits the previous request's sampler settings.**
   The SDK merges partial sampler updates, and a parameter the request and the
   model config both left out was simply not sent, so it kept the last value:

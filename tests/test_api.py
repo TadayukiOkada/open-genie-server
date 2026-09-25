@@ -1587,10 +1587,16 @@ def test_a_lora_strength_change_is_part_of_the_cache_namespace(state, client):
     ns_half = slot.cache_namespace
     client.post("/v1/lora/strength", json={"tensor_name": "t", "alpha": 1.0})
     assert slot.cache_namespace not in (ns0, ns_half)
-    # A new adapter starts from its own strengths again.
+    # Applying an adapter does NOT put the alphas back (measured on the
+    # board: they belong to the dialog, so they survive an adapter switch), and
+    # the namespace must keep saying so.
     client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})
+    assert slot.lora_strengths == {"primary/t": 1.0}
+    assert slot.cache_namespace.startswith(f"{slot.name}|{slot.active_model_id}|a|")
+    # A release does, so its namespace goes back to the plain one.
+    client.post("/v1/lora/release", json={"lora_adapter_name": "a"})
     assert slot.lora_strengths == {}
-    assert slot.cache_namespace == f"{slot.name}|{slot.active_model_id}|a"
+    assert slot.cache_namespace == f"{slot.name}|{slot.active_model_id}|"
 
 
 def test_no_strength_keeps_the_old_namespace(state):

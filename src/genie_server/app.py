@@ -1281,7 +1281,10 @@ def create_app(state: ServerState) -> FastAPI:
                                     detail=f"GenieDialog_applyLora failed: {ret}")
             # Read back from the SDK rather than trust the request blindly.
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
-            slot.lora_strengths = {}
+            # lora_strengths is NOT cleared here: measured on the board, applying
+            # another adapter keeps the alphas set earlier (alpha0/alpha1 belong
+            # to the dialog, and the two adapters share the names). Only a
+            # release (below) puts them back.
             slot.epoch += 1  # the prefix-cache namespace just changed
 
         await _admin_with_slot_lock(request, slot, _apply, cfg.inference_timeout_s)

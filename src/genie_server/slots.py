@@ -112,9 +112,11 @@ class Slot:
         self.active_lora_adapter = ""
         # Alphas set through /v1/lora/strength since the adapter was applied,
         # {"<engine>/<tensor>": alpha}. Part of cache_namespace: a prefix KV
-        # computed at one strength is wrong at another. Cleared whenever the
-        # adapter changes, on the assumption that applying or releasing an
-        # adapter puts its strengths back to the bundle's own values.
+        # computed at one strength is wrong at another. Cleared by a release
+        # and by a model switch (a new dialog), NOT by applying an adapter:
+        # measured on the board (Phi-4 LoRA bundle), release+apply of the same
+        # adapter puts the alphas back but applying a second adapter keeps
+        # them. There is no getter, so this dict is the only record.
         self.lora_strengths: dict[str, float] = {}
         # Bumped, under lock, whenever what a request was planned against
         # changes: the dialog handle, the model (template, context size,
