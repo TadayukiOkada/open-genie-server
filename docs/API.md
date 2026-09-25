@@ -89,7 +89,7 @@ A `video_url` carries frames the client already extracted — base64 JPEGs joine
 - **A remote `http(s)` URL**, for video as for images: this server does not fetch them.
 - **A `video_url` with no frames in it.**
 - **A payload that is not base64.** Line breaks are ignored; any other character outside the base64 alphabet is refused, rather than skipped as Python's default decoder would.
-- **An image or frame over `VLM_MAX_IMAGE_PIXELS`, or a request whose images and frames together pass `VLM_MAX_TOTAL_PIXELS`** (defaults: 4096 × 4096, and about 64 frames of 1920 × 1080). Both come from the image headers, before anything is decoded. Every encoder resizes its input to a few hundred pixels square, so scaling down on the client loses nothing. Applies to `image_url` as well.
+- **An image or frame over `VLM_MAX_IMAGE_PIXELS`, or a request whose images and frames together pass `VLM_MAX_TOTAL_PIXELS`** (defaults: 4096 × 4096, and 64 times that, so up to 64 images each within the per-image limit always pass). Both come from the image headers, before anything is decoded. Every encoder resizes its input to a few hundred pixels square, so scaling down on the client loses nothing. Applies to `image_url` as well.
 - **More visual input than the slot's context holds** — only when `VLM_VISION_BUDGET_GUARD` is on, which it is not by default. The message names how many encoder steps fit and why. See [Limiting visual input](./MANUAL.md#limiting-visual-input) for what happens with it off, which is the default and is not graceful.
 
 In addition to `/v1/completions`'s fields:

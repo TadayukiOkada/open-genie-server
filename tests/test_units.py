@@ -2631,7 +2631,7 @@ def test_cors_allow_origins_that_is_not_a_list_of_origins_is_refused(
     ("MAX_REQUEST_BODY_MB", 0.5, 0.5),
     ("VLM_MAX_IMAGE_PIXELS", None, 4096 * 4096),
     ("VLM_MAX_IMAGE_PIXELS", 0, 0),
-    ("VLM_MAX_TOTAL_PIXELS", None, 128 * 1024 * 1024),
+    ("VLM_MAX_TOTAL_PIXELS", None, 64 * 4096 * 4096),
 ])
 def test_size_ceilings_default_and_accept_numbers(tmp_path, key, value,
                                                   expected):

@@ -106,6 +106,11 @@ def resolve_model_path(value, base: Path | None) -> Path:
     return (base / p).resolve()
 
 
+# How many images at VLM_MAX_IMAGE_PIXELS the default total admits. See
+# ServerConfig.vlm_max_total_pixels.
+VLM_MAX_TOTAL_FRAMES_AT_MAX = 64
+
+
 @dataclass(frozen=True)
 class SlotSpec:
     """One GenieDialog instance to create at startup (a "text slot")."""
@@ -268,12 +273,19 @@ class ServerConfig:
     # RGB). A flat-colour PNG of 13000 x 13000, just under Pillow's own ceiling,
     # is about 500 KB on the wire and 483 MB decoded, so the body limit alone
     # does not bound this. Checked from the image header,
-    # before anything is decoded. The per-image default is 4096 x 4096; the
-    # total, about 64 frames of 1920 x 1080 (384 MB as RGB). The encoders take
-    # far less: every spec resizes to its own input size, a few hundred pixels
-    # square.
+    # before anything is decoded. The encoders take far less: every spec
+    # resizes to its own input size, a few hundred pixels square.
+    #
+    # The per-image default is 4096 x 4096, above every image the test suites
+    # and probes send that we could measure (640 x 427 and 640 x 480 photos,
+    # 512 x 512 frames).
+    # The total is VLM_MAX_TOTAL_FRAMES_AT_MAX of those, 64 being the most any
+    # of them sends in one request (the integration suite's budget-guard
+    # check), so a test that passes the per-image limit is never stopped by
+    # the total however many frames it sends. That is 3 GB decoded; set it
+    # lower for a board that has less to spare.
     vlm_max_image_pixels: int = 4096 * 4096
-    vlm_max_total_pixels: int = 128 * 1024 * 1024
+    vlm_max_total_pixels: int = VLM_MAX_TOTAL_FRAMES_AT_MAX * 4096 * 4096
     text_slots: tuple[SlotSpec, ...] = field(default_factory=tuple)
     vlm_slots: tuple[VLMSlotSpec, ...] = field(default_factory=tuple)
     # Which kind of slot is created first at startup. Only matters when both
@@ -620,7 +632,8 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         vlm_max_image_pixels=_parse_limit(raw, "VLM_MAX_IMAGE_PIXELS",
                                           4096 * 4096, int),
         vlm_max_total_pixels=_parse_limit(raw, "VLM_MAX_TOTAL_PIXELS",
-                                          128 * 1024 * 1024, int),
+                                          VLM_MAX_TOTAL_FRAMES_AT_MAX * 4096 * 4096,
+                                          int),
         text_slots=text_slots,
         vlm_slots=vlm_slots,
         slot_load_order=_parse_slot_load_order(raw),
