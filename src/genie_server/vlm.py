@@ -695,13 +695,13 @@ def start_vlm_generation(lib, vslot: VLMSlot, segments: list,
                 vslot.text_generator.set_text_callback(
                     vlm_layout.TEXT_GENERATOR_TEXT_OUTPUT_IO, on_text)
                 sampler_params = capi.make_sampler_params(
-                    vslot.sampler_defaults, params.temperature, params.top_p, params.top_k, params.seed)
-                if sampler_params:
-                    try:
-                        lib.apply_sampler_params_to_handle(
-                            vslot.text_generator.get_sampler(), sampler_params)
-                    except Exception as e:
-                        logger.warning(f"VLM sampling params not applied: {e}")
+                    vslot.sampler_defaults, params.temperature, params.top_p,
+                    params.top_k, params.seed)
+                try:
+                    lib.apply_sampler_params_to_handle(
+                        vslot.text_generator.get_sampler(), sampler_params)
+                except Exception as e:
+                    logger.warning(f"VLM sampling params not applied: {e}")
 
                 vslot.pipeline.reset()
                 spec = vslot.spec

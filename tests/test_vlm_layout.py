@@ -628,7 +628,8 @@ def test_vlm_sampler_defaults_come_from_the_text_generator_config():
     from genie_server import vlm
     cfgs = {"text_generator": {"text-generator": {
         "sampler": {"temp": 0.3, "top-p": 0.9, "seed": 11, "type": "basic"}}}}
-    assert vlm._sampler_defaults(cfgs) == {"temp": 0.3, "top-p": 0.9, "seed": 11}
+    # seed is not a per-request default (see capi.make_sampler_params).
+    assert vlm._sampler_defaults(cfgs) == {"temp": 0.3, "top-p": 0.9}
     assert vlm._sampler_defaults({}) == {}
     assert vlm._sampler_defaults({"text_generator": {"text-generator": {}}}) == {}
 
@@ -638,4 +639,6 @@ def test_vlm_slot_reads_its_sampler_defaults(monkeypatch, tmp_path):
     from genie_server import vlm
     slot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=FIXTURES / "ai_hub",
                        spec_name=None, htp_ext_cache_dir=tmp_path / "htpcache")
-    assert isinstance(slot.sampler_defaults, dict)
+    # The AI Hub fixture's text-generator config has no sampler section, so
+    # every default comes from the SDK: nothing is read, nothing invented.
+    assert slot.sampler_defaults == {}
