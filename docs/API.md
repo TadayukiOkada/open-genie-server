@@ -68,7 +68,7 @@ Raw text completion (for `lm_eval`'s `local-completions` backend). No chat templ
 | Field | Type | Description |
 |---|---|---|
 | `prompt` | string \| string[] \| int[] \| int[][] | Required. An array of strings runs each prompt **sequentially** and returns one choice per prompt (`index` 0..n-1; non-streaming only). Token-id arrays (what `lm_eval`'s `local-completions` sends with `tokenizer_backend=huggingface`) are decoded with the slot's own tokenizer. |
-| `model` | string | Selects which slot to route to (`SlotManager.select`). Falls back to the primary slot if there's no match (a name other than `genie-local` is logged once at WARNING, so a typo is findable). **The response does not echo it** — every response and streaming chunk reports the id of the model that actually answered, which is what the selected slot currently holds. The two differ when you route with an alias (`genie-local`, or lm_eval's fixed placeholder) and after a hot-swap, when a slot holds something other than what `env_config.json` names. |
+| `model` | string | Selects which slot to route to (`SlotManager.select`). Falls back to the primary slot if there's no match (a name other than `genie-local` is logged once at WARNING, so a typo is findable; an image request that falls back to the first VLM slot is logged the same way). **The response does not echo it** — every response and streaming chunk reports the id of the model that actually answered, which is what the selected slot currently holds. The two differ when you route with an alias (`genie-local`, or lm_eval's fixed placeholder) and after a hot-swap, when a slot holds something other than what `env_config.json` names. |
 | `slot` | string | Optional. Explicit slot **name** override (e.g. `"chat"`) — takes priority over `model`. Needed when two slots load the same model directory, since `model` alone can't tell them apart (see [Limitations](./MANUAL.md#limitations)). Unknown name → `404`. |
 | `stream` | bool | Default `false`. |
 | `max_completion_tokens` / `max_tokens` | int | The former takes priority (following OpenAI's deprecation of the latter). If neither is given, defaults to `dialog.context.size` minus the prompt's token count (i.e. remaining context space) — matching Qualcomm's own qai-appbuilder reference server. If `DEFAULT_MAX_TOKENS` (`env_config.json`) is set to a positive value, the smaller of that and remaining context space is used instead — see [Troubleshooting](./MANUAL.md#troubleshooting). |
@@ -355,7 +355,10 @@ written here once rather than at each of them.
    name nobody has loaded falls back to the primary slot rather than failing,
    because `lm_eval` sends one fixed placeholder for every request. Any such
    name other than `genie-local` is logged once at WARNING with the models
-   that are loaded, so a typo that rode the fallback can be found.
+   that are loaded, so a typo that rode the fallback can be found. The same
+   goes for an image request that falls back to the first VLM slot, unless
+   the name is a loaded text model's (an image goes to a VLM slot whatever
+   the name).
 
 `slot` exists because `model` cannot always answer: **two slots holding the
 same model directory are indistinguishable by model name**, and the second one
@@ -454,11 +457,11 @@ Main status codes:
 |---|---|
 | `400` | Invalid request parameters (a required field is missing, `n>1`, etc.) |
 | `404` | A resource doesn't exist (prefix cache key, model directory, unknown slot name) |
-| `422` | Semantically impossible to process (e.g. a prefix warmup request on the llama2 template) |
-| `500` | An SDK call failed, a model load failed, or the server hit an exception it did not expect. The last is a bug: the message names only the exception's type and an error id such as `err-1a2b3c4d`, and the server log has the traceback under that id |
+| `409` | The target slot changed (a model switch, or a LoRA apply, release or strength change) after this request was prepared and before it ran. It was not run. Send it again. On a stream, the same condition is an `error` event. |
 | `413` | The request body is larger than `MAX_REQUEST_BODY_MB` |
 | `415` | The request body was not sent as `Content-Type: application/json` |
-| `409` | The target slot changed (a model switch, or a LoRA apply, release or strength change) after this request was prepared and before it ran. It was not run. Send it again. On a stream, the same condition is an `error` event. |
+| `422` | Semantically impossible to process (e.g. a prefix warmup request on the llama2 template) |
+| `500` | An SDK call failed, a model load failed, or the server hit an exception it did not expect. The last is a bug: the message names only the exception's type and an error id such as `err-1a2b3c4d`, and the server log has the traceback under that id |
 | `503` | Timed out acquiring the target slot's lock (that slot is busy) |
 | `504` | Inference timed out |
 
