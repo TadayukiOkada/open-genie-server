@@ -1429,3 +1429,17 @@ def test_a_client_abort_is_not_reported_as_a_timeout(state):
     assert text == "partial "
     assert not gen.timed_out and not gen.timeout_error
     assert gen.error is None
+
+
+def test_every_system_message_reaches_the_sdk(state, client):
+    """H-3: [system A, user, assistant, system B, user] lost system B."""
+    r = client.post("/v1/chat/completions", json={"messages": [
+        {"role": "system", "content": "SYS-A"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "system", "content": "SYS-B"},
+        {"role": "user", "content": "q2"}]})
+    assert r.status_code == 200
+    prompt = state.lib.queries[-1]
+    assert "SYS-A" in prompt and "SYS-B" in prompt
+    assert prompt.index("a1") < prompt.index("SYS-B") < prompt.index("q2")
