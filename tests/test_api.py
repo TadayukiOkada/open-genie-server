@@ -2027,3 +2027,72 @@ def test_warmup_enable_thinking_must_be_a_bool(client):
                                                "enable_thinking": "false"})
     assert r.status_code == 400
     assert r.json()["error"]["param"] == "enable_thinking"
+
+
+# ---------------------------------------------------------------- unexpected errors
+
+_ERROR_ID = r"err-[0-9a-f]{8}"
+
+
+def _boom(state, monkeypatch, text="/secret/model/dir and a prompt fragment"):
+    def boom(*args, **kwargs):
+        raise RuntimeError(text)
+
+    monkeypatch.setattr(state.manager, "select_for_request", boom)
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/lora/apply", {"lora_adapter_name": "a"}),
+])
+def test_an_unexpected_exception_is_still_an_openai_error(state, monkeypatch,
+                                                         path, body):
+    """A bug in the server must not answer in plain text, and must not hand
+    the exception's text (a path, a piece of a prompt) to the client."""
+    import re
+
+    _boom(state, monkeypatch)
+    r = TestClient(create_app(state)).post(path, json=body)
+    assert r.status_code == 500
+    assert r.headers["content-type"] == "application/json"
+    err = r.json()["error"]
+    assert err["type"] == "server_error"
+    assert re.fullmatch(r"Internal server error \(RuntimeError\); the details "
+                        rf"are in the server log under {_ERROR_ID}\.",
+                        err["message"]), err["message"]
+    assert "secret" not in r.text
+
+
+def test_the_error_id_leads_to_the_traceback_in_the_log(state, monkeypatch,
+                                                         caplog):
+    """The reply withholds the exception's text; the log keeps it, under the
+    id the reply names, so a report can be matched to its entry."""
+    import logging
+    import re
+
+    _boom(state, monkeypatch, text="kept for the log")
+    with caplog.at_level(logging.ERROR, logger="genie_server.protocol"):
+        r = TestClient(create_app(state)).post(
+            "/v1/lora/apply", json={"lora_adapter_name": "a"})
+    error_id = re.search(_ERROR_ID, r.json()["error"]["message"]).group(0)
+    records = [rec for rec in caplog.records if error_id in rec.getMessage()]
+    assert len(records) == 1
+    assert "kept for the log" in str(records[0].exc_info[1])
+
+
+def test_an_unexpected_exception_reaches_an_allowed_origin(state, monkeypatch):
+    """Answered inside CORS, so a page on an allowed origin can read the 500.
+    An exception handler for Exception runs outside CORS in Starlette, and
+    its reply carried no Access-Control-Allow-Origin."""
+    import dataclasses
+
+    origin = "http://allowed.example"
+    state.config = dataclasses.replace(state.config,
+                                       cors_allow_origins=(origin,))
+    _boom(state, monkeypatch)
+    r = TestClient(create_app(state)).post(
+        "/v1/lora/apply", json={"lora_adapter_name": "a"},
+        headers={"Origin": origin})
+    assert r.status_code == 500
+    assert r.headers.get("access-control-allow-origin") == origin
+    assert r.json()["error"]["type"] == "server_error"

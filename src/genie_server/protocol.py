@@ -6,13 +6,17 @@ malformed request bodies — is rendered in OpenAI's error envelope
 LiteLLM can always parse failures (install_error_handlers)."""
 
 import json
+import logging
 import time
+import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .slots import SlotNotLoadedError, UnknownSlotError
+
+logger = logging.getLogger(__name__)
 
 
 def openai_error(status_code: int, message: str,
@@ -64,6 +68,54 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, exc: RequestValidationError):
         return openai_error(400, str(exc), "invalid_request_error")
+
+
+class UnexpectedErrorMiddleware:
+    """Answers an exception nothing else handled -- a bug in this server --
+    in the OpenAI envelope instead of Starlette's plain-text "Internal Server
+    Error", which an OpenAI client cannot parse.
+
+    A middleware rather than an exception handler for Exception because of
+    where each runs. Starlette calls that handler from ServerErrorMiddleware,
+    the outermost layer, so its reply never passes through CORSMiddleware: a
+    page on an allowed origin got a CORS error instead of the envelope. This
+    one is added before CORS (see create_app), which puts it inside it.
+
+    The exception's text stays out of the reply, since it can carry paths and
+    prompt fragments. The reply names the exception's type and an error id,
+    and the traceback is logged here under the same id, so a report can be
+    matched to its log entry. Once the response has started (a stream), no
+    envelope can be sent; the exception is re-raised for the server to log
+    and to close the connection, as before."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def send_tracking(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_tracking)
+        except Exception as exc:
+            if started:
+                raise
+            error_id = f"err-{uuid.uuid4().hex[:8]}"
+            logger.exception(f"Unhandled exception [{error_id}] "
+                             f"{scope.get('method')} {scope.get('path')}")
+            response = openai_error(
+                500, f"Internal server error ({type(exc).__name__}); the "
+                     f"details are in the server log under {error_id}.",
+                "server_error")
+            await response(scope, receive, send)
 
 
 def _is_json_media_type(content_type: str) -> bool:
