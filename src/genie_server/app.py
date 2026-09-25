@@ -457,6 +457,11 @@ def create_app(state: ServerState) -> FastAPI:
     app.state.max_request_body_bytes = int(
         state.config.max_request_body_mb * 2**20)
 
+    # Added BEFORE CORS on purpose: Starlette wraps later middleware around
+    # earlier ones, so this sits inside CORS and its 500 carries the CORS
+    # headers an allowed page needs to read it (see UnexpectedErrorMiddleware).
+    app.add_middleware(protocol.UnexpectedErrorMiddleware)
+
     # CORS: off unless CORS_ALLOW_ORIGINS names the origins a browser page may
     # call from (see ServerConfig.cors_allow_origins). With no middleware a
     # cross-origin page cannot read a reply or pass a preflight; the simple
