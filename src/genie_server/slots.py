@@ -202,6 +202,14 @@ _ENGINE_ROLES = {"primary": "primary", "target": "primary",
                  "secondary": "secondary", "draft": "secondary"}
 
 
+def canonical_engine_role(engine_role: str) -> str:
+    """The role the SDK acts on for a name it folds together ("target" is
+    "primary", "draft" is "secondary"); an unknown name is returned as is.
+    Anything keyed by engine -- Slot.lora_strengths -- must use this, or one
+    alpha set under both spellings is recorded twice with different values."""
+    return _ENGINE_ROLES.get(engine_role, engine_role)
+
+
 def lora_alpha_names(dialog_cfg: dict, engine_role: str) -> set[str] | None:
     """The names GenieDialog_setLoraStrength can act on for one engine, from
     the dialog config: each adapter's `alphas`, or the lora block's

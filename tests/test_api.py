@@ -1826,3 +1826,61 @@ def test_lora_tensor_name_must_be_a_string(state, client):
                                                "alpha": 1.0})
     assert r.status_code == 400
     assert r.json()["error"]["param"] == "tensor_name"
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/v1/lora/apply", {"lora_adapter_name": "a"}),
+    ("/v1/lora/strength", {"tensor_name": "alpha0", "alpha": 0.5}),
+    ("/v1/lora/release", {"lora_adapter_name": "a"}),
+])
+@pytest.mark.parametrize("engine", [["primary"], {"role": "primary"}, 1, ""])
+def test_lora_engine_must_be_a_string(state, client, path, body, engine):
+    """A non-string engine reached str.encode or a dict lookup: a 500."""
+    _with_lora(state, PHI4_LORA)
+    r = client.post(path, json={**body, "engine": engine})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "engine"
+
+
+@pytest.mark.parametrize("path", ["/v1/lora/apply", "/v1/lora/release"])
+def test_lora_adapter_name_must_be_a_string(client, path):
+    r = client.post(path, json={"lora_adapter_name": ["a"]})
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "lora_adapter_name"
+
+
+def test_one_alpha_set_under_both_role_spellings_is_recorded_once(state, client):
+    """The SDK folds "target" into "primary". Recorded under both spellings,
+    alpha0 = 1.0 and alpha0 = 0.5 came out as the same cache namespace
+    (primary/alpha0=0.5,target/alpha0=1.0), whichever was set last."""
+    def namespace_after(steps):
+        slot = _with_lora(state, PHI4_LORA)
+        slot.lora_strengths = {}
+        for engine, alpha in steps:
+            r = client.post("/v1/lora/strength", json={
+                "engine": engine, "tensor_name": "alpha0", "alpha": alpha})
+            assert r.status_code == 200
+        return slot.cache_namespace, dict(slot.lora_strengths)
+
+    ns_one, strengths = namespace_after([("primary", 0.5), ("target", 1.0)])
+    assert strengths == {"primary/alpha0": 1.0}
+    ns_half, strengths = namespace_after([("target", 1.0), ("primary", 0.5)])
+    assert strengths == {"primary/alpha0": 0.5}
+    assert ns_one != ns_half
+
+
+def test_a_lora_alpha_is_checked_against_the_model_that_holds_the_lock(state):
+    """Checked when the call runs, not when it was sent: a switch that won
+    the lock first must not have the old model's names vouch for the new."""
+    _with_lora(state, PHI4_LORA)
+    with TestClient(create_app(state)) as c:
+        slot, t, result = _hold_slot_and_queue(
+            state, c, "/v1/lora/strength", {"tensor_name": "alpha0",
+                                            "alpha": 0.5})
+        # What a switch to a model without LoRA leaves behind.
+        slot.dialog_cfg = {**slot.dialog_cfg, "engine": {"model": {"binary": {}}}}
+        slot.lock.release()
+        t.join(timeout=5)
+    assert result["r"].status_code == 400
+    assert "declares no LoRA adapters" in result["r"].json()["error"]["message"]
+    assert state.lib.lora_strengths == []

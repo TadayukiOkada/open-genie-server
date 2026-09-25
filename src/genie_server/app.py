@@ -44,7 +44,7 @@ from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
 from .prefix_cache import PrefixCache
 from .protocol import InvalidRequestError, openai_error, read_json_body, sse
-from .slots import SlotManager, lora_alpha_names
+from .slots import SlotManager, canonical_engine_role, lora_alpha_names
 
 logger = logging.getLogger(__name__)
 
@@ -1260,6 +1260,24 @@ def create_app(state: ServerState) -> FastAPI:
 
     # ------------------------------------------------------------ LoRA
 
+    def _lora_names(body: dict, *keys: str) -> tuple:
+        """'engine' (default "primary") and the required string fields named
+        in keys, checked before anything reaches the SDK: a non-string there
+        used to be a 500 (str.encode on a list, or an unhashable dict key)."""
+        engine_role = body.get("engine", "primary")
+        if not isinstance(engine_role, str) or not engine_role:
+            raise InvalidRequestError("'engine' must be a non-empty string.",
+                                      "engine")
+        values = []
+        for key in keys:
+            value = body.get(key, "")
+            if not value:
+                raise InvalidRequestError(f"'{key}' is required.", key)
+            if not isinstance(value, str):
+                raise InvalidRequestError(f"'{key}' must be a string.", key)
+            values.append(value)
+        return (engine_role, *values)
+
     @app.post("/v1/lora/apply")
     async def apply_lora(request: Request):
         """Body: {"slot": "...", "model": "...", "engine": "primary",
@@ -1276,11 +1294,8 @@ def create_app(state: ServerState) -> FastAPI:
         body = await read_json_body(request)
         slot = manager.select_for_request(body, body.get("model", ""))
         manager.require_loaded(slot)
-        engine_role = body.get("engine", "primary")
-        adapter = body.get("lora_adapter_name", "")
-        if not adapter:
-            raise InvalidRequestError("'lora_adapter_name' is required.",
-                                      "lora_adapter_name")
+        engine_role, adapter = _lora_names(body, "lora_adapter_name")
+
         def _apply():
             ret = state.lib.apply_lora(slot.handle, engine_role, adapter)
             if ret != STATUS_SUCCESS:
@@ -1304,32 +1319,32 @@ def create_app(state: ServerState) -> FastAPI:
         body = await read_json_body(request)
         slot = manager.select_for_request(body, body.get("model", ""))
         manager.require_loaded(slot)
-        engine_role = body.get("engine", "primary")
-        tensor_name = body.get("tensor_name", "")
         alpha = body.get("alpha")
-        if not tensor_name or alpha is None:
+        if not body.get("tensor_name") or alpha is None:
             raise InvalidRequestError("'tensor_name' and 'alpha' are required.")
-        if not isinstance(tensor_name, str):
-            raise InvalidRequestError("'tensor_name' must be a string.",
-                                      "tensor_name")
+        engine_role, tensor_name = _lora_names(body, "tensor_name")
         if (isinstance(alpha, bool) or not isinstance(alpha, (int, float))
                 or not math.isfinite(alpha)):
             raise InvalidRequestError(
                 f"'alpha' must be a finite number, got {alpha!r}.", "alpha")
-        # The SDK answers success for a name the model does not have (on an
-        # engine with a scheduler it is taken as a CB adapter-order name and
-        # changes nothing), so the name is checked against the config here.
-        # A name set before its adapter is applied is fine: the SDK keeps it
-        # and writes it when the adapter is applied.
-        known = lora_alpha_names(slot.dialog_cfg, engine_role)
-        if known is not None and tensor_name not in known:
-            raise InvalidRequestError(
-                f"'{tensor_name}' is not a LoRA alpha of engine "
-                f"'{engine_role}' on slot '{slot.name}'. "
-                + (f"Its config declares: {sorted(known)}." if known else
-                   "Its config declares no LoRA adapters."),
-                "tensor_name")
+
         def _set():
+            # The SDK answers success for a name the model does not have (on
+            # an engine with a scheduler it is taken as a CB adapter-order name
+            # and changes nothing), so the name is checked against the config.
+            # Checked here, under the lock, against the model the call will
+            # actually reach: a switch that won the lock first would otherwise
+            # have the old model's names vouch for the new one. A name set
+            # before its adapter is applied is fine: the SDK keeps it and
+            # writes it when the adapter is applied.
+            known = lora_alpha_names(slot.dialog_cfg, engine_role)
+            if known is not None and tensor_name not in known:
+                raise InvalidRequestError(
+                    f"'{tensor_name}' is not a LoRA alpha of engine "
+                    f"'{engine_role}' on slot '{slot.name}'. "
+                    + (f"Its config declares: {sorted(known)}." if known else
+                       "Its config declares no LoRA adapters."),
+                    "tensor_name")
             ret = state.lib.set_lora_strength(slot.handle, engine_role,
                                               tensor_name, float(alpha))
             if ret != STATUS_SUCCESS:
@@ -1338,7 +1353,11 @@ def create_app(state: ServerState) -> FastAPI:
             # A prefix KV computed at the old strength is wrong at the new one,
             # so the strength is part of the cache namespace, and a request
             # planned against the old one must not run (see Slot.epoch).
-            slot.lora_strengths[f"{engine_role}/{tensor_name}"] = float(alpha)
+            # Keyed by the role the SDK acts on: "target" and "primary" are one
+            # engine, and two keys for one alpha let two different strengths
+            # produce the same namespace.
+            key = f"{canonical_engine_role(engine_role)}/{tensor_name}"
+            slot.lora_strengths[key] = float(alpha)
             slot.epoch += 1
 
         await _admin_with_slot_lock(request, slot, _set, cfg.inference_timeout_s)
@@ -1351,11 +1370,8 @@ def create_app(state: ServerState) -> FastAPI:
         body = await read_json_body(request)
         slot = manager.select_for_request(body, body.get("model", ""))
         manager.require_loaded(slot)
-        engine_role = body.get("engine", "primary")
-        adapter = body.get("lora_adapter_name", "")
-        if not adapter:
-            raise InvalidRequestError("'lora_adapter_name' is required.",
-                                      "lora_adapter_name")
+        engine_role, adapter = _lora_names(body, "lora_adapter_name")
+
         def _release():
             ret = state.lib.release_lora_memory(slot.handle, engine_role, adapter)
             if ret != STATUS_SUCCESS:
