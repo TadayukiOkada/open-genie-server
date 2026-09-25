@@ -206,7 +206,7 @@ python3 -m pytest tests/
 The `[test]` dependencies are not optional for a green run: without `requests`
 and `jsonschema` eight grammar tests fail with `ModuleNotFoundError`, and
 without `numpy` eight logprobs tests do. The same suite runs on every push and
-pull request against Python 3.10 and 3.12
+pull request against Python 3.10, 3.12 and 3.14
 (`.github/workflows/offline-tests.yml`).
 
 To exercise a real device end-to-end from the host PC (with a Markdown/JSON report and server-death detection), see [tests/integration/](https://github.com/TadayukiOkada/open-genie-server/tree/master/tests/integration).
@@ -227,7 +227,7 @@ See [MANUAL.md's Limitations section](https://github.com/TadayukiOkada/open-geni
 ## Acknowledgements
 
 Built with [Claude Code](https://claude.com/claude-code). The first commit here
-is dated 2026-08-19, and in the eleven days since, this went from a single
+is dated 2026-08-19, and in its first eleven days this went from a single
 2,700-line script to a packaged server with 311 offline tests, a hardware
 integration suite, and manuals in two languages.
 

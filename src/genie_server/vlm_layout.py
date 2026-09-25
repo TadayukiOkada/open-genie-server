@@ -81,9 +81,12 @@ _STATIC_TENSOR_ALLOWED_IO = {
 
 # The standard 3-node topology every known bundle uses. WILDCARD is needed
 # only when the image-encoder carries extra same-named tensors besides the
-# main embedding (e.g. DeepStack's deepstack_visual_embeds_*) — see
-# .claude/rules/genie-c-api.md §2. Harmless to include when there is nothing
-# extra to match, so this is also the legacy/explicit default connection set.
+# main embedding (e.g. DeepStack's deepstack_visual_embeds_*): an explicit
+# IO-name connection orders the nodes and carries the main embedding alone,
+# and anything else reaches the consumer only through a WILDCARD connection,
+# given on both sides, which wires every tensor by name. Harmless to include
+# when there is nothing extra to match, so this is also the legacy/explicit
+# default connection set.
 STANDARD_CONNECTIONS = [
     ("image_encoder", "IMAGE_ENCODER_EMBEDDING_OUTPUT",
      "text_generator", "TEXT_GENERATOR_EMBEDDING_INPUT"),
@@ -445,10 +448,10 @@ def read_layout(model_root: Path, *, pipeline_script: str | None = None,
 
 def resolve_static_tensors(node_cfgs: dict, static_tensor_files: dict, slot_name: str) -> dict:
     """Drops the image-encoder's auxiliary tensors when its own config also
-    carries positional-encoding — nsp-image-model.cpp computes position ids
-    and attention masks on the device in that case
-    (.claude/rules/vision-preprocessing.md), so feeding stale ones from
-    another export would silently be ignored at best. The config wins."""
+    carries positional-encoding — the SDK's image model computes position
+    ids and attention masks on the device in that case, so feeding stale
+    ones from another export would silently be ignored at best. The config
+    wins."""
     image_cfg = node_cfgs.get("image_encoder")
     if not image_cfg:
         return static_tensor_files

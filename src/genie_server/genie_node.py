@@ -4,10 +4,10 @@ Matches QAIRT 2.48/2.49's include/Genie/{GenieNode,GeniePipeline,GenieCommon}.h.
 GenieNode_setData takes void*/size_t, so numpy arrays can be passed directly
 without going through a file.
 
-attach() takes the ctypes.CDLL handle genie-server.py has already loaded for
-GenieDialog and adds the GenieNode_*/GeniePipeline_* signatures to that same
-in-process library (never loads the CDLL a second time). For standalone use,
-load() can load it fresh instead.
+attach() takes the ctypes.CDLL the server has already loaded for GenieDialog
+(GenieLib.cdll, passed in by vlm.py) and adds the GenieNode_*/GeniePipeline_*
+signatures to that same in-process library (never loads the CDLL a second
+time). For standalone use, load() can load it fresh instead.
 """
 import ctypes as C
 import json
@@ -86,8 +86,8 @@ def _install_signatures(lib) -> None:
 
 
 def attach(existing_cdll) -> None:
-    """Reuses an already-loaded libGenie.so CDLL (e.g. genie-server.py's
-    `genie_lib`) instead of loading the shared library a second time."""
+    """Reuses an already-loaded libGenie.so CDLL (the server passes
+    GenieLib.cdll) instead of loading the shared library a second time."""
     global _lib
     _install_signatures(existing_cdll)
     _lib = existing_cdll
@@ -95,7 +95,7 @@ def attach(existing_cdll) -> None:
 
 def load(path="libGenie.so"):
     """Loads libGenie standalone (for scripts not already holding a CDLL,
-    e.g. vlm_stream.py). Prefer attach() inside genie-server.py."""
+    e.g. a standalone test script). The server itself uses attach()."""
     global _lib
     if _lib is not None:
         return _lib

@@ -203,7 +203,7 @@ python3 -m pytest tests/
 `[test]` の依存は「任意」ではありません。`requests` と `jsonschema` が無いと
 grammar のテストが8件 `ModuleNotFoundError` で落ち、`numpy` が無いと
 logprobs のテストが8件落ちます。同じスイートは push と
-pull request のたびに Python 3.10 / 3.12 で実行されます
+pull request のたびに Python 3.10 / 3.12 / 3.14 で実行されます
 (`.github/workflows/offline-tests.yml`)。
 
 ホストPCから実機をエンドツーエンドで検査する統合テスト(Markdown/JSONレポート、サーバ停止検出付き)は [tests/integration/](./tests/integration/README.ja.md) を参照してください。
@@ -224,7 +224,7 @@ pull request のたびに Python 3.10 / 3.12 で実行されます
 ## 謝辞
 
 本プロジェクトは [Claude Code](https://claude.com/claude-code) を使って開発しました。
-最初のコミットは 2026-08-19 で、そこからの11日間で、2,700行の単一スクリプトから、
+最初のコミットは 2026-08-19 で、最初の11日間で、2,700行の単一スクリプトから、
 オフラインテスト311件・実機統合テスト・英日2言語のマニュアルを備えたパッケージに
 なりました。
 
