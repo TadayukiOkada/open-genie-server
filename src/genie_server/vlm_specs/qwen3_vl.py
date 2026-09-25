@@ -272,6 +272,15 @@ def qwen3vl_bind(spec: "VLMSpec", node_cfgs: dict, layout) -> "VLMSpec":
     if isinstance(merge, int) and merge > 0:
         spec = replace(spec, spatial_merge_size=merge)
 
+    # _qwen3vl_patchify stacks exactly two frames -- the only temporal
+    # patch size any export has, and the only one the patchify has run on a
+    # device with. Anything else used to pass here and then fail the reshape
+    # (a 500) on every request; refuse it at startup instead.
+    if spec.temporal_patch_size != 2:
+        raise ValueError(
+            f"qwen3_vl: temporal_patch_size {spec.temporal_patch_size} (from "
+            "metadata.json genie.vision_preprocessing) is not supported; the "
+            "patchify takes exactly 2 frames per ViT execution")
     if spec.image_width <= 0 or spec.image_height <= 0:
         raise ValueError(
             "qwen3_vl: could not determine the image resolution from "

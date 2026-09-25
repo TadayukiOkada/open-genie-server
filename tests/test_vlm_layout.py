@@ -446,6 +446,26 @@ def test_qwen3vl_bind_falls_back_to_metadata_vision_preprocessing():
     assert (resolved.image_width, resolved.image_height) == (384, 384)
 
 
+@pytest.mark.parametrize("temporal", [1, 3, 4])
+def test_qwen3vl_bind_refuses_a_temporal_patch_size_the_patchify_cannot_take(
+        temporal):
+    """It used to load, then fail the reshape (a 500) on every request."""
+    from genie_server.vlm_specs.qwen3_vl import qwen3vl_bind
+
+    spec = vlm_specs.get_spec("qwen3_vl")
+    node_cfgs = {
+        "image_encoder": {"image-encoder": {"engine": {"model": {}}}},
+        "text_generator": {"text-generator": {}},
+    }
+    layout = vlm_layout.BundleLayout(
+        node_config_files={}, connections=[], static_tensor_files={}, source="test",
+        metadata={"genie": {"vision_preprocessing": {
+            "image_width": 384, "image_height": 384, "patch_size": 16,
+            "temporal_patch_size": temporal, "spatial_merge_size": 2}}})
+    with pytest.raises(ValueError, match=f"temporal_patch_size {temporal} "):
+        qwen3vl_bind(spec, node_cfgs, layout)
+
+
 # ---------------------------------------------------------------- family auto-detection edge cases
 
 def test_ambiguous_family_detection_names_both_matches():

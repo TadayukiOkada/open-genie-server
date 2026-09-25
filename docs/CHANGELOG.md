@@ -79,6 +79,10 @@
 
 ### Fixed
 
+- **A Qwen3-VL bundle whose `temporal_patch_size` is not 2 is refused at
+  startup.** The patchify stacks exactly two frames, but `metadata.json`
+  could set any value. The slot then loaded and failed a reshape with a
+  `500` on every request. No export uses anything but 2.
 - **A character split across two token callbacks is joined, not dropped.**
   The dialog path decoded each callback with `errors="ignore"`, so a
   multibyte character (Japanese, an emoji) that arrived in two pieces
