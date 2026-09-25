@@ -2817,3 +2817,94 @@ def test_distinct_slot_names_load(tmp_path):
         VLM_SLOTS=[{"model_root": str(tmp_path), "spec": "qwen3_vl"}]))
     assert [s.name for s in cfg.text_slots] == ["slot0", "chat"]
     assert [s.name for s in cfg.vlm_slots] == ["vlm0"]
+
+
+# ---------------------------------------------------------------- shutdown
+
+def test_shutdown_waits_for_a_running_call_before_freeing(tmp_path):
+    """Freeing a dialog under a running GenieDialog_query is a use-after-free:
+    the free has to come after the lock is let go."""
+    import threading
+    import time
+    manager = _manager_with_log_level(tmp_path, "error")
+    slot = manager.slots[0]
+    events = []
+    real_free = manager.lib.free_dialog
+    manager.lib.free_dialog = lambda h: (events.append("free"), real_free(h))
+    slot.lock.acquire()
+
+    def worker():
+        time.sleep(0.2)
+        events.append("released")
+        slot.lock.release()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    manager.free_all(timeout=5)
+    t.join()
+    assert events == ["released", "free"]
+    assert slot.handle is None and manager.log_handle is None
+
+
+def test_a_slot_still_busy_at_the_deadline_is_left_allocated(tmp_path,
+                                                             caplog):
+    """A leak at exit is the safe failure; so is keeping the logger its
+    dialog is still bound to."""
+    manager = _manager_with_log_level(tmp_path, "error")
+    slot = manager.slots[0]
+    slot.lock.acquire()
+    try:
+        with caplog.at_level("INFO"):
+            manager.free_all(timeout=0.05)
+    finally:
+        slot.lock.release()
+    assert manager.lib.freed == [] and manager.lib.freed_loggers == []
+    assert slot.handle is not None and manager.log_handle is not None
+    # Said before the wait as well as after it: a wedged VLM slot holds
+    # shutdown for the whole deadline.
+    assert "busy at shutdown; waiting up to" in caplog.text
+    assert "still busy at shutdown" in caplog.text
+
+
+def test_shutdown_frees_the_profile_after_its_dialog(tmp_path):
+    manager = _manager_with_log_level(tmp_path, "")
+    slot = manager.slots[0]
+    slot.profile = profile = object()
+    order = []
+    manager.lib.free_dialog = lambda h: order.append("dialog")
+    manager.lib.free_profile = lambda p: order.append(("profile", p))
+    manager.free_all(timeout=1)
+    assert order == ["dialog", ("profile", profile)]
+    assert slot.profile is None
+
+
+def test_shutdown_frees_a_vlm_slots_pipeline_then_its_nodes(tmp_path,
+                                                            monkeypatch):
+    pytest.importorskip("numpy")
+    from pathlib import Path
+
+    from fake_genie import FakeVLMNode, FakeVLMPipeline
+
+    from genie_server import genie_node, vlm
+
+    order = []
+
+    class Node(FakeVLMNode):
+        def free(self):
+            order.append("node")
+
+    class Pipeline(FakeVLMPipeline):
+        def free(self):
+            order.append("pipeline")
+
+    monkeypatch.setattr(genie_node, "Node", Node)
+    monkeypatch.setattr(genie_node, "Pipeline", Pipeline)
+    bundle = Path(__file__).parent / "data" / "vlm_bundles" / "ai_hub"
+    vslot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=bundle,
+                        spec_name=None, htp_ext_cache_dir=tmp_path)
+    manager = _manager_with_log_level(tmp_path, "")
+    manager.vlm_slots = [vslot]
+    manager.free_all(timeout=1)
+    assert order[0] == "pipeline" and order.count("node") == 3
+    assert set(order[1:]) == {"node"}
+    assert vslot.pipeline is None

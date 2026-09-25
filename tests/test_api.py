@@ -1564,6 +1564,7 @@ def test_an_image_request_goes_through_the_http_path(state, monkeypatch, tmp_pat
     vslot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=bundle,
                         spec_name=None, htp_ext_cache_dir=tmp_path)
     state.manager.vlm_slots = [vslot]
+    pipeline = vslot.pipeline   # shutdown frees it when the client closes
 
     buf = io.BytesIO()
     PIL.new("RGB", (4, 4)).save(buf, "PNG")
@@ -1574,7 +1575,7 @@ def test_an_image_request_goes_through_the_http_path(state, monkeypatch, tmp_pat
             {"type": "image_url", "image_url": {"url": url}}]}]})
     assert r.status_code == 200, r.text
     assert r.json()["model"] == "ai_hub"
-    assert vslot.pipeline.executed == 1
+    assert pipeline.executed == 1
 
 
 def test_an_image_over_the_pixel_ceiling_is_a_400_before_the_npu(
@@ -1598,6 +1599,7 @@ def test_an_image_over_the_pixel_ceiling_is_a_400_before_the_npu(
                         spec_name=None, htp_ext_cache_dir=tmp_path)
     state.manager.vlm_slots = [vslot]
     state.config = dataclasses.replace(state.config, vlm_max_image_pixels=15)
+    pipeline = vslot.pipeline   # shutdown frees it when the client closes
 
     buf = io.BytesIO()
     PIL.new("RGB", (4, 4)).save(buf, "PNG")
@@ -1608,7 +1610,7 @@ def test_an_image_over_the_pixel_ceiling_is_a_400_before_the_npu(
             {"type": "image_url", "image_url": {"url": url}}]}]})
     assert r.status_code == 400, r.text
     assert "VLM_MAX_IMAGE_PIXELS" in r.json()["error"]["message"]
-    assert vslot.pipeline.executed == 0
+    assert pipeline.executed == 0
 
 
 def test_a_lora_strength_change_is_part_of_the_cache_namespace(state, client):
