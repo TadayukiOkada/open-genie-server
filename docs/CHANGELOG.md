@@ -36,7 +36,18 @@
   later instructions, and a system message that was not first was moved to
   the front. Only a conversation that starts with exactly one system message
   is split now; any other shape is rendered whole, in the order sent, and is
-  not prefix-cached.
+  not prefix-cached. The llama2 and Gemma 2/3 templates, which have no
+  system turn and fold system text into the next user turn, lost system
+  messages another way. Of two consecutive system messages, the second
+  overwrote the first, and a system message with no user turn after it was
+  dropped. Consecutive system messages now share one block, and trailing
+  system text gets a turn of its own.
+- **The tools block and `/no_think` go to the system message that opens
+  the conversation.** They were appended to the first system message
+  wherever it was, so with `tools` and a system message in the middle of
+  the conversation, the tools declarations landed there. Now, if the
+  conversation does not open with a system message, a new one is added at
+  the front, and a later system message is left as the caller wrote it.
 
 ## 1.4.0 — Ubuntu QAIRT-package targets, and an explicit error when logprobs can't be scored
 

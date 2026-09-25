@@ -62,10 +62,12 @@ def prepare_messages(messages: list, enable_thinking: bool = True,
 
     - copies every message (the caller's list is never mutated),
     - flattens parts-array content to plain text,
-    - injects the Hermes tools block into the system message when `tools`
-      are given (synthesizing a system message if there is none — matching
-      Qwen3's own chat template, which renders the tools block even without
-      a system prompt),
+    - injects the Hermes tools block into the system message that opens the
+      conversation when `tools` are given, synthesizing one at the front if
+      the conversation does not open with a system message — matching
+      Qwen3's own chat template, which renders the tools block in a leading
+      system turn even without a system prompt. A system message later in
+      the conversation is left as the caller wrote it,
     - applies Qwen3's "/no_think" soft switch when enable_thinking=False,
       separated from whatever precedes it by a blank line.
 
@@ -79,10 +81,13 @@ def prepare_messages(messages: list, enable_thinking: bool = True,
     out = [dict(m, content=content_to_text(m.get("content"))) for m in messages]
 
     def _append_to_system(text: str) -> None:
-        for m in out:
-            if m.get("role") == "system":
-                m["content"] = (m["content"] + text) if m["content"] else text.lstrip("\n")
-                return
+        # Only the system message that OPENS the conversation: appending to
+        # the first system message wherever it sits would put the tools block
+        # (or /no_think) in the middle of the conversation.
+        if out and out[0].get("role") == "system":
+            m = out[0]
+            m["content"] = (m["content"] + text) if m["content"] else text.lstrip("\n")
+            return
         out.insert(0, {"role": "system", "content": text.lstrip("\n")})
 
     fmt = tool_format or tool_formats.HermesToolFormat
@@ -155,32 +160,55 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
         return out + "<|start_header_id|>assistant<|end_header_id|>\n\n"
 
     if template == "llama2":
-        out, sys_c = "", ""
+        # No system turn: system text rides in the next [INST], inside
+        # <<SYS>>. Consecutive system messages share that one block rather
+        # than overwriting each other, and system text with no user turn
+        # after it gets an [INST] of its own instead of being dropped.
+        out, pending = "", []
+
+        def sys_block() -> str:
+            if not pending:
+                return ""
+            body = "\n\n".join(pending)
+            pending.clear()
+            return f"<<SYS>>\n{body}\n<</SYS>>\n\n"
+
         for m in messages:
             r, c = m.get("role", "user"), m.get("content", "")
             if r == "system":
-                sys_c = f"<<SYS>>\n{c}\n<</SYS>>\n\n"
+                pending.append(c)
             elif r == "user":
-                out += f"<s>[INST] {sys_c}{c} [/INST]"
-                sys_c = ""
+                out += f"<s>[INST] {sys_block()}{c} [/INST]"
             elif r == "assistant":
                 out += f" {c} </s>"
+        if pending:
+            out += f"<s>[INST] {sys_block()} [/INST]"
         return out if bos else out.removeprefix("<s>")
 
     if template == "gemma":
         # Gemma 2/3 family. There is no system role: per Google's own chat
-        # template, system text is prepended to the first user turn. The
-        # assistant role is named "model".
-        out, sys_c = ("<bos>" if bos else ""), ""
+        # template, system text is prepended to the next user turn. The
+        # assistant role is named "model". As with llama2, consecutive system
+        # messages are joined rather than overwritten, and system text with no
+        # user turn after it becomes a user turn of its own.
+        out, pending = ("<bos>" if bos else ""), []
+
+        def sys_text() -> str:
+            body = "\n\n".join(pending)
+            pending.clear()
+            return body
+
         for m in messages:
             r, c = m.get("role", "user"), m.get("content", "")
             if r == "system":
-                sys_c = f"{c}\n\n"
+                pending.append(c)
             elif r == "assistant":
                 out += f"<start_of_turn>model\n{c}<end_of_turn>\n"
             else:
-                out += f"<start_of_turn>user\n{sys_c}{c}<end_of_turn>\n"
-                sys_c = ""
+                prefix = f"{sys_text()}\n\n" if pending else ""
+                out += f"<start_of_turn>user\n{prefix}{c}<end_of_turn>\n"
+        if pending:
+            out += f"<start_of_turn>user\n{sys_text()}<end_of_turn>\n"
         return out + "<start_of_turn>model\n"
 
     if template == "gemma4":

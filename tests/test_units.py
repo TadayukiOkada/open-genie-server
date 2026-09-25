@@ -57,24 +57,98 @@ def test_split_prefix_concat_equals_full_render():
         assert prefix + remaining == templates.render_chat_prompt(msgs, template)
 
 
-@pytest.mark.parametrize("template", ["chatml", "llama3", "gemma4"])
-@pytest.mark.parametrize("msgs", [
+_SYSTEM_SHAPES = {
     # H-3: a later system message used to be dropped from the prompt, and a
     # system message that is not first used to be hoisted to the front.
-    [{"role": "system", "content": "SYS-A"}, {"role": "user", "content": "q1"},
-     {"role": "assistant", "content": "a1"},
-     {"role": "system", "content": "SYS-B"}, {"role": "user", "content": "q2"}],
-    [{"role": "system", "content": "SYS-A"}, {"role": "system", "content": "SYS-B"},
-     {"role": "user", "content": "q"}],
-    [{"role": "user", "content": "q1"}, {"role": "system", "content": "SYS-B"},
-     {"role": "user", "content": "q2"}],
-], ids=["mid-conversation", "two-leading", "not-first"])
-def test_split_prefix_keeps_every_system_message_in_order(template, msgs):
+    "mid-conversation": [
+        {"role": "system", "content": "SYS-A"}, {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "system", "content": "SYS-B"}, {"role": "user", "content": "q2"}],
+    "two-leading": [
+        {"role": "system", "content": "SYS-A"}, {"role": "system", "content": "SYS-B"},
+        {"role": "user", "content": "q"}],
+    "not-first": [
+        {"role": "user", "content": "q1"}, {"role": "system", "content": "SYS-B"},
+        {"role": "user", "content": "q2"}],
+    # llama2 and gemma fold system text into the NEXT user turn, so one with
+    # no user turn after it used to be dropped.
+    "trailing": [
+        {"role": "system", "content": "SYS-A"}, {"role": "user", "content": "q"},
+        {"role": "system", "content": "SYS-B"}],
+}
+
+
+@pytest.mark.parametrize("template", templates.TEMPLATE_FAMILIES)
+@pytest.mark.parametrize("shape", list(_SYSTEM_SHAPES))
+def test_split_prefix_keeps_every_system_message_in_order(template, shape):
+    msgs = _SYSTEM_SHAPES[shape]
     prefix, remaining, cacheable = \
         templates.split_prompt_for_prefix_cache(msgs, template)
+    prompt = prefix + remaining
     assert not cacheable
+    assert prompt == templates.render_chat_prompt(msgs, template)
+    for m in msgs:
+        if m["role"] == "system":
+            # llama2 and gemma consume system text into a user turn, so it
+            # is checked for, not for its own turn marker.
+            assert m["content"] in prompt, (template, shape, m["content"])
+    if shape == "mid-conversation":
+        assert prompt.index("a1") < prompt.index("SYS-B") < prompt.index("q2")
+    if shape == "two-leading":
+        assert prompt.index("SYS-A") < prompt.index("SYS-B") < prompt.index("q")
+
+
+@pytest.mark.parametrize("template", ["chatml", "llama3", "gemma4"])
+def test_one_leading_system_message_is_still_cacheable(template):
+    """The other side of the H-3 rule: the shape the prefix cache exists for
+    keeps splitting."""
+    msgs = [{"role": "system", "content": "SYS-A"},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"}]
+    prefix, remaining, cacheable = \
+        templates.split_prompt_for_prefix_cache(msgs, template)
+    assert cacheable
+    assert "SYS-A" in prefix and "SYS-A" not in remaining
     assert prefix + remaining == templates.render_chat_prompt(msgs, template)
-    assert "SYS-B" in prefix + remaining
+
+
+@pytest.mark.parametrize("template", ["llama2", "gemma"])
+def test_folded_templates_join_consecutive_system_messages(template):
+    """One system block per user turn, both texts in it, in order."""
+    out = templates.render_chat_prompt(_SYSTEM_SHAPES["two-leading"], template)
+    if template == "llama2":
+        assert out.count("<<SYS>>") == 1
+        assert "<<SYS>>\nSYS-A\n\nSYS-B\n<</SYS>>\n\nq [/INST]" in out
+    else:
+        assert "<start_of_turn>user\nSYS-A\n\nSYS-B\n\nq<end_of_turn>" in out
+
+
+_TOOLS = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+
+
+def test_the_tools_block_goes_to_a_leading_system_turn():
+    """A system message later in the conversation is not where the tools
+    block belongs: a new leading system turn carries it, and the caller's
+    own system message stays as written."""
+    msgs = templates.prepare_messages(
+        [{"role": "user", "content": "q1"}, {"role": "system", "content": "SYS-B"},
+         {"role": "user", "content": "q2"}], tools=_TOOLS)
+    assert [m["role"] for m in msgs] == ["system", "user", "system", "user"]
+    assert "<tools>" in msgs[0]["content"]
+    assert msgs[2]["content"] == "SYS-B"
+
+
+def test_the_tools_block_joins_an_opening_system_message():
+    msgs = templates.prepare_messages(
+        [{"role": "system", "content": "SYS-A"}, {"role": "user", "content": "q"},
+         {"role": "system", "content": "SYS-B"}],
+        enable_thinking=False, tools=_TOOLS)
+    assert [m["role"] for m in msgs] == ["system", "user", "system"]
+    assert msgs[0]["content"].startswith("SYS-A")
+    assert "<tools>" in msgs[0]["content"]
+    assert msgs[0]["content"].endswith("/no_think")
+    assert msgs[2]["content"] == "SYS-B"
 
 
 def test_split_prefix_llama2_not_cacheable():
