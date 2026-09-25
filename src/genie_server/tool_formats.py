@@ -258,9 +258,17 @@ class Gemma4ToolFormat:
     def format_tool_call_for_prompt(tool_call: dict) -> str:
         """One assistant tool_call rendered back the way the model emits it,
         for the follow-up turn of a round trip."""
-        fn = tool_call.get("function", {})
-        args = fn.get("arguments", {})
-        if isinstance(args, str):
+        from .templates import UnrenderableMessageError
+        fn = tool_call.get("function") if isinstance(tool_call, dict) else None
+        if not isinstance(fn, dict):
+            raise UnrenderableMessageError(
+                f"a tool_call must be an object with a 'function' object, "
+                f"got {tool_call!r}")
+        args = fn.get("arguments")
+        if args is None or (isinstance(args, str) and not args.strip()):
+            # A zero-argument call, as some clients and models spell it.
+            args = {}
+        elif isinstance(args, str):
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
@@ -269,7 +277,6 @@ class Gemma4ToolFormat:
             # Hermes can carry a malformed call back as the text the model
             # wrote; gemma4's notation has no way to, and writing {} instead
             # would tell the model it called the tool with no arguments.
-            from .templates import UnrenderableMessageError
             raise UnrenderableMessageError(
                 f"tool_call {fn.get('name', '')!r}: arguments must be a JSON "
                 "object for gemma4 to render it back into the prompt, got "

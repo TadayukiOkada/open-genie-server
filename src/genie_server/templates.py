@@ -261,14 +261,18 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
             r, c = m.get("role", "user"), m.get("content", "")
             if r == "assistant" and m.get("tool_calls"):
                 for tc in m["tool_calls"]:
-                    if isinstance(tc, dict) and tc.get("id") is not None:
-                        call_names[tc["id"]] = (tc.get("function") or {}).get("name", "")
+                    if isinstance(tc, dict) and isinstance(tc.get("id"), str):
+                        fn = tc.get("function")
+                        call_names[tc["id"]] = (fn.get("name", "")
+                                                if isinstance(fn, dict) else "")
                     c += ("\n" if c else "") + fmt.format_tool_call_for_prompt(tc)
             elif r == "tool":
                 # A tool result comes back in a user turn, marked with
                 # gemma4's own response tokens.
-                name = m.get("name") or call_names.get(m.get("tool_call_id"), "")
-                if not name:
+                name, tid = m.get("name"), m.get("tool_call_id")
+                if not isinstance(name, str) or not name:
+                    name = call_names.get(tid, "") if isinstance(tid, str) else ""
+                if not isinstance(name, str) or not name:
                     raise UnrenderableMessageError(
                         "a tool message needs a 'name', or a 'tool_call_id' "
                         "matching an earlier assistant tool_call, for gemma4 "

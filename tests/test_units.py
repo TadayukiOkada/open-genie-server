@@ -3099,3 +3099,31 @@ def test_gemma4_refuses_arguments_it_cannot_write(arguments):
                        match="arguments must be a JSON object"):
         templates.render_chat_prompt(msgs, "gemma4",
                                      tool_formats.FORMATS["gemma4"])
+
+
+@pytest.mark.parametrize("arguments", ["", "  ", None])
+def test_gemma4_renders_an_empty_arguments_string_as_no_arguments(arguments):
+    """A zero-argument call, as some clients and models spell it. It rendered
+    as call:NAME{} before, and must not become a 400."""
+    from genie_server import templates, tool_formats
+    msgs = [{"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c", "function": {"name": "now", "arguments": arguments}}]}]
+    out = templates.render_chat_prompt(msgs, "gemma4",
+                                       tool_formats.FORMATS["gemma4"])
+    assert "<|tool_call>call:now{}<tool_call|>" in out
+
+
+@pytest.mark.parametrize("tool_calls, tool_msg", [
+    ([{"id": "c", "function": "now"}], {"tool_call_id": "c"}),     # function a str
+    (["now"], {"tool_call_id": "c"}),                               # call a str
+    ([{"id": ["c"], "function": {"name": "now", "arguments": "{}"}}],
+     {"tool_call_id": ["c"]}),                                      # ids unhashable
+])
+def test_gemma4_malformed_tool_history_is_a_400_not_a_500(tool_calls, tool_msg):
+    """AttributeError / TypeError used to escape as a 500."""
+    from genie_server import templates, tool_formats
+    msgs = [{"role": "assistant", "content": "", "tool_calls": tool_calls},
+            {"role": "tool", "content": "12:00", **tool_msg}]
+    with pytest.raises(templates.UnrenderableMessageError):
+        templates.render_chat_prompt(msgs, "gemma4",
+                                     tool_formats.FORMATS["gemma4"])
