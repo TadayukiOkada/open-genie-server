@@ -2708,3 +2708,45 @@ def test_lora_alpha_names_picks_the_engine_by_role():
 def test_lora_alpha_names_leaves_it_to_the_sdk_when_it_cannot_tell(cfg, role):
     from genie_server.slots import lora_alpha_names
     assert lora_alpha_names(cfg, role) is None
+
+
+def _write_config(tmp_path, **raw):
+    path = tmp_path / "env_config.json"
+    path.write_text(json.dumps({"QAIRT_SDK_ROOT": "/opt/qairt", **raw}))
+    return str(path)
+
+
+@pytest.mark.parametrize("text, vlm, clash", [
+    ([{"name": "a"}, {"name": "a"}], [], "TEXT_SLOTS and TEXT_SLOTS"),
+    ([{"name": "a"}], [{"name": "a", "spec": "qwen3_vl"}], "TEXT_SLOTS and VLM_SLOTS"),
+    # A default name collides with an explicit one just the same.
+    ([{}, {"name": "slot0"}], [], "TEXT_SLOTS and TEXT_SLOTS"),
+])
+def test_a_slot_name_used_twice_is_refused_at_startup(tmp_path, text, vlm,
+                                                      clash):
+    """Routing, status, the logprobs callback name and the per-slot HTP
+    config copy are all keyed by it: a shared name misroutes logits."""
+    from genie_server.config import load_config
+    for s in text + vlm:
+        s["model_root"] = str(tmp_path)
+    with pytest.raises(ValueError, match=f"used twice \\({clash}\\)"):
+        load_config(_write_config(tmp_path, TEXT_SLOTS=text, VLM_SLOTS=vlm))
+
+
+@pytest.mark.parametrize("name", ["", "  ", "a/b", "a\\b", "..", 3])
+def test_a_slot_name_that_cannot_be_a_file_name_is_refused(tmp_path, name):
+    from genie_server.config import load_config
+    with pytest.raises(ValueError, match="slot name must be"):
+        load_config(_write_config(tmp_path, TEXT_SLOTS=[
+            {"name": name, "model_root": str(tmp_path)}]))
+
+
+def test_distinct_slot_names_load(tmp_path):
+    from genie_server.config import load_config
+    cfg = load_config(_write_config(
+        tmp_path,
+        TEXT_SLOTS=[{"model_root": str(tmp_path)}, {"name": "chat",
+                                                    "model_root": str(tmp_path)}],
+        VLM_SLOTS=[{"model_root": str(tmp_path), "spec": "qwen3_vl"}]))
+    assert [s.name for s in cfg.text_slots] == ["slot0", "chat"]
+    assert [s.name for s in cfg.vlm_slots] == ["vlm0"]

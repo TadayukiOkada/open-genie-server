@@ -68,6 +68,14 @@
 
 ### Fixed
 
+- **Two slots with the same name are a startup error.** Nothing checked
+  it, across `TEXT_SLOTS` and `VLM_SLOTS` or within one list, and a slot's
+  name is a key in several places. Routing and `/v1/server/status` reached
+  only one of the pair. The second slot's custom-sampler registration was
+  skipped, so its logits went to the first slot's collector and could
+  corrupt a logprobs request running there. The per-slot copy of the HTP
+  extension config (the `device_id` pin) was overwritten. A name that is
+  empty or holds a path separator is refused too, since it names that file.
 - **Generation parameters of the wrong type are a `400`.** They reached the
   worker thread unchecked. A string `temperature` or `seed` was a `500`, and
   a string `n` or a list `chat_template_kwargs` was a plain-text `500`.
