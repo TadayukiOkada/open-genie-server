@@ -281,8 +281,8 @@ class ServerConfig:
     # 512 x 512 frames).
     # The total is VLM_MAX_TOTAL_FRAMES_AT_MAX of those, 64 being the most any
     # of them sends in one request (the integration suite's budget-guard
-    # check), so a test that passes the per-image limit is never stopped by
-    # the total however many frames it sends. That is 3 GB decoded; set it
+    # check), so a test whose images each pass the per-image limit is never
+    # stopped by the total, up to 64 of them. That is 3 GB decoded; set it
     # lower for a board that has less to spare.
     vlm_max_image_pixels: int = 4096 * 4096
     vlm_max_total_pixels: int = VLM_MAX_TOTAL_FRAMES_AT_MAX * 4096 * 4096
