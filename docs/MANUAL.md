@@ -758,6 +758,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `DEFAULT_MAX_TOKENS` | optional | `0` (disabled) | Extra cap applied to `/v1/completions`/`/v1/chat/completions` requests that don't specify `max_tokens`/`max_completion_tokens`, on top of the model's own remaining context space (see `max_tokens` under [API Reference](./API.md)). `0` means no extra cap — bound only by context size, matching Qualcomm's own qai-appbuilder reference server. Set a positive value if a specific model/deployment is known to run away and you want a smaller safety margin (see [Troubleshooting](#troubleshooting)). Explicit client-provided `max_tokens` always overrides this. |
 | `INFERENCE_TIMEOUT` | optional | `120` | Watchdog limit (seconds) for one `GenieDialog_query` call. Long generations on slow targets may need this raised. Also bounds `GET /v1/server/idle` and the sync path's overall wait (2x this value). |
 | `HOST` / `PORT` | optional | `"0.0.0.0"` / `8080` | Listen address / port. The `--host` / `--port` CLI flags override these. |
+| `CORS_ALLOW_ORIGINS` | optional | `[]` | Origins a browser page may call this server from, e.g. `["http://localhost:3000"]`; `["*"]` allows any. **Empty by default, which sends no CORS headers**: none of the documented clients needs them (`lm_eval`, `curl` and the OpenAI SDK are not browsers, and [Open WebUI](#open-webui) calls from its backend, except through its [Direct Connections](#direct-connections-need-cors_allow_origins)). List an origin only for a page that calls this server straight from the browser, and remember that the page then has every endpoint, model switching included. Up to 1.4.0 every origin was allowed. |
 | `GENIE_LIB_PATH` | optional | (unset) | Explicit path to `libGenie.so`. Default: `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`, or the system loader's `libGenie.so` on `linux-ubuntu` without an SDK root. |
 | `GENIE_PROFILE` | optional | `false` | Binds a `GenieProfile` to every text slot; read the SDK's own TTFT / prefill / decode KPIs from `GET /v1/server/profile` (see [Profiling](#profiling-sdk-side-kpis)). Needs a restart to change. |
 | `GENIE_LOG_LEVEL` | optional | `""` (off) | Turns on libGenie's own logging at `"error"`, `"warn"`, `"info"` or `"verbose"`, by creating a `GenieLog` and binding it to every dialog, node and pipeline config the server creates. **Off is not "quiet", it is silent**: every `__INFO`/`__ERROR` inside the SDK is gated on a bound logger, so with this unset you see none of the SDK's own diagnostics — not even the errors behind a failed load. `"error"` is cheap; `"info"` also shows engine setup decisions, such as which inference path a bundle takes — and is noisy: a four-slot 0.6B startup measured **1,836 lines**, most of them per-buffer memory registration. The useful ones are few and near the top, such as `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128`, which tells you how the engine set itself up for a bundle. The SDK writes the lines itself, to this process's stdout (`Genie:  <ms> [ LEVEL ] ...`) on Linux and to logcat on Android — they do not pass through Python logging, so they are not in the server's own log format. Binds to the config, so a change needs a restart. |
@@ -1618,10 +1619,10 @@ curl $base_url/v1/server/status
 curl "$base_url/v1/server/idle?slot=chat"
 
 # 3. Switch the model on the chat slot (tool_call keeps running without interruption)
-curl -X POST $base_url/v1/models/switch -d '{"slot": "chat", "model_dir": "llama3-8b-htp"}'
+curl -X POST $base_url/v1/models/switch -H 'Content-Type: application/json' -d '{"slot": "chat", "model_dir": "llama3-8b-htp"}'
 
 # 4. Apply a LoRA to that slot
-curl -X POST $base_url/v1/lora/apply -d '{"model": "llama3-8b-htp", "engine": "primary", "lora_adapter_name": "finetune-v2"}'
+curl -X POST $base_url/v1/lora/apply -H 'Content-Type: application/json' -d '{"model": "llama3-8b-htp", "engine": "primary", "lora_adapter_name": "finetune-v2"}'
 
 # 5. Verify it applied
 curl "$base_url/v1/lora/current?model=llama3-8b-htp"
@@ -1653,6 +1654,25 @@ docker run -d --name open-webui -p 3001:8080 \
   -v open-webui:/app/backend/data \
   ghcr.io/open-webui/open-webui:<the tag you intend to run>
 ```
+
+### Direct Connections need `CORS_ALLOW_ORIGINS`
+
+The setup above has Open WebUI's backend call this server, which needs no
+CORS. Open WebUI's
+[Direct Connections](https://docs.openwebui.com/features/chat-conversations/direct-connections/)
+are different: each user adds a connection under User Settings → Connections,
+and the **browser** then calls the API itself, bypassing the backend. That is a
+cross-origin request, and since CORS is off by default the browser refuses it.
+To use a Direct Connection to this server, list the origin you open Open WebUI
+at:
+
+```json
+"CORS_ALLOW_ORIGINS": ["http://<the host you browse to>:3001"]
+```
+
+The origin is scheme, host and port exactly as the browser's address bar shows
+it, with no path. Whatever page is served from that origin can then call every
+endpoint of this server, model switching included.
 
 ### Empty replies: check the built-in tools first
 

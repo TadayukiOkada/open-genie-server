@@ -4,6 +4,21 @@
 
 ### Breaking
 
+- **A web page on another origin can no longer drive the server through a
+  browser.** Every origin was allowed by CORS, and a `POST` body was parsed
+  as JSON whatever its `Content-Type`, so any page a user on the same network
+  opened could switch or unload a model, apply a LoRA, flip
+  `prompt_logprobs`, send a VLM request big enough to wedge the slot or kill
+  the process, and read the replies. Two changes close it. A `POST` whose
+  body is not declared `application/json` (or `application/*+json`) is now
+  `415`, including one with no `Content-Type` at all; `curl -d` without
+  `-H 'Content-Type: application/json'` is refused where it used to work.
+  And CORS is off unless the new `CORS_ALLOW_ORIGINS` lists the origins
+  allowed, as in `["http://localhost:3000"]`; `["*"]` restores the old
+  behaviour. `lm_eval`, the OpenAI SDK and Open WebUI need neither change,
+  except for Open WebUI's Direct Connections, where the browser calls this
+  server itself and Open WebUI's origin has to be listed.
+  What is still open (DNS rebinding) is in `SECURITY.md`.
 - **An inference timeout is an error, not a normal stop.** When the watchdog
   (`INFERENCE_TIMEOUT`) cut a query short, the SDK reported it as it reports
   any abort, and the truncated text came back as a success: HTTP 200 with

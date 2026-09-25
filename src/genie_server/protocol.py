@@ -66,8 +66,26 @@ def install_error_handlers(app: FastAPI) -> None:
         return openai_error(400, str(exc), "invalid_request_error")
 
 
+def _is_json_media_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or (
+        media_type.startswith("application/") and media_type.endswith("+json"))
+
+
 async def read_json_body(request: Request) -> dict:
-    """Parses the request body, mapping malformed JSON to a clean 400."""
+    """Parses the request body, mapping malformed JSON to a clean 400.
+
+    The body must be declared as JSON. A browser sends text/plain, a form, or
+    no Content-Type at all to any origin without a CORS preflight, so parsing
+    those regardless would let any web page a user opens change this server's
+    state -- switch or unload a model, apply a LoRA, send a VLM request big
+    enough to wedge the slot. Refused with 415 before the body is read."""
+    content_type = request.headers.get("content-type", "")
+    if not _is_json_media_type(content_type):
+        raise InvalidRequestError(
+            "Request body must be sent with Content-Type: application/json, "
+            + (f"got {content_type!r}" if content_type else "got no Content-Type"),
+            status_code=415)
     try:
         body = await request.json()
     except json.JSONDecodeError as e:

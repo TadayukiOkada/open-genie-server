@@ -28,6 +28,16 @@ nothing we do not already say on the front page:
 else, put authentication and access control in front of it — a reverse proxy
 is the usual answer — and treat model directories as trusted input.
 
+A network you control still has browsers on it, and a page from anywhere on
+the internet runs in them. That page cannot drive this server through them: a
+`POST` body must be declared `application/json`, which a browser will not send
+to another origin without asking first, and no origin is allowed to ask
+unless `CORS_ALLOW_ORIGINS` lists it. Two gaps remain. An origin you list is
+trusted with every endpoint. And a page that points its own DNS name at the
+server's address (DNS rebinding) is same-origin as far as the browser is
+concerned; the server does not check the `Host` header, so the reverse proxy
+above is the answer to that too.
+
 ## What we do want to hear about
 
 Anything that lets a request do something **beyond** the powers listed above:
