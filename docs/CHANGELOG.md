@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — fixes from a repository-wide code review: safer defaults, strict input, and a readiness probe
+
+Almost everything in this release comes out of one code review
+(`docs/reviews/2026-09-25-repository-review.md`), fixed in pull requests
+#22-#44. The one exception is #29, the LoRA alpha check, which came from a
+board test. The review document records what each PR resolved (#45), and
+the docs and examples were brought up to date for this release in #47. The
+themes are:
+- the server no longer blocks its event loop or runs a request against a
+  model it was not planned for;
+- a browser on the same network can no longer drive it;
+- one request can no longer make it allocate without bound;
+- malformed input is a `400` instead of a `500` or a silent
+  misinterpretation;
+- shutdown releases everything under each slot's lock.
+
+**Five changes are breaking**, listed first below; read them before
+upgrading. A config that quoted a boolean, a client that POSTs without
+`Content-Type: application/json`, and a browser page calling the server
+directly (including Open WebUI's Direct Connections) are the likeliest to
+notice.
+
+Checked on an SA8255P with QAIRT 2.49.40 before release. The integration
+suite was all green on each configuration:
+- a text slot;
+- each of four VLM bundle layouts (AI Hub Qwen3-VL-4B, the DeepStack
+  export, Qwen3-VL-2B, Gemma 4 E2B LMM);
+- a text and a VLM slot resident together.
+
+The same run also checked the new status codes, a UTF-8 round trip, and a
+shutdown during a streaming generation.
 
 ### Breaking
 
