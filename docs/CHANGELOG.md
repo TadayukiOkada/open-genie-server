@@ -73,7 +73,10 @@
   `top_k` or `top_p` the request left out fell back to 1.0, no top-k and no
   top-p, where the plain path uses the model's `genie_config.json` defaults.
   On a model configured for temp 0.1, adding `logprobs: true` sampled at 1.0.
-  Both paths now fill in the same values.
+  Both paths now fill in the same values. To sample as before, send
+  `temperature: 1, top_p: 1, top_k: 0`. A `top_k` larger than the vocabulary
+  no longer makes a logprobs request emit token 0 at every step; it means no
+  top-k limit.
 - **Generation parameters of the wrong type are a `400`.** They reached the
   worker thread unchecked. A string `temperature` or `seed` was a `500`, and
   a string `n` or a list `chat_template_kwargs` was a plain-text `500`.

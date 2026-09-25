@@ -2373,6 +2373,22 @@ def test_logprobs_keep_what_the_request_sets(state, client, collectors):
     assert (c.temperature, c.top_k, c.top_p) == (0.9, 5, 0.5)
 
 
+def test_logprobs_fall_back_to_the_sdk_defaults(state, client, collectors):
+    """A model whose genie_config.json sets no sampler values gets the SDK's
+    own defaults, the ones make_sampler_params falls back to."""
+    pytest.importorskip("numpy")
+    from genie_server.capi import SDK_SAMPLER_DEFAULTS
+    state.manager.slots[0].sampler_defaults = {}
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "logprobs": True,
+        "max_tokens": 2})
+    assert r.status_code == 200, r.text
+    c = collectors[-1]
+    assert (c.temperature, c.top_k, c.top_p) == (
+        SDK_SAMPLER_DEFAULTS["temp"], SDK_SAMPLER_DEFAULTS["top-k"],
+        SDK_SAMPLER_DEFAULTS["top-p"])
+
+
 def test_greedy_logprobs_are_greedy(state, client, collectors):
     """temperature 0 is top-k 1 on both paths."""
     pytest.importorskip("numpy")
