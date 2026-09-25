@@ -666,7 +666,7 @@ def create_app(state: ServerState) -> FastAPI:
         body = await read_json_body(request)
         slot = manager.select_by_name(body.get("slot", ""))
         model_dir_str = body.get("model_dir", "")
-        unload_first = bool(body.get("unload_first", True))
+        unload_first = _flag(body, "unload_first", True)
         config_file = body.get("config_file") or slot.config_file
         if not model_dir_str:
             raise InvalidRequestError("'model_dir' is required.", "model_dir")

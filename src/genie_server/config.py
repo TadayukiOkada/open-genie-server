@@ -163,8 +163,8 @@ class ServerConfig:
     # POST /v1/models/switch. None => relative paths are CWD-relative.
     # Absolute paths ignore it either way. See resolve_model_path.
     models_base_dir: Path | None = None
-    # Force the chat-template family ("llama3" | "llama2" | "chatml") instead
-    # of auto-detecting it from the model directory name.
+    # Force the chat-template family (one of templates.TEMPLATE_FAMILIES)
+    # instead of auto-detecting it from the model directory name.
     chat_template_override: str = ""
     # "" = derive each slot's tool dialect from its chat template. A name from
     # tool_formats.FORMATS forces it. See tool_formats.detect.
@@ -600,6 +600,47 @@ def _parse_genie_log_level(raw: dict) -> str:
     return level
 
 
+def _parse_bool(raw: dict, key: str, default: bool = False) -> bool:
+    """A JSON true/false. bool() read the string "false" as True, which for
+    TOOL_CALL_RECOVERY or VLM_VISION_BUDGET_GUARD silently turned on a
+    workaround that hides what the SDK or the bundle does."""
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        # ValueError, not TypeError: load_config reports every bad value
+        # in the file that way (see _parse_poll).
+        raise ValueError(f"{key} must be true or false, got {value!r}")  # noqa: TRY004
+    return value
+
+
+def _parse_choice(raw: dict, key: str, allowed, unset: str) -> str:
+    """A name from `allowed`, ignoring case and surrounding spaces, or ""
+    when the key is absent, empty or null. Any other type is refused: 0 or
+    false used to pass as "unset" while 3 was an error."""
+    value = raw.get(key)
+    if value is None:
+        return ""
+    name = value.strip().lower() if isinstance(value, str) else None
+    if name is None or (name and name not in allowed):
+        raise ValueError(f"{key} must be one of {tuple(allowed)} "
+                         f"(or unset to {unset}), got {value!r}")
+    return name
+
+
+def _parse_chat_template(raw: dict) -> str:
+    """CHAT_TEMPLATE: "" (detect per slot) or a family name. A typo used to
+    fall through detection to chatml, which renders any model's prompt in
+    the wrong turn markers without an error anywhere."""
+    from .templates import TEMPLATE_FAMILIES
+    return _parse_choice(raw, "CHAT_TEMPLATE", TEMPLATE_FAMILIES, "detect it")
+
+
+def _parse_tool_format(raw: dict) -> str:
+    """TOOL_FORMAT: "" (derive from the template) or a dialect name. A typo
+    used to fall back to hermes."""
+    from .tool_formats import FORMATS
+    return _parse_choice(raw, "TOOL_FORMAT", FORMATS, "derive it")
+
+
 def _check_slot_names(specs) -> None:
     """Slot names are unique across TEXT_SLOTS and VLM_SLOTS together.
 
@@ -655,18 +696,18 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         hexagon_version=raw.get("HEXAGON_VERSION", "v73"),
         prefix_cache_dir=raw.get("PREFIX_CACHE_DIR", "./prefix_cache"),
         models_base_dir=models_base_dir,
-        chat_template_override=raw.get("CHAT_TEMPLATE", ""),
-        tool_format_override=raw.get("TOOL_FORMAT", ""),
+        chat_template_override=_parse_chat_template(raw),
+        tool_format_override=_parse_tool_format(raw),
         default_max_tokens_cap=int(raw.get("DEFAULT_MAX_TOKENS", 0)),
         inference_timeout_s=float(raw.get("INFERENCE_TIMEOUT", 120)),
         target_platform=_parse_target_platform(raw),
         genie_lib_path=raw.get("GENIE_LIB_PATH", ""),
-        prompt_logprobs=bool(raw.get("PROMPT_LOGPROBS", False)),
-        genie_profile=bool(raw.get("GENIE_PROFILE", False)),
+        prompt_logprobs=_parse_bool(raw, "PROMPT_LOGPROBS"),
+        genie_profile=_parse_bool(raw, "GENIE_PROFILE"),
         genie_log_level=_parse_genie_log_level(raw),
         prompt_logprobs_max_tokens=int(raw.get("PROMPT_LOGPROBS_MAX_TOKENS", 4096)),
-        tool_call_recovery=bool(raw.get("TOOL_CALL_RECOVERY", False)),
-        vlm_vision_budget_guard=bool(raw.get("VLM_VISION_BUDGET_GUARD", False)),
+        tool_call_recovery=_parse_bool(raw, "TOOL_CALL_RECOVERY"),
+        vlm_vision_budget_guard=_parse_bool(raw, "VLM_VISION_BUDGET_GUARD"),
         host=raw.get("HOST", "0.0.0.0"),
         port=int(raw.get("PORT", 8080)),
         cors_allow_origins=_parse_cors_allow_origins(raw),

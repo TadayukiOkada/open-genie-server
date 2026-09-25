@@ -4,6 +4,17 @@
 
 ### Breaking
 
+- **A config flag must be a JSON boolean, and `CHAT_TEMPLATE` and
+  `TOOL_FORMAT` must name something that exists.** The four flags
+  (`PROMPT_LOGPROBS`, `GENIE_PROFILE`, `TOOL_CALL_RECOVERY`,
+  `VLM_VISION_BUDGET_GUARD`) went through `bool()`, so `"false"` turned
+  them on. For the two workaround switches, that concealed exactly what they
+  exist to show only on request. A `CHAT_TEMPLATE` typo fell through to
+  chatml and a `TOOL_FORMAT` typo to hermes, with no error anywhere. All of
+  these now stop the server at startup with a message naming the key and the
+  allowed values; names are matched ignoring case and surrounding spaces. A
+  config that relied on a quoted boolean needs it unquoted. The switch
+  endpoint's `unload_first` is held to the same rule (`400`).
 - **One request can no longer make the server allocate without bound.**
   Nothing capped the body, the size of an image, or the number of frames,
   and every frame is decoded at full size and held at once: a flat-colour

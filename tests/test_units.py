@@ -2720,6 +2720,62 @@ def test_lora_alpha_names_leaves_it_to_the_sdk_when_it_cannot_tell(cfg, role):
     assert lora_alpha_names(cfg, role) is None
 
 
+def _config_with(tmp_path, **raw):
+    """_write_config (below) with one text slot, for tests about other keys."""
+    return _write_config(
+        tmp_path, **{"TEXT_SLOTS": [{"model_root": str(tmp_path)}], **raw})
+
+
+@pytest.mark.parametrize("key", ["PROMPT_LOGPROBS", "GENIE_PROFILE",
+                                 "TOOL_CALL_RECOVERY",
+                                 "VLM_VISION_BUDGET_GUARD"])
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_a_config_flag_must_be_a_json_boolean(tmp_path, key, value):
+    """bool("false") is True: a quoted false turned the workaround on."""
+    from genie_server.config import load_config
+    with pytest.raises(ValueError, match=f"{key} must be true or false"):
+        load_config(_config_with(tmp_path, **{key: value}))
+
+
+def test_config_flags_default_off_and_accept_booleans(tmp_path):
+    from genie_server.config import load_config
+    assert load_config(_config_with(tmp_path)).tool_call_recovery is False
+    assert load_config(_config_with(
+        tmp_path, TOOL_CALL_RECOVERY=True)).tool_call_recovery is True
+
+
+@pytest.mark.parametrize("key, value", [
+    ("CHAT_TEMPLATE", "chatlm"),      # used to render as chatml anyway
+    ("CHAT_TEMPLATE", "qwen"),
+    ("CHAT_TEMPLATE", 3),
+    ("CHAT_TEMPLATE", 0),             # falsy, but not "unset" either
+    ("CHAT_TEMPLATE", False),
+    ("TOOL_FORMAT", []),
+    ("TOOL_FORMAT", "hermes2"),       # used to fall back to hermes
+    ("TOOL_FORMAT", "gemma"),
+])
+def test_an_unknown_template_or_tool_format_is_refused(tmp_path, key, value):
+    from genie_server.config import load_config
+    with pytest.raises(ValueError, match=f"{key} must be one of"):
+        load_config(_config_with(tmp_path, **{key: value}))
+
+
+@pytest.mark.parametrize("key, value, attr, expected", [
+    ("CHAT_TEMPLATE", " Llama3 ", "chat_template_override", "llama3"),
+    ("CHAT_TEMPLATE", "gemma4", "chat_template_override", "gemma4"),
+    ("CHAT_TEMPLATE", "", "chat_template_override", ""),
+    ("TOOL_FORMAT", "Gemma4", "tool_format_override", "gemma4"),
+    ("TOOL_FORMAT", "", "tool_format_override", ""),
+    ("CHAT_TEMPLATE", None, "chat_template_override", ""),   # null = unset
+    ("TOOL_FORMAT", None, "tool_format_override", ""),
+])
+def test_known_template_and_tool_format_names_load(tmp_path, key, value, attr,
+                                                   expected):
+    from genie_server.config import load_config
+    cfg = load_config(_config_with(tmp_path, **{key: value}))
+    assert getattr(cfg, attr) == expected
+
+
 def _write_config(tmp_path, **raw):
     path = tmp_path / "env_config.json"
     path.write_text(json.dumps({"QAIRT_SDK_ROOT": "/opt/qairt", **raw}))
