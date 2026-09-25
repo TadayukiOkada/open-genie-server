@@ -42,7 +42,7 @@ from .capi import (GenieLib, PERFORMANCE_POLICIES, PERFORMANCE_POLICY_NAMES,
 from .config import ServerConfig, resolve_model_path
 from .engine import GenParams, Generation, QueryPlan, SlotChangedError
 from .logprobs import LogprobsCollector
-from .prefix_cache import PrefixCache
+from .prefix_cache import KEY_RE, PrefixCache
 from .protocol import InvalidRequestError, openai_error, read_json_body, sse
 from .slots import SlotManager, canonical_engine_role, lora_alpha_names
 
@@ -1190,12 +1190,38 @@ def create_app(state: ServerState) -> FastAPI:
 
     # ------------------------------------------------------------ prefix cache
 
+    def _current_namespaces() -> set[str]:
+        return {s.cache_namespace for s in manager.slots}
+
     @app.get("/v1/prefix/cache")
     async def list_prefix_cache():
-        return {"entries": state.prefix_cache.list_entries()}
+        return {"entries": state.prefix_cache.list_entries(
+            _current_namespaces())}
+
+    @app.delete("/v1/prefix/cache")
+    async def prune_prefix_cache(request: Request):
+        """?scope=unreachable deletes the entries no slot can reach any more
+        (a model or LoRA change leaves its old entries behind); scope=all
+        deletes every entry, including ones saved before namespaces were
+        recorded. No scope is a 400, so a bare DELETE cannot wipe the cache
+        by accident. Namespaces are read as they are at the call: an entry
+        for a model a slot is switching to right now counts as unreachable."""
+        scope = request.query_params.get("scope", "")
+        if scope not in ("unreachable", "all"):
+            raise InvalidRequestError(
+                "scope must be 'unreachable' or 'all'", "scope")
+        if scope == "all":
+            return await asyncio.to_thread(
+                state.prefix_cache.prune, set(), include_unknown=True)
+        return await asyncio.to_thread(
+            state.prefix_cache.prune, _current_namespaces())
 
     @app.delete("/v1/prefix/cache/{key}")
     async def delete_prefix_cache(key: str):
+        if not KEY_RE.fullmatch(key):
+            raise InvalidRequestError(
+                f"not a prefix cache key: {key!r} (16 lowercase hex digits)",
+                "key")
         if state.prefix_cache.delete(key):
             return {"deleted": key}
         raise HTTPException(status_code=404, detail=f"Cache key not found: {key}")

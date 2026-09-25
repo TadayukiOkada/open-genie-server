@@ -395,7 +395,8 @@ def warm_up_prefix(lib: GenieLib, slot: Slot, prefix_prompt: str, cache_key: str
         logger.error(f"[{slot.name}] Warmup query failed: {ret}")
         return False
     status[slot.name] = {"phase": "saving KV cache", "detail": "writing to disk…"}
-    return prefix_cache.save(lib, slot.handle, cache_key)
+    return prefix_cache.save(lib, slot.handle, cache_key,
+                             namespace=slot.cache_namespace)
 
 
 def prompt_tokens_over_context(slot: Slot, prompt_text: str) -> tuple[int, int] | None:

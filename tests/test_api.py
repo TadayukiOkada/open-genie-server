@@ -2096,3 +2096,80 @@ def test_an_unexpected_exception_reaches_an_allowed_origin(state, monkeypatch):
     assert r.status_code == 500
     assert r.headers.get("access-control-allow-origin") == origin
     assert r.json()["error"]["type"] == "server_error"
+
+
+# ---------------------------------------------------------------- prefix cache hygiene
+
+def _warm(client, prompt="You are terse."):
+    r = client.post("/v1/prefix/warmup", json={"system_prompt": prompt})
+    assert r.status_code == 200, r.text
+    return r.json()["key"]
+
+
+def _entries(client):
+    return {e["key"]: e for e in client.get("/v1/prefix/cache").json()["entries"]}
+
+
+def test_an_entry_records_its_namespace_and_whether_it_is_reachable(state,
+                                                                   client):
+    key = _warm(client)
+    e = _entries(client)[key]
+    assert e["namespace"] == state.manager.slots[0].cache_namespace
+    assert e["reachable"] is True
+
+
+def test_prune_deletes_only_what_no_slot_can_reach(state, client):
+    """A LoRA change moves the namespace: the old entry stays on disk,
+    unreachable, until someone asks for it to go."""
+    old = _warm(client)
+    client.post("/v1/lora/apply", json={"lora_adapter_name": "a"})
+    new = _warm(client)
+    assert old != new
+    assert (_entries(client)[old]["reachable"],
+            _entries(client)[new]["reachable"]) == (False, True)
+
+    r = client.delete("/v1/prefix/cache?scope=unreachable")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == [old]
+    assert r.json()["freed_bytes"] > 0
+    assert set(_entries(client)) == {new}
+
+
+def test_an_entry_without_a_recorded_namespace_is_kept_unless_asked(state,
+                                                                    client):
+    """Saved before namespaces were recorded: it may well be reachable."""
+    legacy = "0123456789abcdef"
+    (state.prefix_cache._dir / f"prefix_{legacy}.geniestate").write_bytes(b"kv")
+    assert _entries(client)[legacy]["reachable"] is None
+
+    r = client.delete("/v1/prefix/cache?scope=unreachable")
+    assert r.json() == {"deleted": [], "freed_bytes": 0,
+                        "kept_unknown": [legacy]}
+    r = client.delete("/v1/prefix/cache?scope=all")
+    assert r.json()["deleted"] == [legacy]
+    assert _entries(client) == {}
+
+
+def test_a_bare_delete_of_the_collection_is_refused(client):
+    key = _warm(client)
+    for url in ("/v1/prefix/cache", "/v1/prefix/cache?scope=everything"):
+        r = client.delete(url)
+        assert r.status_code == 400
+        assert r.json()["error"]["param"] == "scope"
+    assert key in _entries(client)
+
+
+@pytest.mark.parametrize("key", ["abc", "0123456789ABCDEF",
+                                 "0123456789abcdeg", "0123456789abcdef0"])
+def test_deleting_a_key_that_is_not_a_cache_key_is_a_400(client, key):
+    r = client.delete(f"/v1/prefix/cache/{key}")
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "key"
+
+
+def test_deleting_an_entry_removes_its_namespace_record(state, client):
+    key = _warm(client)
+    meta = state.prefix_cache._dir / f"prefix_{key}.json"
+    assert meta.exists()
+    assert client.delete(f"/v1/prefix/cache/{key}").status_code == 200
+    assert not meta.exists()

@@ -1081,7 +1081,7 @@ When `messages` includes a `system` role and the template supports splitting (ll
 
 - Cache key: `sha256(f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}\x1f{prefix_prompt}")[:16]`
 - **Namespaced by slot/model/LoRA**, so switching state via `/v1/models/switch` or `/v1/lora/apply` never accidentally restores a KV cache saved for a different slot/model/LoRA (the key simply changes, so it naturally misses).
-- Storage format: the file (or directory) written by `GenieDialog_save`/`GenieDialog_restore` is managed as `PREFIX_CACHE_DIR/prefix_<key>.geniestate` (a single directory shared by every slot, but the keys never collide since they're namespaced).
+- Storage format: the file (or directory) written by `GenieDialog_save`/`GenieDialog_restore` is managed as `PREFIX_CACHE_DIR/prefix_<key>.geniestate` (a single directory shared by every slot, but the keys never collide since they're namespaced). Next to it, `prefix_<key>.json` records the namespace, which is what lets `DELETE /v1/prefix/cache?scope=unreachable` find the entries a model or LoRA change has orphaned (see [API](./API.md#prefix-kv-cache)).
 
 Flow:
 

@@ -1002,7 +1002,7 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 
 - キャッシュキー: `sha256(f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}\x1f{prefix_prompt}")[:16]`
 - **スロット/モデル/LoRAでnamespace化**されているため、`/v1/models/switch` や `/v1/lora/apply` で状態を切り替えても、別スロット/別モデル/別LoRA用に保存されたKVキャッシュを誤って復元することはありません(単にキーが変わるため自然にmiss扱いになります)。
-- 保存形式: `GenieDialog_save`/`GenieDialog_restore` が書き出すファイル(またはディレクトリ)を `PREFIX_CACHE_DIR/prefix_<key>.geniestate` として管理(全スロット共通のディレクトリですが、キーが分かれているため衝突しません)。
+- 保存形式: `GenieDialog_save`/`GenieDialog_restore` が書き出すファイル(またはディレクトリ)を `PREFIX_CACHE_DIR/prefix_<key>.geniestate` として管理(全スロット共通のディレクトリですが、キーが分かれているため衝突しません)。隣の `prefix_<key>.json` に namespace を記録しており、これを使って `DELETE /v1/prefix/cache?scope=unreachable` が、モデルや LoRA の変更で取り残されたエントリを見つけます([API](./API.ja.md#prefix-kvキャッシュ)を参照)。
 
 フロー:
 

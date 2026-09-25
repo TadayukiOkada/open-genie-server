@@ -11,7 +11,7 @@ configuration live in [MANUAL.md](./MANUAL.md); this file is the contract.
 |---|---|
 | [OpenAI-compatible](#openai-compatible-endpoints) | `GET /v1/models` · `GET /v1/models/{id}` · `POST /v1/completions` · `POST /v1/chat/completions` |
 | [Server status and control](#server-status-and-control) | `GET /v1/server/status` · `GET /v1/server/idle` · `GET\|POST /v1/server/performance_policy` · `GET\|POST /v1/server/prompt_logprobs` · `GET /v1/server/profile` |
-| [Prefix KV cache](#prefix-kv-cache) | `GET /v1/prefix/cache` · `DELETE /v1/prefix/cache/{key}` · `POST /v1/prefix/warmup` |
+| [Prefix KV cache](#prefix-kv-cache) | `GET /v1/prefix/cache` · `DELETE /v1/prefix/cache?scope=` · `DELETE /v1/prefix/cache/{key}` · `POST /v1/prefix/warmup` |
 | [Models and LoRA](#models-and-lora) | `POST /v1/models/switch` · `POST /v1/lora/apply` · `POST /v1/lora/strength` · `POST /v1/lora/release` · `GET /v1/lora/current` |
 | [Errors](#error-format) | the envelope every failure uses |
 
@@ -264,15 +264,26 @@ measured numbers.
 
 ### GET /v1/prefix/cache
 
-Lists saved prefix KV cache entries (a directory shared by every slot, logically separated by key).
+Lists saved prefix KV cache entries (a directory shared by every slot, logically separated by key). `namespace` is the slot, model and LoRA state the entry was saved under, and `reachable` says whether any slot has that namespace now. Both are `null` for an entry saved before namespaces were recorded.
 
 ```json
-{"entries": [{"key": "...", "path": "...", "kind": "file", "size_bytes": 12345, "mtime": 1700000000}]}
+{"entries": [{"key": "...", "path": "...", "kind": "file", "size_bytes": 12345, "mtime": 1700000000,
+              "namespace": "chat|qwen3-4b|", "reachable": true}]}
 ```
+
+### DELETE /v1/prefix/cache?scope=unreachable|all
+
+A model switch or a LoRA change leaves the old entries on disk where no slot can reach them, and a KV snapshot can run to gigabytes. `scope=unreachable` deletes those. It keeps entries with no recorded namespace, which it lists in `kept_unknown`. `scope=all` deletes everything. A missing or other `scope` is a `400`, so a bare `DELETE` cannot empty the cache by accident. Namespaces are read at the moment of the call, so an entry for a model a slot is switching to right now counts as unreachable.
+
+```json
+{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": []}
+```
+
+**Nothing is ever deleted on its own.** There is no size limit and no LRU. The cache fills only on an explicit warmup, and it empties only on an explicit call, so a TTFT measurement never changes behind the caller's back.
 
 ### DELETE /v1/prefix/cache/{key}
 
-Deletes the cache entry for the given key. `404` if it doesn't exist.
+Deletes the cache entry for the given key. `404` if it doesn't exist, `400` if `key` is not 16 lowercase hex digits (the form `warmup` returns).
 
 ### POST /v1/prefix/warmup
 
