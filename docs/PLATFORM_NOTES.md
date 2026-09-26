@@ -308,6 +308,47 @@ startup with the reason stated plainly. Supporting it would mean a third,
 from the `GenieNode`/`GeniePipeline` composable pipeline this whole subsystem
 is built on — which is out of scope for now.
 
+## Prefix cache on a sliding-window bundle (Gemma 4)
+
+The prefix KV cache ([Prefix KV Cache](./MANUAL.md#prefix-kv-cache)) saves and restores the KV
+state with `GenieDialog_save` / `GenieDialog_restore`. On the stock libGenie of QAIRT 2.49.40
+that pair does not work for a bundle with a **sliding-window cache group**, which Gemma 4 has
+(the `swa_` group: window 512, graph context 768). The group holds at most
+`graph context - AR length` entries — **640** with the AR-128 prefill graph on the Gemma 4 E2B
+bundle measured here — and the SDK saves and restores it as if it were the full-length group.
+
+Measured on an SA8255P with `gemma4_e2b_it_qat` (context 4096, AR-128 + AR-1), greedy, comparing
+a restored dialog with the same two-step run that did not save and restore:
+
+| System-prompt prefix | Stock libGenie |
+|---|---|
+| up to about 630 tokens | identical |
+| about 650 tokens and more | the restored dialog's output differs (a run at 709 tokens restarted the prompt's table instead of answering) |
+| about 1500 tokens | the server process dies with SIGSEGV on the first request that hits the cache |
+
+The boundary lies between 631 and 649 tokens, i.e. the group's budget. The defect is in the SDK
+(the same code is in QAIRT 2.50.0), and it applies to any client of `GenieDialog_save` /
+`GenieDialog_restore`, not to this server in particular.
+
+**What to do.** With the stock SDK keep a Gemma 4 system prompt that you warm up under about 600
+tokens, or do not call `POST /v1/prefix/warmup` for that model: a normal request that misses the
+cache does not populate it and runs the full prompt, so nothing else needs switching off. The
+server does not check the length for you; by the [design rule](../README.md) it does not hide SDK
+defects unless you ask it to.
+
+A second, smaller SDK defect sits in the same area: when a prompt longer than the window budget
+is sent as two queries (which is what a cache hit does, and also what a client that splits a
+prompt does), the value cache is not moved correctly when the window evicts. It shifts the logits
+slightly (worst-step KL 0.015 to 0.09 in the same runs) but did not change the greedy output in
+our tests. The extra BOS on a hit ([Prefix KV Cache](./MANUAL.md#prefix-kv-cache)) is a third.
+
+We have written all three up for Qualcomm with patches. A libGenie built with the patches
+restores bit-identically to the unrestored run at 312, 709, 1006 and 1548 prefix tokens and
+makes a hit about 18% faster end to end than a full prefill (1423 to 1168 ms per request, a
+1540-token system prompt, on the bench). Patches are not shipped here: they need a rebuild of the
+SDK's example sources. What the fixed library changes for you is only that the limits above go
+away.
+
 ## Reading the rest of this documentation
 
 These claims are measurements from the bench above. They are honest about that

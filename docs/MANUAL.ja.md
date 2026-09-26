@@ -1022,6 +1022,12 @@ HIT:  GenieDialog_reset → GenieDialog_restore → query(remaining, SENTENCE_EN
 > 続きが `[2, 105, 2364, …]` でした。埋め込みを context binary の中に持つバンドルではこうならず、
 > SDK が BOS を足すのは `SENTENCE_COMPLETE` / `BEGIN` / `REWIND` のときだけです。SDK の挙動なので
 > サーバはそのまま見えるようにしており、HIT のときの `usage.prompt_tokens` はこの2個目を数えません。
+>
+> **スライディングウィンドウのバンドル(Gemma 4)では、stock の SDK は約 640 トークンを超える prefix を
+> 復元できません**。HIT の出力が崩れ、さらに長いとプロセスが落ちます。ウォームアップする system prompt は
+> 約 600 トークン未満にするか、そのモデルはウォームアップしないでください。詳細と実測は
+> [プラットフォームノート](./PLATFORM_NOTES.ja.md#スライディングウィンドウのバンドルgemma-4での-prefix-cache)。
+> これらの欠陥を直したパッチ版の SDK では、上の2個目の BOS もなくなります。
 
 ### コストと損益分岐
 
