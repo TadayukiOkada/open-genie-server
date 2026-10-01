@@ -101,6 +101,11 @@ PERFORMANCE_POLICY_NAMES = {v: k for k, v in PERFORMANCE_POLICIES.items()}
 DATATYPE_UINT_32 = 12
 DATATYPE_STRING = 30
 
+# GenieCommon.h; in every QAIRT release this server supports, but looked up
+# rather than assumed, like GenieDialog_setGrammar.
+API_VERSION_FUNCTIONS = ("Genie_getApiMajorVersion", "Genie_getApiMinorVersion",
+                         "Genie_getApiPatchVersion")
+
 # GenieDialog_Param_t (keys for GenieDialog_getValue)
 PARAM_CONTEXT_OCCUPANCY = 0     # -> DATATYPE_UINT_32
 PARAM_APPLIED_LORA_ADAPTER = 1  # -> DATATYPE_STRING
@@ -346,6 +351,18 @@ class GenieLib:
         bind(lib.GenieDialog_setPerformancePolicy, [DialogHandle, ctypes.c_int], ctypes.c_int)
         bind(lib.GenieDialog_getPerformancePolicy,
              [DialogHandle, ctypes.POINTER(ctypes.c_int)], ctypes.c_int)
+
+        # Added in QAIRT 2.51.0 (API 1.21.0). Bound only when present, so an
+        # older libGenie still loads; has_set_grammar says which it is.
+        self._has_set_grammar = hasattr(lib, "GenieDialog_setGrammar")
+        if self._has_set_grammar:
+            bind(lib.GenieDialog_setGrammar,
+                 [DialogHandle, ctypes.c_char_p, ctypes.c_char_p], ctypes.c_int)
+        self._has_api_version = all(hasattr(lib, n) for n in API_VERSION_FUNCTIONS)
+        if self._has_api_version:
+            bind(lib.Genie_getApiMajorVersion, [], ctypes.c_uint32)
+            bind(lib.Genie_getApiMinorVersion, [], ctypes.c_uint32)
+            bind(lib.Genie_getApiPatchVersion, [], ctypes.c_uint32)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -654,6 +671,34 @@ class GenieLib:
     def get_applied_lora(self, handle) -> str:
         """Currently-applied LoRA adapter name, "" if none (base model)."""
         return self.get_value_string(handle, PARAM_APPLIED_LORA_ADAPTER) or ""
+
+    # ------------------------------------------------------------ grammar
+
+    @property
+    def has_set_grammar(self) -> bool:
+        """Whether this libGenie exports GenieDialog_setGrammar. Not whether
+        it works: see grammar.probe_support."""
+        return self._has_set_grammar
+
+    def set_grammar(self, handle, kind: str | None, path: str | None) -> int:
+        """GenieDialog_setGrammar: compiles the grammar in the file at `path`
+        (kind "json-schema" | "regex" | "ebnf") and makes it the dialog's
+        constraint from the next query on. (None, None) removes the
+        constraint. The SDK prints its own reason for a failure to stderr."""
+        if not self._has_set_grammar:
+            raise RuntimeError("GenieDialog_setGrammar is not in this libGenie")
+        return self._lib.GenieDialog_setGrammar(
+            handle, kind.encode() if kind else None,
+            path.encode() if path else None)
+
+    def api_version(self) -> str | None:
+        """Genie_getApi{Major,Minor,Patch}Version as "1.21.0", or None when
+        the library does not export them."""
+        if not self._has_api_version:
+            return None
+        return (f"{self._lib.Genie_getApiMajorVersion()}."
+                f"{self._lib.Genie_getApiMinorVersion()}."
+                f"{self._lib.Genie_getApiPatchVersion()}")
 
     # ------------------------------------------------------------ LoRA
 

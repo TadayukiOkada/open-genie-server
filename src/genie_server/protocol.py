@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .grammar import GrammarRequestError
 from .slots import SlotNotLoadedError, UnknownSlotError
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,11 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _invalid_request(request: Request, exc: InvalidRequestError):
         return openai_error(exc.status_code, str(exc), "invalid_request_error",
                             exc.param, exc.code)
+
+    @app.exception_handler(GrammarRequestError)
+    async def _grammar_request(request: Request, exc: GrammarRequestError):
+        return openai_error(400, str(exc), "invalid_request_error", exc.param,
+                            exc.code)
 
     @app.exception_handler(UnknownSlotError)
     async def _unknown_slot(request: Request, exc: UnknownSlotError):

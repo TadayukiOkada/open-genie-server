@@ -35,8 +35,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import engine, logprobs as logprobs_mod, protocol, templates, \
-    vlm
+from . import engine, grammar as grammar_mod, logprobs as logprobs_mod, \
+    protocol, templates, vlm
 from .capi import (GenieLib, PERFORMANCE_POLICIES, PERFORMANCE_POLICY_NAMES,
                    STATUS_SUCCESS, resolve_sampler_values)
 from .config import ServerConfig, resolve_model_path
@@ -193,6 +193,17 @@ def _reject_unsupported(body: dict, endpoint: str) -> None:
     if endpoint == "completions" and (
             _number(body, "best_of", lo=1, integer=True) or 1) > 1:
         raise InvalidRequestError("best_of > 1 is not supported", "best_of")
+
+
+def _require_grammar_support(grammar, slot) -> None:
+    """A constraint the slot cannot apply is refused, not dropped: answering
+    without it would hand back unconstrained text to a caller that parses
+    the output as if it were constrained."""
+    if grammar is not None and not slot.grammar_support.supported:
+        raise grammar_mod.GrammarRequestError(
+            f"Slot '{slot.name}' ({slot.active_model_id}) cannot apply a "
+            f"per-request grammar: {slot.grammar_support.reason}.",
+            grammar.param, code="grammar_not_supported")
 
 
 def _include_usage(body: dict) -> bool:
@@ -398,8 +409,10 @@ async def _sse_body(
 
     if gen.error:
         # Mid-stream failure: emit an error event (vLLM-style), then close.
-        yield sse({"error": {"message": gen.error, "type": "server_error",
-                             "param": None, "code": None}})
+        yield sse({"error": {
+            "message": gen.error,
+            "type": "invalid_request_error" if gen.grammar_error else "server_error",
+            "param": gen.grammar_error, "code": None}})
     else:
         yield sse(make_final(gen.finish_reason))
         if include_usage:
@@ -853,6 +866,8 @@ def create_app(state: ServerState) -> FastAPI:
         model_name = slot.active_model_id
         _reject_unsupported(body, "completions")
         params = _parse_gen_params(body)
+        params.grammar = grammar_mod.parse_request_grammar(body)
+        _require_grammar_support(params.grammar, slot)
         stream = _flag(body, "stream")
         include_usage = _include_usage(body)
         echo = _flag(body, "echo")
@@ -871,6 +886,10 @@ def create_app(state: ServerState) -> FastAPI:
         # Gated behind an explicit switch — one scoring request occupies its
         # slot for len(prompt)/decode-rate seconds (see _score_prompt).
         if top_n is not None and echo:
+            if params.grammar is not None:
+                raise InvalidRequestError(
+                    "echo+logprobs scores the prompt as given; a grammar "
+                    "constraint cannot apply to it.", params.grammar.param)
             if not state.prompt_logprobs_enabled:
                 raise InvalidRequestError(
                     "echo+logprobs (prompt scoring, used by lm_eval "
@@ -1063,6 +1082,7 @@ def create_app(state: ServerState) -> FastAPI:
         _reject_unsupported(body, "chat")
         params = _parse_gen_params(body)
         _require_positive_max_tokens(params)
+        params.grammar = grammar_mod.parse_request_grammar(body)
 
         # Qwen3-style reasoning toggle. Accepts both a flat top-level
         # `enable_thinking` (this server's shorthand) and vLLM/SGLang's
@@ -1085,6 +1105,11 @@ def create_app(state: ServerState) -> FastAPI:
         # VLM routing: any message with an image_url content part goes
         # through the GenieNode/GeniePipeline path.
         if vlm.is_vlm_request(messages):
+            if params.grammar is not None:
+                raise grammar_mod.GrammarRequestError(
+                    "A grammar constraint cannot apply to an image or video "
+                    "request: the SDK's VLM pipeline has no grammar API.",
+                    params.grammar.param, code="grammar_not_supported")
             return await _vlm_chat(request, body, requested_model, params, stream)
 
         slot = manager.select_for_request(body, requested_model)
@@ -1101,6 +1126,7 @@ def create_app(state: ServerState) -> FastAPI:
         # nondeterministically; it cost a session to work out. OpenAI reports
         # the resolved model too (ask for "gpt-4", get "gpt-4-0613").
         model_name = slot.active_model_id
+        _require_grammar_support(params.grammar, slot)
 
         top_n = _chat_top_n(body)
         collector = None
@@ -1231,6 +1257,12 @@ def create_app(state: ServerState) -> FastAPI:
                 "phase": st.get("phase", "idle"),
                 "detail": st.get("detail", ""),
                 "context_occupancy": occ,
+                "grammar": {
+                    "per_request": s.grammar_support.supported,
+                    "reason": s.grammar_support.reason or None,
+                    "bundle": s.grammar_support.bundle[0]
+                    if s.grammar_support.bundle else None,
+                },
             })
 
         # A VLM-only deployment has no text slots, so there is no primary to
