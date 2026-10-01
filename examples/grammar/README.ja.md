@@ -19,7 +19,13 @@
 
 ## 注意
 
-- `dialog.context.grammar`はスロット/モデル単位で固定(docs/MANUAL.ja.md「Grammar制約デコーディング」参照)。
-  このスロットへのリクエストは常にこのスキーマに制約される。
+- `dialog.context.grammar`はスロットの既定(docs/MANUAL.ja.md「Grammar制約デコーディング」参照)。
+  このスロットへのリクエストは、`response_format` か `structured_outputs` で自分の grammar を
+  持ってこない限り(QAIRT 2.51.0 以降)、このスキーマに制約される。grammar を持たない次の
+  リクエストではこのスキーマに戻る。2.51.0 より前はモデル単位で固定。
+- リクエスト単位の grammar を使うだけならこの例は要らない: QAIRT 2.51.0 では、grammar の
+  バックエンドが入った `libGenie.so` ならどのバンドルでも受け付ける。
+- 素のライブラリでは応答の末尾に `<|im_end|>` がテキストで付く。SDK の欠陥で、サーバは隠さない
+  (docs/QAIRT_VERSIONS.ja.md の D4)。
 - `backend`は`"xgrammar"`固定。`file`はスキーマ定義そのものを書いたテキストファイル
   (`grammar_schema.txt`)を指す — ファイル名は任意、拡張子`.json`である必要もない。

@@ -31,8 +31,8 @@ These apply everywhere:
   `?slot=<name>` checks that one slot only (`404` for an unknown name). Without
   it, one empty slot makes the whole server not ready, which on a multi-slot
   server takes every slot out of a load balancer's rotation.
-  **It reports only whether a model is loaded.** A slot the stock library has
-  wedged still reads as ready: this server does not detect the wedge (see
+  **It reports only whether a model is loaded.** A slot a stock 2.49.x or 2.50.x
+  library has wedged still reads as ready: this server does not detect the wedge (see
   [QAIRT Version Issues](./QAIRT_VERSIONS.md)).
 - A request body must be JSON sent as `Content-Type: application/json`
   (`application/*+json` too). Any other type, or none, is a `415`: those are
@@ -80,6 +80,7 @@ Raw text completion (for `lm_eval`'s `local-completions` backend). No chat templ
 | `echo` | bool | If true, prepends the prompt to the response (sent as the first chunk when streaming). |
 | `n` | int | Only `1` is supported. `>1` returns `400`. |
 | `stream_options.include_usage` | bool | If true, sends a `text_completion` chunk containing `usage` right before `[DONE]`. |
+| `response_format` / `structured_outputs` | object | Constrains the output with a grammar (QAIRT 2.51.0 and later). See [Structured output](#structured-output-response_format-structured_outputs). Not combinable with prompt scoring (`echo` + `logprobs`). |
 
 ```bash
 curl $base_url/v1/completions \
@@ -116,8 +117,9 @@ In addition to `/v1/completions`'s fields:
 | `messages` | array | Required, non-empty. An array of `{"role": "...", "content": "..."}`. |
 | `enable_thinking` / `chat_template_kwargs.enable_thinking` | bool | Default `true`. Not an OpenAI-standard field — a Qwen3-specific extension. Accepted both as a flat top-level `enable_thinking` and nested under `chat_template_kwargs` (vLLM/SGLang's convention — they forward that dict into HF's `apply_chat_template()`, and `enable_thinking` is the literal kwarg Qwen3's own chat template reads; `chat_template_kwargs` wins if both are given). `false` appends the literal text `/no_think` to the system prompt (synthesizing an empty one if none was given) — Qwen3's own documented soft-switch for its chat template, which makes the model skip its own reasoning and answer directly. **Not** implemented by pre-seeding an empty `<think>\n\n</think>\n\n` block (HuggingFace's chat-template mechanism) — Qualcomm's own reference server (`qai-appbuilder/samples/genie/c++/Service`) found via real-device testing that doing so causes Qwen3 to degenerate on short prompts (verbatim-repeats the prior turn, then stops), so this server follows their validated `/no_think` approach instead. No effect on templates/models that aren't Qwen3-family — it's pure prompt text, there's no SDK-level reasoning toggle. |
 | `tools` | array | OpenAI function-calling tool definitions — see [Function calling](#function-calling-tools) below. |
-| `tool_choice` | string | Only `"auto"` (default) and `"none"` (disables tool injection). `"required"` and the `{"type":"function", ...}` named form are **rejected with a `400`** — both guarantee a call in OpenAI's semantics, which needs constrained decoding this server does not implement. Use `"auto"` and check whether the reply actually carries `tool_calls`. |
+| `tool_choice` | string | Only `"auto"` (default) and `"none"` (disables tool injection). `"required"` and the `{"type":"function", ...}` named form are **rejected with a `400`** — both guarantee a call in OpenAI's semantics, and this server does not force a call (it does not turn `tools` into a grammar). Use `"auto"` and check whether the reply actually carries `tool_calls`. |
 | `logprobs` / `top_logprobs` | bool / int (0-20) | OpenAI chat logprobs for the generated tokens (`choices[0].logprobs.content[...]`). Non-streaming only. HTTP 400 `logprobs_not_supported` on a QAIRT runtime that never calls the logits callback. See [Logprobs](./MANUAL.md#logprobs). |
+| `response_format` / `structured_outputs` | object | Constrains the output with a grammar (QAIRT 2.51.0 and later). See [Structured output](#structured-output-response_format-structured_outputs). |
 
 ```bash
 curl $base_url/v1/chat/completions \
@@ -134,6 +136,51 @@ curl $base_url/v1/chat/completions \
 ```
 
 The streaming response is SSE (`text/event-stream`); per the OpenAI spec, it starts with an empty chunk carrying `delta.role="assistant"`.
+
+#### Structured output (`response_format`, `structured_outputs`)
+
+A request can constrain its output with a grammar, on `/v1/chat/completions` and `/v1/completions`. Two spellings are accepted: OpenAI's `response_format`, and vLLM's `structured_outputs` (an `extra_body` field in the OpenAI SDK). The server compiles the grammar on the slot's dialog with `GenieDialog_setGrammar`, which needs **QAIRT 2.51.0 or later and a `libGenie.so` with the grammar backend**. Behaviour, cost and caveats: [MANUAL § Grammar-Constrained Decoding](./MANUAL.md#grammar-constrained-decoding).
+
+| Request | Grammar the SDK compiles |
+|---|---|
+| `response_format: {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}` | JSON Schema. `strict` is not read: the schema is enforced either way |
+| `response_format: {"type": "json_object"}` | JSON Schema `{"type": "object"}` |
+| `response_format: {"type": "text"}` | none |
+| `structured_outputs: {"json": {...}}` (an object, or a JSON string) | JSON Schema |
+| `structured_outputs: {"json_object": true}` | JSON Schema `{"type": "object"}` |
+| `structured_outputs: {"regex": "..."}` | regex |
+| `structured_outputs: {"choice": ["a", "b"]}` | EBNF `root ::= "a" \| "b"` |
+| `structured_outputs: {"grammar": "root ::= ..."}` | EBNF, passed through. XGrammar's dialect, the same one vLLM takes |
+
+```bash
+curl $base_url/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "genie-local",
+        "messages": [{"role": "user", "content": "Capital of Japan, as JSON."}],
+        "chat_template_kwargs": {"enable_thinking": false},
+        "response_format": {"type": "json_schema", "json_schema": {"name": "city",
+          "schema": {"type": "object", "properties": {"city": {"type": "string"}},
+                     "required": ["city"]}}}
+      }'
+```
+
+**Refused with a `400`, never answered unconstrained:**
+
+| Case | `error.code` |
+|---|---|
+| The slot cannot set a grammar: QAIRT before 2.51.0, a library without the grammar backend, or a dialog type without grammar. The message says which | `grammar_not_supported` |
+| A request with an image or video part | `grammar_not_supported` |
+| `structural_tag`, in either spelling | — |
+| `structured_outputs` options the SDK cannot take: `disable_any_whitespace`, `disable_additional_properties`, `whitespace_pattern` set to anything but their default | — |
+| An unknown `structured_outputs` key, more than one constraint in it, or both spellings at once | — |
+| vLLM's `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, ... (removed in vLLM v0.12.0) | — |
+| Prompt scoring (`echo` + `logprobs`) with a grammar | — |
+| A grammar the SDK cannot compile. The query does not run; the SDK's message is in the server log. On a stream this arrives as an `error` event of type `invalid_request_error` | — |
+
+`structured_outputs.disable_fallback` is accepted and ignored: it selects between vLLM's own backends.
+
+A request without either field gets the bundle's own grammar (`dialog.context.grammar` in `genie_config.json`), or none. **On a stock library the reply ends with the model's end-of-sequence token as text** (`<|im_end|>`), an SDK defect the server does not hide ([D4](./QAIRT_VERSIONS.md#d4--grammar-leaks-the-terminal-token-into-the-text)).
 
 #### Function calling (`tools`)
 
@@ -184,9 +231,11 @@ A non-blocking snapshot of current state. Since `bench_ttft.py` and similar tool
   "context_occupancy": 128,
   "slots": [
     {"name": "tool_call", "device_id": 0, "active_model": "tool-model", "active_lora": "",
-     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 128},
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 128,
+     "grammar": {"per_request": true, "reason": null, "bundle": null}},
     {"name": "chat", "device_id": 1, "active_model": "general", "active_lora": "finetune-v2",
-     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0}
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0,
+     "grammar": {"per_request": false, "reason": "this libGenie has no GenieDialog_setGrammar (QAIRT 2.51.0 or later is required)", "bundle": null}}
   ],
   "vlm_slots": [
     {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl",
@@ -197,6 +246,7 @@ A non-blocking snapshot of current state. Since `bench_ttft.py` and similar tool
 
 - Each slot's `context_occupancy` is fetched via `GenieDialog_getValue(GENIE_DIALOG_PARAM_CONTEXT_OCCUPANCY)` only if that slot's lock can be acquired immediately (`null` if it can't). This endpoint itself never blocks, even during inference.
 - **`loaded` is how you tell a slot that has no model from one that is merely idle.** A `/v1/models/switch` that frees the old model and then fails to load the new one leaves that slot `"loaded": false`, and every endpoint touching it answers `503` until a later switch succeeds.
+- `grammar` says whether the slot takes a [per-request grammar](#structured-output-response_format-structured_outputs) (`per_request`), why not (`reason`, otherwise `null`), and the kind of the bundle's own grammar (`bundle`: `"json-schema"`, `"regex"`, `"ebnf"` or `null`). It is decided when the slot's model loads.
 - `vlm_slots` is always present, empty when none are configured. VLM slots report no `phase` or `context_occupancy`: the composable pipeline exposes neither. `spec` is the VLM family (`vlm_specs.FAMILIES`), auto-detected when `VLM_SLOTS[].spec` was not given; `layout` says where its node configs/connections/static tensors were read from (a genie-app script, `metadata.json`, a legacy fixed filename, or an explicit `VLM_SLOTS[]` override) — see [Bundle layout auto-read](./MANUAL.md#bundle-layout-auto-read).
 
 ### GET /v1/server/idle
@@ -332,7 +382,8 @@ curl -X POST $base_url/v1/prefix/warmup \
 > against another adapter. And on a stock **2.49.x or 2.50.x** library, **LoRA cannot be
 > used at all on a bundle whose `dialog.type` is `ssd-q1`** — the SDK requires
 > a reset after switching adapters, and that reset is what corrupts such a
-> dialog there. A patched library, or 2.48.40.260702, has neither problem:
+> dialog there. A patched library, or 2.48.40.260702, has neither problem, and
+> 2.51.0.260929 fixes it in its sources (not yet run on hardware):
 > [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog).
 
 > [!IMPORTANT]
@@ -455,7 +506,7 @@ Main status codes:
 
 | Code | Meaning |
 |---|---|
-| `400` | Invalid request parameters (a required field is missing, `n>1`, etc.) |
+| `400` | Invalid request parameters (a required field is missing, `n>1`, etc.), or a grammar the slot cannot apply or the SDK cannot compile (`error.code: "grammar_not_supported"` for the former) |
 | `404` | A resource doesn't exist (prefix cache key, model directory, unknown slot name) |
 | `409` | The target slot changed (a model switch, or a LoRA apply, release or strength change) after this request was prepared and before it ran. It was not run. Send it again. On a stream, the same condition is an `error` event. |
 | `413` | The request body is larger than `MAX_REQUEST_BODY_MB` |

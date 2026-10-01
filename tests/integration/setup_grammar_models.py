@@ -2,8 +2,9 @@
 """Build the grammar-constrained-decoding model directories the G0x
 integration tests need, on the target (run this on the board).
 
-Grammar is fixed per model/slot (docs/MANUAL.md, "Grammar-Constrained
-Decoding"), so exercising three grammar kinds means three model directories.
+These tests exercise the bundle's own grammar (dialog.context.grammar,
+docs/MANUAL.md "Grammar-Constrained Decoding"), which is set per model, so
+three grammar kinds mean three model directories.
 Each one is just a genie_config.json plus a grammar definition file: every
 heavy asset (ctx-bins, tokenizer, embeddings, HTP extensions) is referenced by
 an ABSOLUTE path back into the base model bundle, so nothing is copied and the

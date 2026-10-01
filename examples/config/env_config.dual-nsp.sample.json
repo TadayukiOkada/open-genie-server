@@ -3,7 +3,7 @@
 
   "_comment_order": "SLOT ORDER MATTERS: TEXT_SLOTS is loaded first-to-last, and on SA8255P, the FIRST model has to be a smaller one (e.g. single-CL 1.7B) or the second fails to load with 'err 1002' (e.g. loading 4B first then 1.7B fails, but single-CL 1.7B then 4B succeeds). The second model must also be pinned to a different device_id. Slot names are logical addresses for routing (e.g. 'tool_call', 'chat'); device_id assigns physical cores. See MANUAL.md, 'Multi Text Slots'.",
 
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "MODELS_BASE_DIR": "/home/root/models",
   "PREFIX_CACHE_DIR": "/home/root/prefix_cache",

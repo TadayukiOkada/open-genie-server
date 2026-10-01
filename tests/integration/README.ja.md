@@ -57,8 +57,8 @@ python3 run_integration_tests.py --base-url http://127.0.0.1:18080
 
 ## Grammarテスト(G01-G08)
 
-Grammarはモデル/スロット単位で固定されるため、種別ごとに別のモデルディレクトリが
-必要になる。実機上で生成する(重いアセットは全てベースバンドルへの絶対パス参照なので
+これらのテストはバンドル自身の grammar を見る。それはモデル単位で設定されるため、種別ごとに
+別のモデルディレクトリが必要になる。実機上で生成する(重いアセットは全てベースバンドルへの絶対パス参照なので
 各数KBしかない):
 
 ```bash
@@ -71,9 +71,22 @@ adb shell "cd /home/root && .venv/bin/python3 setup_grammar_models.py \
 そのうえで `test_config.json` の `grammar.enabled` を `true` にする。各G0xは必要な
 ディレクトリへ自分でスロットを切り替え、G08が `grammar.restore_model_dir` に戻す。
 
-**これらのテストには `ENABLE_GRAMMAR` 付きでビルドされた `libGenie.so` が必要。**
-XGrammarバックエンドはQualcommのprebuiltライブラリの中にしか無い
-(`GrammarBackend::create` は `qualla/grammar.hpp` で宣言されているが、配布ソースに
-定義が無い)。`examples/Genie/` から再ビルドしたライブラリにはgrammar機能が入らず、
+**これらのテストには grammar のバックエンドが入った `libGenie.so` が必要。**
+Qualcomm の prebuilt ライブラリには入っている(`GrammarBackend::create` は
+`qualla/grammar.hpp` で宣言されているが、配布ソースに定義が無い)。`examples/Genie/` から
+再ビルドしたライブラリには、バックエンドを自分で用意しない限り grammar 機能が入らず
+([D3](../../docs/QAIRT_VERSIONS.ja.md#d3--リビルドしたライブラリには-grammar-が入らない))、
 G0xのモデルロードは全て `GenieDialog_create failed: -1` になり、サーバログに
 `"Grammar backend configured but qualla was built without ENABLE_GRAMMAR"` が出る。
+
+**素のライブラリでは G01・G03・G05・G06 が落ちる**: 出力は正しく制約されるが、末尾に
+モデルの終端トークンがテキストで付く。SDK の欠陥で、テストは見逃さずに報告する
+([D4](../../docs/QAIRT_VERSIONS.ja.md#d4--grammar-が終端トークンを本文に漏らす))。
+**G02 はどのライブラリでも小さいモデルで落ちることがある**: `qwen3_0_6b` では 2 つの
+プロンプトの片方で、`{` の後に空白が `max_tokens` まで続く(XGrammar の JSON の文法が許す)。
+素の 2.49.40・2.50.0・2.51.0 と、バックエンドと D4 の修正を入れてリビルドした 2.51.0
+(ほかの G01〜G08 は PASS)で実測。
+
+これらのテストはバンドルの grammar だけを見る。リクエスト単位の grammar
+(`response_format`、`structured_outputs`、QAIRT 2.51.0 以降)はまだこのスイートに無く、
+サーバ側はオフラインのスイート(`tests/test_request_grammar.py`)が見ている。

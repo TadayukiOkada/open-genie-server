@@ -119,14 +119,19 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 > [QAIRT Version Issues](./QAIRT_VERSIONS.md).** Read that page before you pick
 > an SDK build or decide how to export a model. In short:
 >
+> - **2.51.0.260929 fixes the slot wedge and the other two reset defects.** A
+>   stock 2.51.0 library is a reasonable default, and it has grammar, including
+>   the new per-request grammar. It still leaks grammar's terminal token, and
+>   it still cannot save and restore a long prefix on a sliding-window bundle
+>   (Gemma 4).
 > - A **stock 2.49.x or 2.50.x library wedges a slot** when `prompt_tokens + max_tokens`
 >   crosses `context_length − AR_N`. The request that does it returns 200 and
 >   looks fine; every request after it on that slot fails until the model is
 >   reloaded. **This server does not guard against it.**
 > - **Exporting at a single context length does not remove that** — it only
 >   raises the budget from 384 to 3968 on a `[4096]` / AR-128 bundle.
-> - **Rebuilding the library fixes it but loses grammar-constrained decoding.**
->   There is no build that has both.
+> - **On 2.49.x and 2.50.x, rebuilding the library fixes it but loses
+>   grammar-constrained decoding.** Those SDKs supply no build that has both.
 > - **2.49.1.260821 is newer than 2.49.40.260810** despite the smaller number,
 >   and fixes none of the above.
 > - **2.50.0.260828 fixes none of it either**, though it is a drop-in swap —
@@ -135,14 +140,15 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 >   single-context bundle whose budget nothing in it approaches, so a green
 >   suite says nothing about the wedge.
 
-**Verified against:** QAIRT **2.49.40.260810**, **2.49.1.260821** and
-**2.50.0.260828**,
+**Verified against:** QAIRT **2.49.40.260810**, **2.49.1.260821**,
+**2.50.0.260828** and **2.51.0.260929**,
 `aarch64-oe-linux-gcc11.2`, on an SA8255P board, with Qwen3 w4a16 context
 binaries (`qwen3_0_6b`, `qwen3_4b_instruct_2507`); and **2.48.40.260702**,
 `aarch64-android`, on the Android guest of the same board
-([Running on Android](#running-on-android)). **2.48 carries none of the three
-reset defects** — they arrived with 2.49's scheduler — so it is the one build
-here on which a stock library is not a liability.
+([Running on Android](#running-on-android)). **2.48 and 2.51.0 carry none of the
+three reset defects** — they arrived with 2.49's scheduler and were fixed in
+2.51.0 — so those are the builds here on which a stock library is not a
+liability. Bundles exported with 2.49.40 run on the 2.51.0 runtime unchanged.
 
 The rest of this section is about an export choice that is *not* a defect: how
 many context lengths to compile into a bundle.
@@ -273,7 +279,7 @@ blocking every other client) rather than as a throughput doubling.
 
 ```json
 {
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "MODELS_BASE_DIR": "/home/root/models",
   "PREFIX_CACHE_DIR": "/home/root/prefix_cache",
@@ -762,7 +768,7 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `CORS_ALLOW_ORIGINS` | optional | `[]` | Origins a browser page may call this server from, e.g. `["http://localhost:3000"]`; `["*"]` allows any. **Empty by default, which sends no CORS headers**: none of the documented clients needs them (`lm_eval`, `curl` and the OpenAI SDK are not browsers, and [Open WebUI](#open-webui) calls from its backend, except through its [Direct Connections](#direct-connections-need-cors_allow_origins)). List an origin only for a page that calls this server straight from the browser, and remember that the page then has every endpoint, model switching included. Up to 1.4.0 every origin was allowed. |
 | `MAX_REQUEST_BODY_MB` | optional | `64` | Largest request body, in MB; a larger one is `413`. `0` = no limit. The body is held whole and then parsed into a second copy, so this bounds what one request can make the server allocate. A long `video_url` is the only thing that gets near it: 64 MB is several hundred frames at the sizes the encoders take. |
 | `VLM_MAX_IMAGE_PIXELS` / `VLM_MAX_TOTAL_PIXELS` | optional | `16777216` / `1073741824` | Largest image or frame, and largest total across one request's images and frames, in pixels; over either is a `400`. `0` = no limit. Images are decoded at full size and all held at once (3 bytes per pixel for RGB, 4 for RGBA, CMYK and 32-bit images) before the spec resizes each, and a flat-colour PNG of 13000 × 13000 (just under Pillow's own ceiling) is about 500 KB on the wire and 483 MB decoded — so the body limit does not bound this. Checked from the headers, before decoding. Defaults are 4096 × 4096, above every image the test suites and probes send, and 64 times that, 64 being the most images any of them sends in one request — so a test within the per-image limit is never stopped by the total. That total is up to 4 GB decoded (3 GB if every image is RGB; a one-colour 4096 × 4096 RGBA PNG is 63 KB on the wire, so 64 of them fit any body limit). Set it lower for a board with less to spare. They bound the server's own memory, not what reaches the SDK: a request past the context still reaches it unless `VLM_VISION_BUDGET_GUARD` is on. |
-| `GENIE_LIB_PATH` | optional | (unset) | Explicit path to `libGenie.so`. Default: `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`, or the system loader's `libGenie.so` on `linux-ubuntu` without an SDK root. |
+| `GENIE_LIB_PATH` | optional | (unset) | Explicit path to `libGenie.so`. Default: `<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`, or the system loader's `libGenie.so` on `linux-ubuntu` without an SDK root. Genie loads `libQnnSystem.so` from the directory `libGenie.so` is in, so that directory must also hold the rest of the QAIRT runtime libraries (symlinks are fine); otherwise every model load fails with `GenieDialog_create failed: -1`. |
 | `GENIE_PROFILE` | optional | `false` | Binds a `GenieProfile` to every text slot; read the SDK's own TTFT / prefill / decode KPIs from `GET /v1/server/profile` (see [Profiling](#profiling-sdk-side-kpis)). Needs a restart to change. |
 | `GENIE_LOG_LEVEL` | optional | `""` (off) | Turns on libGenie's own logging at `"error"`, `"warn"`, `"info"` or `"verbose"`, by creating a `GenieLog` and binding it to every dialog, node and pipeline config the server creates. **Off is not "quiet", it is silent**: every `__INFO`/`__ERROR` inside the SDK is gated on a bound logger, so with this unset you see none of the SDK's own diagnostics — not even the errors behind a failed load. `"error"` is cheap; `"info"` also shows engine setup decisions, such as which inference path a bundle takes — and is noisy: a four-slot 0.6B startup measured **1,836 lines**, most of them per-buffer memory registration. The useful ones are few and near the top, such as `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128`, which tells you how the engine set itself up for a bundle. The SDK writes the lines itself, to this process's stdout (`Genie:  <ms> [ LEVEL ] ...`) on Linux and to logcat on Android — they do not pass through Python logging, so they are not in the server's own log format. Binds to the config, so a change needs a restart. |
 | `PROMPT_LOGPROBS` | optional | `false` | Enables prompt scoring (`echo`+`logprobs` teacher forcing, used by lm_eval loglikelihood tasks) at startup. Also toggleable at runtime via `POST /v1/server/prompt_logprobs` — see [Logprobs](#logprobs). |
@@ -774,7 +780,7 @@ Ready-made samples (single-slot / dual-NSP / text+VLM, with SA8775P model paths)
 
 ```json
 {
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "MODELS_BASE_DIR": "/data/models",
   "TEXT_SLOTS": [{"model_root": "qwen3-4b-htp"}],
@@ -1104,8 +1110,8 @@ A normal `/v1/chat/completions`/`/v1/completions` MISS does **not** populate the
 > `BEGIN` and `REWIND`. It is the SDK's behaviour and the server leaves it
 > visible; `usage.prompt_tokens` on a hit does not count the second BOS.
 >
-> **On a sliding-window bundle (Gemma 4) the stock SDK cannot restore a prefix longer than about
-> 640 tokens**: the output of a hit goes wrong, and a longer prefix kills the process. Keep the
+> **On a sliding-window bundle (Gemma 4) the stock SDK (2.49.40 through 2.51.0) cannot restore a prefix longer than about
+> 640 tokens**: the output of a hit goes wrong, and a longer prefix can kill the process. Keep the
 > warmed system prompt under about 600 tokens, or do not warm that model up. Details and
 > measurements: [Platform Notes](./PLATFORM_NOTES.md#prefix-cache-on-a-sliding-window-bundle-gemma-4).
 > An SDK patched for these defects also removes the second BOS above.
@@ -1146,6 +1152,11 @@ happens once per prefix, in warmup, off the request path.
 
 The Genie SDK (qualla) supports grammar-constrained decoding (the XGrammar backend) on two dialog types: `basic` — the type most bundles declare — and `eaglet`. Output can be constrained by JSON Schema, regex, or EBNF, with invalid tokens excluded via logit masking (including jump-forward acceleration).
 
+There are two places a grammar can come from:
+
+- **The request** (QAIRT 2.51.0 and later): `response_format` or `structured_outputs`. The server puts it on the slot's dialog with `GenieDialog_setGrammar` before the query. Field reference: [API § Structured output](./API.md#structured-output-response_format-structured_outputs).
+- **The bundle**: a `grammar` block in `genie_config.json`. It applies to every request that does not bring its own, and works on every QAIRT version. Before 2.51.0 it is the only way, and changing it means reloading the model.
+
 > [!NOTE]
 > **A dialog type that does not implement grammar refuses it rather than
 > ignoring it.** `Dialog::create()` gates on a `supportsGrammar()` virtual that
@@ -1156,11 +1167,42 @@ The Genie SDK (qualla) supports grammar-constrained decoding (the XGrammar backe
 > silently ignored, so you get a startup failure (or an HTTP 500 from
 > `/v1/models/switch`) rather than quietly unconstrained output.
 
-**Important limitation: this is fixed per model/slot, and cannot be switched per request.** The Genie SDK's public C API (`GenieDialog.h`) has no function to set or change grammar at runtime at all (there's no generic setter like `GenieDialog_setValue` either) — grammar is read from `genie_config.json` exactly once, when `GenieDialog_create()` builds the Dialog internally. Changing it requires rebuilding the Dialog from a `GenieDialogConfig`, which costs the same as `/v1/models/switch` (a full model reload).
+### Per-request grammar
 
-This can't be used the way OpenAI's `response_format` works, with a different schema passed per request. Instead, set up a dedicated slot for "a model that always outputs following JSON Schema X."
+`response_format` (OpenAI) and `structured_outputs` (vLLM) are accepted on `/v1/chat/completions` and `/v1/completions`. JSON Schema, `json_object`, regex, a list of choices and an EBNF grammar are supported; the [API reference](./API.md#structured-output-response_format-structured_outputs) has the mapping.
 
-### Configuration
+**Whether a slot can take one is decided when its model loads.** It needs:
+
+- QAIRT 2.51.0 or later (the API is new there);
+- a `libGenie.so` with the grammar backend: the stock library has it, a rebuilt one does not ([D3](./QAIRT_VERSIONS.md#d3--a-library-you-rebuild-has-no-grammar));
+- a `basic` or `eaglet` dialog.
+
+The symbol alone does not settle it: a rebuilt 2.51.0 library exports `GenieDialog_setGrammar` and fails every call. So the server calls it once, to disable grammar, and reads the result. It skips that call when the bundle has its own grammar, which proves the backend is there and which the call would remove. The startup log line `Slot '<name>' ready: ... grammar=...` says `per-request`, `bundle only` or `unavailable`, and `GET /v1/server/status` reports it per slot. A request with a grammar on a slot that cannot take one gets a `400` with `code: "grammar_not_supported"` and the reason. It is never answered unconstrained.
+
+**What the dialog holds.** A request's grammar replaces the bundle's for that request; the next request without one gets the bundle's back, or none. A grammar identical to the one the dialog already holds is not compiled again.
+
+**Compiling a grammar takes time**, and it happens under the slot's lock before the query. Measured on SA8255P with QAIRT 2.51.0 and a Qwen3-0.6B bundle:
+
+| Call | Time |
+|---|---|
+| The first grammar in the process | about 0.5 s |
+| Any later grammar (JSON Schema, regex, EBNF, choice) | **about 0.26 s** |
+| Restoring the bundle's grammar | about 0.28 s |
+| Removing the grammar | about 2 ms |
+
+The size of the grammar hardly matters: a 40-property schema took as long as a one-line regex. Clients that alternate between different grammars pay this on every switch; clients that repeat one pay it once.
+
+**A grammar the SDK cannot compile fails the request** with a `400` (on a stream, an `invalid_request_error` event), and the query does not run. The SDK's own message, for example XGrammar's `EBNF parser error at line 1, column 11`, is in the server's log, not in the response.
+
+**Things to know before you rely on it:**
+
+- **The grammar applies from the first generated token.** A thinking model cannot open with `<think>`: with Qwen3's `enable_thinking` left on and a JSON Schema, the reply starts with `{`. Send `enable_thinking: false` for structured output.
+- **A small model can produce whitespace until `max_tokens`.** XGrammar's JSON Schema grammar allows any amount of whitespace between tokens, and Qwen3-0.6B sometimes emits newlines after `{` until it hits the limit (`finish_reason: "length"`). The SDK has no option to tighten that, so `structured_outputs.disable_any_whitespace` is refused. Set `max_tokens`, and check `finish_reason`.
+- **It works with** `stream: true`, `logprobs` (the values are those after the grammar's mask) and the prefix KV cache (a hit takes a grammar like a miss does).
+- **It is not available** on image or video requests (the VLM pipeline has no grammar API) or with prompt scoring (`echo` + `logprobs`).
+- **On a stock library the reply ends with the terminal token** ([below](#verified-behaviour-and-one-known-defect)).
+
+### Per-model grammar (bundle config)
 
 Add a `grammar` block to `genie_config.json`'s `dialog.context`:
 
@@ -1189,16 +1231,16 @@ Add a `grammar` block to `genie_config.json`'s `dialog.context`:
 
 ### Your library must have XGrammar compiled in
 
-The **stock** `libGenie.so` under `lib/aarch64-oe-linux-gcc11.2/` has XGrammar statically linked, so the configuration above works as shipped.
+The **stock** `libGenie.so` under `lib/aarch64-oe-linux-gcc11.2/` has XGrammar statically linked, so the configuration above, and the per-request grammar on 2.51.0, work as shipped.
 
 > [!IMPORTANT]
-> A `libGenie.so` **rebuilt from the SDK's own sources has no grammar backend at all** — including the fixed build that [QAIRT Version Issues](./QAIRT_VERSIONS.md#option-1--run-a-fixed-libgenieso-recommended-unless-you-need-grammar) recommends as the real fix for the slot-wedge defect. With such a library, loading a model whose `genie_config.json` has a `grammar` block fails with `GenieDialog_create failed: -1` and `"Grammar backend configured but qualla was built without ENABLE_GRAMMAR"` in the log — at startup, or as an HTTP 500 from `/v1/models/switch`. [D3](./QAIRT_VERSIONS.md#d3--a-library-you-rebuild-has-no-grammar) explains why the rebuild flag that message suggests does not help, and gives a one-line check for your own library.
+> A `libGenie.so` **rebuilt from the SDK's own sources has no grammar backend at all** — including the fixed build that [QAIRT Version Issues](./QAIRT_VERSIONS.md#option-1--run-a-fixed-libgenieso-recommended-on-249x--250x-unless-you-need-grammar) recommends for the slot-wedge defect on 2.49.x and 2.50.x. With such a library, loading a model whose `genie_config.json` has a `grammar` block fails with `GenieDialog_create failed: -1` and `"Grammar backend configured but qualla was built without ENABLE_GRAMMAR"` in the log — at startup, or as an HTTP 500 from `/v1/models/switch` — and a per-request grammar is refused with `grammar_not_supported`. [D3](./QAIRT_VERSIONS.md#d3--a-library-you-rebuild-has-no-grammar) explains why the rebuild flag that message suggests does not help, how to supply the backend yourself, and gives a one-line check for your own library.
 
 ### Verified behaviour, and one known defect
 
-On a stock 2.49.40.260810 library (SA8255P, `qwen3_0_6b` w4a16) all three kinds constrain the output correctly, including under `stream: true` and alongside `logprobs`. A stock 2.50.0.260828 behaves identically, terminal token included.
+On a stock 2.49.40.260810 library (SA8255P, `qwen3_0_6b` w4a16) all three kinds constrain the output correctly, including under `stream: true` and alongside `logprobs`. Stock 2.50.0.260828 and 2.51.0.260929 behave identically, terminal token included. On 2.51.0 the per-request grammar was checked the same way, with JSON Schema, `json_object`, regex, choice and EBNF.
 
-One SDK defect affects all of them: **the response ends with the model's end-of-sequence token as literal text** (`<|im_end|>` for a ChatML model). The constrained part itself is correct — the JSON object is complete and schema-valid, the regex match is exact — but that trailing marker means a JSON-Schema-constrained response does not parse with `json.loads()`, and a regex-constrained one does not match its own pattern. **The server does not strip it**, so a client using this feature has to remove the trailing special-token string itself. Reported to Qualcomm with a reproducer and a proposed fix.
+One SDK defect affects all of them: **the response ends with the model's end-of-sequence token as literal text** (`<|im_end|>` for a ChatML model). The constrained part itself is correct — the JSON object is complete and schema-valid, the regex match is exact — but that trailing marker means a JSON-Schema-constrained response does not parse with `json.loads()`, and a regex-constrained one does not match its own pattern. **The server does not strip it**, so a client using this feature has to remove the trailing special-token string itself. Reported to Qualcomm with a reproducer and a proposed fix; a library rebuilt with that fix does not leak it ([D4](./QAIRT_VERSIONS.md#d4--grammar-leaks-the-terminal-token-into-the-text)).
 
 ## Profiling (SDK-side KPIs)
 
@@ -1384,7 +1426,7 @@ This section is about the text-generator's context. Memory is bounded separately
 
 `VLM_VISION_BUDGET_GUARD` checks vision tokens against the text-generator's `context.size` **before** the request reaches the NPU, and a request that does not fit comes back as a `400`, naming how many steps fit and why.
 
-**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49.40.260810, Qwen3-VL 4B, context 4096, 256 vision tokens per step), sweeping the prompt one token at a time by padding the question. **A stock 2.50.0.260828 reproduces both the wedge and the process death unchanged**, checked with a standalone reproducer that uses nothing but `GenieNode.h` and `GeniePipeline.h`:
+**It is off by default.** The default is what the SDK does, and what the SDK does here is not pretty. Measured on SA8255P (QAIRT 2.49.40.260810, Qwen3-VL 4B, context 4096, 256 vision tokens per step), sweeping the prompt one token at a time by padding the question. **A stock 2.50.0.260828 reproduces both the wedge and the process death unchanged**, checked with a standalone reproducer that uses nothing but `GenieNode.h` and `GeniePipeline.h`. **QAIRT 2.51.0.260929 fixes both**: the same reproducer gets status 4 (`GENIE_STATUS_WARNING_CONTEXT_EXCEEDED`) for the overrun, the pipeline answers normally after a reset, and 17 frames no longer kill the process. We have not yet measured 2.51.0 through this server, so the table below is 2.49.x and 2.50.x:
 
 | Prompt tokens (vision + text) | Result |
 |---|---|
@@ -1405,8 +1447,8 @@ The budget is `context.size − prompt text tokens − VLM_SLOTS[].max_tokens`, 
 
 ### Limiting generation length
 
-A VLM request's own `max_tokens` **cannot be honoured**: `GenieNode.h`/`GeniePipeline.h`
-have no per-request token limit and no abort, and the text callback's return value is
+A VLM request's own `max_tokens` **cannot be honoured**: up to QAIRT 2.50, `GenieNode.h`/`GeniePipeline.h`
+have no per-request token limit, and no version has an abort, and the text callback's return value is
 discarded, so nothing in the pipeline can be told to stop mid-generation. The one limit
 the SDK does expose is the text-generator node's `max-num-tokens`, which Genie reads
 **once, when the node is created**. The server fills that in from `VLM_SLOTS[].max_tokens`:
@@ -1501,10 +1543,10 @@ A Gemma 4 LMM bundle can be loaded either way — as a text slot through its `ge
 
 `GenieNode.h`/`GeniePipeline.h` **don't have** the following APIs that `GenieDialog` has, so the VLM path doesn't support:
 
-- **Per-request `max_tokens`/`stop`**: no way to enforce these at the SDK level. They're accepted but ignored (there's no `GenieDialog_setMaxNumTokens`/`setStopSequence` equivalent). Generation length is bounded per slot instead — see [Limiting generation length](#limiting-generation-length).
+- **Per-request `max_tokens`/`stop`**: no way to enforce these at the SDK level. They're accepted but ignored (there's no `GenieDialog_setMaxNumTokens`/`setStopSequence` equivalent). QAIRT 2.51.0 adds a per-execution token limit for the text-generator node (`GenieNode_setValue`), which this server does not use yet; there is still no stop-sequence equivalent. Generation length is bounded per slot instead — see [Limiting generation length](#limiting-generation-length).
 - **Aborting on client disconnect**: `GeniePipeline_execute()` is a blocking call — once started, it can't be stopped before it finishes naturally (there's no `GenieDialog_signal` equivalent). The server keeps running inference to completion even after a disconnect, and that VLM slot's lock is held until it finishes naturally.
 - **Multi-turn conversation**: always single-shot (`pipeline.reset()` is called on every request). No conversation history is kept.
-- **Hot-swapping via `/v1/models/switch`, LoRA, prefix KV cache, grammar constraints**: these are either `GenieDialog`-only APIs, or simply not implemented yet in V1.
+- **Hot-swapping via `/v1/models/switch`, LoRA, prefix KV cache, grammar constraints**: these are either `GenieDialog`-only APIs, or simply not implemented yet in V1. A request with `response_format` or `structured_outputs` and an image is refused with a `400` rather than answered unconstrained.
 - **Fetching remote-URL images**: only `data:` (base64) URLs are supported. `http(s)://` etc. are explicitly rejected with a 400 (so an embedded/automotive server never makes unexpected outbound network calls).
 
 ## API Reference
@@ -1549,7 +1591,7 @@ So `tokenizers` is optional only in the sense that the server starts without it.
 
 The Genie SDK exposes no logits through `GenieDialog` — logprobs are implemented via the SDK's **custom sampler** hook (`GenieSampler_registerUserDataCallback` + sampler config `{"type": "custom"}`), which hands the server the full dequantized float32 logits vector at every generation step and lets it choose the emitted token (`genie_server/logprobs.py`).
 
-**Generated-token logprobs** (when the QAIRT runtime provides logits): `logprobs` on `/v1/completions` (int) or `logprobs`/`top_logprobs` on `/v1/chat/completions` (bool/int) record each generated token's logprob and top-N alternatives. Sampling moves into the server for these requests (greedy / temperature / top-k / top-p over the same logits — `temperature=0` matches the SDK's greedy exactly). Parameters the request leaves out take the model's `genie_config.json` defaults, exactly as they do without logprobs, so asking for logprobs does not change what gets sampled; the SDK's basic sampler with the model's defaults is restored afterwards. Overhead is one log-softmax over the vocab per token (~1-2 ms) versus tens of ms of NPU decode — and exactly zero for requests that don't ask for logprobs. Requires `numpy` and the model tokenizer. Not supported with `stream: true`, on VLM slots, or with grammar-constrained models' masked-out semantics in mind (logprobs are post-grammar-mask).
+**Generated-token logprobs** (when the QAIRT runtime provides logits): `logprobs` on `/v1/completions` (int) or `logprobs`/`top_logprobs` on `/v1/chat/completions` (bool/int) record each generated token's logprob and top-N alternatives. Sampling moves into the server for these requests (greedy / temperature / top-k / top-p over the same logits — `temperature=0` matches the SDK's greedy exactly). Parameters the request leaves out take the model's `genie_config.json` defaults, exactly as they do without logprobs, so asking for logprobs does not change what gets sampled; the SDK's basic sampler with the model's defaults is restored afterwards. Overhead is one log-softmax over the vocab per token (~1-2 ms) versus tens of ms of NPU decode — and exactly zero for requests that don't ask for logprobs. Requires `numpy` and the model tokenizer. Not supported with `stream: true` or on VLM slots. With a grammar the values are those after the grammar's mask: a token the grammar forbids never appears, and a token it forces reports 0.
 
 Some runtimes accept the custom sampler setting but never invoke its logits callback. On Ubuntu with the QCS9075 QAIRT 2.46 packages, this was measured with a Qwen3-0.6B bundle. If the first generated token arrives without a logits callback, the server stops that query and returns HTTP 400 with `error.code: "logprobs_not_supported"` for generated-token logprobs and prompt scoring, rather than returning empty or misleading scores. The slot remembers the result, so later logprobs requests get the same 400 at once instead of running a generation first. Prompt scoring also checks that it got one score per prompt token and returns HTTP 500 if the callback stopped partway, since a short list would shift every score. QAIRT 2.50.40 invoked the callback with the same bundle, but its unpatched reset path failed after longer generation; see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
 
@@ -1833,12 +1875,12 @@ Recommended steps for getting reproducible benchmark numbers:
 | LoRA still applied after switching models | On a successful `/v1/models/switch`, that slot's `active_lora_adapter` is automatically reset to `""`, but if the SDK's internal state disagrees, check the real value with `/v1/lora/current?model=...`. |
 | Prefix warmup returns `422` | If the target slot's model template is llama2/mistral, the system prompt gets folded into `[INST]` and can't be split/cached — this is by design. |
 | `device_id` was set but the NSP isn't pinned | Check the startup log for a `device_id=... requested but ... has no dialog.engine.backend.extensions file to patch — NSP pinning skipped` warning. Pinning is impossible if the model's `genie_config.json` doesn't reference an HTP backend extension config file. |
-| A slot suddenly fails every request with `GenieDialog_query failed [...]: -1` / `batch dispatch failed` in the logs | The slot is wedged: a stock QAIRT 2.49.x or 2.50.x `libGenie.so` and a model exported at several context lengths. The request that caused it succeeded and returned normally; the failures start with the one after. `GenieDialog_reset()` does not recover it. **Recovery**: reload that slot with `POST /v1/models/switch {"slot": "<name>", "model_dir": "<same model>"}`. **Prevention and the full explanation**: [QAIRT Version Issues](./QAIRT_VERSIONS.md#d1--a-stock-library-wedges-a-slot). |
+| A slot suddenly fails every request with `GenieDialog_query failed [...]: -1` / `batch dispatch failed` in the logs | The slot is wedged: a stock QAIRT 2.49.x or 2.50.x `libGenie.so` and a model exported at several context lengths (2.51.0 fixes this). The request that caused it succeeded and returned normally; the failures start with the one after. `GenieDialog_reset()` does not recover it. **Recovery**: reload that slot with `POST /v1/models/switch {"slot": "<name>", "model_dir": "<same model>"}`. **Prevention and the full explanation**: [QAIRT Version Issues](./QAIRT_VERSIONS.md#d1--a-stock-library-wedges-a-slot). |
 | The logs say nothing about what the SDK is doing | libGenie logs nothing unless a logger is bound to the config a handle was created from — its internal `__INFO`/`__ERROR` are no-ops otherwise, so a failure inside the SDK can leave no trace at all beyond the status code the API returned. Set `"GENIE_LOG_LEVEL": "error"` (or `"info"` for engine setup decisions) in env_config.json and restart. The lines come out on the server process's stdout as `Genie:  <ms> [ LEVEL ] ...`, written by the SDK rather than through Python logging. |
 
 ## Limitations
 
-- **This server does not guard against the stock-library slot wedge**, and does not detect or recover from it — a wedged slot keeps failing until something reloads its model. Preventing it is a deployment choice, not a server setting: see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
+- **This server does not guard against the stock-library slot wedge of QAIRT 2.49.x and 2.50.x**, and does not detect or recover from it — a wedged slot keeps failing until something reloads its model. Preventing it is a deployment choice, not a server setting: use 2.51.0 or a patched library; see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
 - One slot = one `GenieDialog` handle processed serially. The number of concurrent inferences is capped at the number of slots (just 1 in a single-slot configuration), and the number that actually overlap is capped by the NSP cores underneath them — see [More slots than cores buys nothing](#more-slots-than-cores-buys-nothing).
 - **The SDK's continuous batching cannot be reached from a bundle config, and fails silently if you try.** A `genie_config.json` may carry `dialog.engine.batching` with a `max-slots` greater than 1; the server starts normally and the setting has no effect — the engine still reports a single scheduler slot, and concurrency is unchanged. Measured on device with QAIRT 2.49.40 and 2.50.0. Putting the same object one level down, under `engine.backend.QnnHtp`, is worse: startup fails outright with `Unknown QnnHtp config key: batching`. Neither placement gives you continuous batching, so treat the slot count as the only concurrency control this server has. (`GENIE_LOG_LEVEL: "info"` is how you can see which of the two happened: with the key accepted-and-ignored, the engine's scheduler line still says one slot.)
 - `n > 1` (multiple completions per request) is not supported.
@@ -1848,8 +1890,8 @@ Recommended steps for getting reproducible benchmark numbers:
 - Never start with `--workers` greater than 1 (it breaks each slot's global NPU handle state).
 - `POST /v1/models/switch` frees the old model before loading the new one by default, so a slot can end up with no model loaded at all if the new load fails; every endpoint that touches that slot then returns `503` until a later switch succeeds. `"unload_first": false` keeps the old model as a fallback by holding both on the slot's HTP device at once, but **that overlap is not dependable on the SA8255P board** — over 36 measured swaps the outcome did not follow from which models were involved (the same pair went 6/6 in one run and 0/8 in another), so it is only worth using where the device has memory to spare and your own swaps have been tested there. See the endpoint's own docs.
 - If two slots share the same `active_model_id` (model directory name), automatic routing by the `model` field prefers whichever slot appears later in the `slots` array. Pass an explicit `"slot": "<name>"` in the request body to `/v1/completions`/`/v1/chat/completions` to target one directly (it overrides `model`-based routing), or use the other APIs that address slots directly by name (`/v1/models/switch`'s `slot`, `/v1/server/idle`'s `?slot=`).
-- **On a stock 2.49.x or 2.50.x library, a bundle whose `dialog.type` is `ssd-q1` (speculative decoding) needs a patched one**, because this server resets before every query and neither stock build survives that on such a dialog. LoRA is unusable there for the same reason. This is a 2.49 regression rather than a limitation of speculative-decoding bundles — 2.48.40.260702 runs them correctly, and a later SDK may too, though 2.50.0.260828 does not. [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) has the symptom, the cause, the one-minute check against your own SDK's sources, and what to change if you cannot patch.
-- Grammar constraints ([see the relevant section](#grammar-constrained-decoding)) are fixed per model/slot and don't support per-request switching like `response_format` (the Genie SDK's public API has no runtime way to change it).
+- **On a stock 2.49.x or 2.50.x library, a bundle whose `dialog.type` is `ssd-q1` (speculative decoding) needs a patched one**, because this server resets before every query and neither stock build survives that on such a dialog. LoRA is unusable there for the same reason. This is a 2.49 regression rather than a limitation of speculative-decoding bundles — 2.48.40.260702 runs them correctly, 2.50.0.260828 does not, and 2.51.0.260929 fixes it in its sources (not yet run on hardware). [D5](./QAIRT_VERSIONS.md#d5--reset-corrupts-a-speculative-decoding-dialog) has the symptom, the cause, the one-minute check against your own SDK's sources, and what to change if you cannot patch.
+- A per-request grammar (`response_format`, `structured_outputs`) needs QAIRT 2.51.0 or later and a library with the grammar backend; before 2.51.0 a grammar is fixed per model. Switching grammars costs about 0.26 s per switch, and `structural_tag` and the whitespace options are not supported ([Grammar-Constrained Decoding](#grammar-constrained-decoding)).
 - VLM ([see the relevant section](#vlm-multimodal-support)) only supports single-shot requests (no conversation history). A request's own `max_tokens`/`stop` are ignored — generation is bounded by `VLM_SLOTS[].max_tokens` for the whole slot instead — and a client disconnect does not stop the run: there is no `GenieNode`/`GeniePipeline` abort call, so the slot stays busy until the answer finishes and the next request waits. Streaming does work, and returns the same text as the non-streaming call. LoRA, the prefix KV cache, grammar constraints, and `/v1/models/switch` are unsupported on VLM slots.
 - **Message content is not escaped.** A turn marker typed into a message (`<|im_end|>`, `<|start_header_id|>`, ...) goes into the prompt as it is, and the tokenizer reads it as the special token, so a caller can end its own turn and write one as another role. That is deliberate for a measuring instrument (vLLM does the same), and it is the caller's to sanitise text it did not write; see [SECURITY.md](../SECURITY.md).
 - An unknown `model` name routes to the primary slot, so `lm_eval`'s fixed placeholder works without configuration. That also routes a typo, so any name other than `genie-local` that matches no loaded model is logged once at WARNING, with the models that are loaded. The same goes for an image request that falls back to the first VLM slot (a loaded text model's name is expected there and stays quiet). After 256 distinct names it logs that once and stops remembering them.

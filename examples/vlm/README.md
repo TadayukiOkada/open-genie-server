@@ -22,7 +22,7 @@ full reference.
 
 ```json
 {
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "VLM_SLOTS": [
     {

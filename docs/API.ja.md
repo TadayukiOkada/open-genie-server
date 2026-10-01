@@ -31,8 +31,8 @@ open-genie-server が提供する全エンドポイントを、用途ごとに�
   `?slot=<名前>` を付けるとそのスロットだけを判定する(知らない名前は `404`)。
   付けなければ、空のスロットが 1 つでもあるとサーバ全体が not ready になり、
   複数スロットのサーバではロードバランサが全スロットを振り分け対象から外す。
-  **分かるのはモデルがロードされているかだけ。** 素のライブラリで恒久故障した
-  スロットも ready と出る。本サーバはその故障を検出しない
+  **分かるのはモデルがロードされているかだけ。** 素の 2.49.x / 2.50.x のライブラリで
+  恒久故障したスロットも ready と出る。本サーバはその故障を検出しない
   ([QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照)。
 - リクエストの本文は、`Content-Type: application/json`(`application/*+json` も可)で送る
   JSON でなければならない。それ以外の型、または Content-Type 無しは `415`。これらは、
@@ -79,6 +79,7 @@ curl $base_url/v1/models
 | `echo` | bool | trueならプロンプトを応答に前置(ストリーミング時は最初のchunkとして送出)。 |
 | `n` | int | `1` のみサポート。`>1` は `400`。 |
 | `stream_options.include_usage` | bool | trueなら `[DONE]` 直前に `usage` を含む `text_completion` chunkを送出。 |
+| `response_format` / `structured_outputs` | object | grammar で出力を制約する(QAIRT 2.51.0 以降)。[構造化出力](#構造化出力response_formatstructured_outputs)を参照。プロンプトのスコアリング(`echo` + `logprobs`)とは併用できない。 |
 
 ```bash
 curl $base_url/v1/completions \
@@ -115,8 +116,9 @@ curl $base_url/v1/completions \
 | `messages` | array | 必須、非空。`{"role": "...", "content": "..."}` の配列。 |
 | `enable_thinking` / `chat_template_kwargs.enable_thinking` | bool | 既定 `true`。OpenAI標準フィールドではなく、Qwen3向けの独自拡張。トップレベルの`enable_thinking`、または`chat_template_kwargs`にネストした形式(vLLM/SGLangの流儀 — このdictをそのままHFの`apply_chat_template()`に渡す実装で、`enable_thinking`はQwen3自身のチャットテンプレートが読むkwarg名そのもの。両方指定時は`chat_template_kwargs`側が優先)のどちらでも受け付ける。`false`を指定すると、systemプロンプトに文字列`/no_think`をそのまま追記する(systemメッセージが無ければ新規作成する) — Qwen3自身が公式にドキュメント化しているチャットテンプレート向けのソフトスイッチで、モデルは自前の推論をスキップして直接回答する。**空の`<think>\n\n</think>\n\n`ブロックを事前に埋め込む方式(HuggingFaceのチャットテンプレートの仕組み)では実装していない** — Qualcommの公式リファレンスサーバ(`qai-appbuilder/samples/genie/c++/Service`)が実機検証で、この方式だと短いプロンプトでQwen3が退化する(直前のターンをそのまま繰り返した直後に終了する)ことを確認しているため、本サーバは彼らが検証済みの`/no_think`方式に合わせている。Qwen3系以外のテンプレート/モデルには影響しない(単なるプロンプト文字列であり、SDK側に推論ON/OFFの切り替え機能自体が存在しないため)。 |
 | `tools` | array | OpenAI function callingのツール定義 — 後述の[Function calling](#function-calling-tools)参照。 |
-| `tool_choice` | string | `"auto"`(既定)と`"none"`(ツール注入を無効化)のみ。`"required"` および `{"type":"function", ...}` の関数指定形式は**`400`で拒否**する — どちらもOpenAIのセマンティクスでは呼び出しを保証するもので、本サーバが実装していない制約付きデコーディングを要するため。`"auto"`を使い、応答に実際に`tool_calls`が入っているかを確認すること。 |
+| `tool_choice` | string | `"auto"`(既定)と`"none"`(ツール注入を無効化)のみ。`"required"` および `{"type":"function", ...}` の関数指定形式は**`400`で拒否**する — どちらもOpenAIのセマンティクスでは呼び出しを保証するもので、本サーバは呼び出しを強制しない(`tools` を grammar に変換しない)ため。`"auto"`を使い、応答に実際に`tool_calls`が入っているかを確認すること。 |
 | `logprobs` / `top_logprobs` | bool / int (0-20) | 生成トークンのOpenAI chat形式logprobs(`choices[0].logprobs.content[...]`)。非ストリーミングのみ。logits callbackを呼ばないQAIRTランタイムではHTTP 400 `logprobs_not_supported`。[Logprobs](./MANUAL.ja.md#logprobs)参照。 |
+| `response_format` / `structured_outputs` | object | grammar で出力を制約する(QAIRT 2.51.0 以降)。[構造化出力](#構造化出力response_formatstructured_outputs)を参照。 |
 
 ```bash
 curl $base_url/v1/chat/completions \
@@ -133,6 +135,51 @@ curl $base_url/v1/chat/completions \
 ```
 
 ストリーミング応答はSSE(`text/event-stream`)、OpenAI仕様通り最初に `delta.role="assistant"` の空チャンクを送出します。
+
+#### 構造化出力(`response_format`、`structured_outputs`)
+
+`/v1/chat/completions` と `/v1/completions` では、リクエストごとに grammar で出力を制約できます。書き方は 2 通りで、OpenAI の `response_format` と、vLLM の `structured_outputs`(OpenAI SDK では `extra_body` のフィールド)です。サーバは `GenieDialog_setGrammar` でスロットの dialog に grammar をコンパイルさせます。これには **QAIRT 2.51.0 以降と、grammar のバックエンドが入った `libGenie.so`** が要ります。挙動・コスト・注意点は [MANUAL § grammar制約デコーディング](./MANUAL.ja.md#grammar制約デコーディング)。
+
+| リクエスト | SDK がコンパイルする grammar |
+|---|---|
+| `response_format: {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}` | JSON Schema。`strict` は読まない(どちらでもスキーマを強制する) |
+| `response_format: {"type": "json_object"}` | JSON Schema `{"type": "object"}` |
+| `response_format: {"type": "text"}` | 無し |
+| `structured_outputs: {"json": {...}}`(オブジェクト、または JSON の文字列) | JSON Schema |
+| `structured_outputs: {"json_object": true}` | JSON Schema `{"type": "object"}` |
+| `structured_outputs: {"regex": "..."}` | 正規表現 |
+| `structured_outputs: {"choice": ["a", "b"]}` | EBNF `root ::= "a" \| "b"` |
+| `structured_outputs: {"grammar": "root ::= ..."}` | EBNF をそのまま渡す。vLLM と同じ XGrammar の方言 |
+
+```bash
+curl $base_url/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "genie-local",
+        "messages": [{"role": "user", "content": "Capital of Japan, as JSON."}],
+        "chat_template_kwargs": {"enable_thinking": false},
+        "response_format": {"type": "json_schema", "json_schema": {"name": "city",
+          "schema": {"type": "object", "properties": {"city": {"type": "string"}},
+                     "required": ["city"]}}}
+      }'
+```
+
+**制約なしで答えずに `400` で断るもの:**
+
+| 場合 | `error.code` |
+|---|---|
+| スロットが grammar を設定できない: 2.51.0 より前の QAIRT、grammar のバックエンドが無いライブラリ、grammar を実装していない dialog 型。どれかはメッセージに出る | `grammar_not_supported` |
+| 画像・動画を含むリクエスト | `grammar_not_supported` |
+| `structural_tag`(どちらの書き方でも) | — |
+| SDK に渡せない `structured_outputs` のオプション: `disable_any_whitespace`、`disable_additional_properties`、`whitespace_pattern` を既定値以外にしたもの | — |
+| `structured_outputs` の未知のキー、その中の複数の制約、2 通りの書き方の同時指定 | — |
+| vLLM の `guided_json`、`guided_regex`、`guided_choice`、`guided_grammar` など(vLLM v0.12.0 で削除済み) | — |
+| grammar つきのプロンプトのスコアリング(`echo` + `logprobs`) | — |
+| SDK がコンパイルできない grammar。query は走らず、SDK のメッセージはサーバのログに出る。stream では `invalid_request_error` 型の `error` イベントになる | — |
+
+`structured_outputs.disable_fallback` は受け付けて無視します(vLLM 自身のバックエンドの間の切り替えのため)。
+
+どちらのフィールドも無いリクエストでは、バンドル自身の grammar(`genie_config.json` の `dialog.context.grammar`)、無ければ無し、になります。**素のライブラリでは応答の末尾にモデルの終端トークンがテキストで付きます**(`<|im_end|>`)。SDK の欠陥で、サーバは隠しません([D4](./QAIRT_VERSIONS.ja.md#d4--grammar-が終端トークンを本文に漏らす))。
 
 #### Function calling (`tools`)
 
@@ -183,9 +230,11 @@ Function callingはQwen3系(chatml)モデルで最もよく機能します。lla
   "context_occupancy": 128,
   "slots": [
     {"name": "tool_call", "device_id": 0, "active_model": "tool-model", "active_lora": "",
-     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 128},
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 128,
+     "grammar": {"per_request": true, "reason": null, "bundle": null}},
     {"name": "chat", "device_id": 1, "active_model": "general", "active_lora": "finetune-v2",
-     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0}
+     "loaded": true, "phase": "idle", "detail": "", "context_occupancy": 0,
+     "grammar": {"per_request": false, "reason": "this libGenie has no GenieDialog_setGrammar (QAIRT 2.51.0 or later is required)", "bundle": null}}
   ],
   "vlm_slots": [
     {"name": "vision", "device_id": 1, "active_model": "qwen3-vl", "spec": "qwen3_vl",
@@ -196,6 +245,7 @@ Function callingはQwen3系(chatml)モデルで最もよく機能します。lla
 
 - 各スロットの `context_occupancy` は、そのスロットのロックが即時取得できた場合のみ `GenieDialog_getValue(GENIE_DIALOG_PARAM_CONTEXT_OCCUPANCY)` で取得(取得できなければ `null`)。推論中でも本エンドポイント自体はブロックしません。
 - **`loaded` は「モデルが載っていないスロット」と「単に待機中のスロット」を区別する手段です。** `/v1/models/switch` が旧モデルを解放した後に新モデルのロードに失敗すると、そのスロットは `"loaded": false` のまま残り、以後そのスロットに触る全エンドポイントが、次の切り替えが成功するまで `503` を返します。
+- `grammar` は、スロットが[リクエスト単位の grammar](#構造化出力response_formatstructured_outputs)を受け付けるか(`per_request`)、受け付けない理由(`reason`。受け付けるなら `null`)、バンドル自身の grammar の種類(`bundle`: `"json-schema"`・`"regex"`・`"ebnf"`・`null`)を示します。スロットのモデルのロード時に決まります。
 - `vlm_slots` は常に存在し、VLMスロットが無ければ空配列です。VLMスロットは `phase` と `context_occupancy` を持ちません(composable pipeline がどちらも公開していないため)。`spec` はVLMファミリー(`vlm_specs.FAMILIES`)で、`VLM_SLOTS[].spec` を指定しなければ自動判定されます。`layout` はそのノード設定・接続・静的テンソルをどこから読んだか(genie-appスクリプト、`metadata.json`、レガシーの固定ファイル名、または明示的な`VLM_SLOTS[]`の上書き)— [バンドルレイアウトの自動読み取り](./MANUAL.ja.md#バンドルレイアウトの自動読み取り)参照。
 
 ### GET /v1/server/idle
@@ -329,7 +379,8 @@ curl -X POST $base_url/v1/prefix/warmup \
 > 比較してください**。もうひとつは、素の **2.49.x / 2.50.x** ライブラリでは
 > **`dialog.type` が `ssd-q1` のバンドルで LoRA が一切使えない**点です —
 > SDK がアダプタ切替後のリセットを要求し、そのリセットがこの種のダイアログを
-> 壊すためです。パッチ版、あるいは 2.48.40.260702 ではどちらも起きません:
+> 壊すためです。パッチ版、あるいは 2.48.40.260702 ではどちらも起きません。
+> 2.51.0.260929 ではソース上で直っています(実機では未確認):
 > [D5](./QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す)。
 
 > [!IMPORTANT]
@@ -451,7 +502,7 @@ curl -X POST $base_url/v1/lora/release \
 
 | コード | 意味 |
 |---|---|
-| `400` | リクエストパラメータ不正(必須フィールド欠落、`n>1` 等) |
+| `400` | リクエストパラメータ不正(必須フィールド欠落、`n>1` 等)、またはスロットが適用できない grammar・SDK がコンパイルできない grammar(前者は `error.code: "grammar_not_supported"`) |
 | `404` | 存在しないリソース(prefixキャッシュキー、モデルディレクトリ、存在しないスロット名) |
 | `409` | リクエストを組み立てた後、実行する前に、対象スロットが変わった(モデル切り替え、または LoRA の適用・解除・強さの変更)。リクエストは実行していない。再送すればよい。ストリーミングでは同じ状況を `error` イベントで返す。 |
 | `413` | リクエストの本文が `MAX_REQUEST_BODY_MB` を超えた |

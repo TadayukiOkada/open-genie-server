@@ -1,6 +1,6 @@
 {
   "_comment": "Single-slot sample for SA8775P: Qwen3-4B-Instruct on the default NSP. Copy next to genie-server.py as env_config.json and adjust paths. Keys starting with _ are ignored by the server.",
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "_comment_poll": "POLL:false turns off the HTP backend's busy-wait (measured on SA8255P: ~260% CPU for no latency gain). Remove it to keep whatever the model bundle sets.",
   "POLL": false,

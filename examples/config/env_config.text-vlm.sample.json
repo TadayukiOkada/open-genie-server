@@ -3,7 +3,7 @@
 
   "_comment_coresidency": "THIS COMBINATION IS FRAGILE AND HAS TO BE MEASURED. On the SA8255P we tested it loads only when BOTH of these hold: (1) the text bundle is exported at a SINGLE context length, and (2) the two slots are on DIFFERENT device_id. The identical setup with a multi-context-length text bundle fails with 'err 1002' even though that bundle allocates byte-for-byte the same amount - so on-disk size and 'Allocated total size' will not tell you in advance. SLOT_LOAD_ORDER did not matter here, but leaving it text-first costs nothing. See MANUAL.md, 'Loading two models at once'.",
 
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "MODELS_BASE_DIR": "/home/root/models",
   "PREFIX_CACHE_DIR": "/home/root/prefix_cache",

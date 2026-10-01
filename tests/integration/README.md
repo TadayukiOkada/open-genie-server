@@ -68,8 +68,8 @@ python3 run_integration_tests.py --base-url http://127.0.0.1:18080
 
 ## Grammar tests (G01-G08)
 
-Grammar is fixed per model/slot, so each grammar kind needs its own model
-directory. Build them on the target (they are a few KB each — every heavy
+These tests exercise the bundle's own grammar, which is set per model, so each
+grammar kind needs its own model directory. Build them on the target (they are a few KB each — every heavy
 asset is referenced by absolute path back into the base bundle):
 
 ```bash
@@ -83,10 +83,25 @@ Then set `grammar.enabled: true` in `test_config.json`. Each G0x test switches
 the slot to the directory it needs, and G08 switches
 `grammar.restore_model_dir` back.
 
-**These tests need a `libGenie.so` that was built with `ENABLE_GRAMMAR`.** The
-XGrammar backend is only in Qualcomm's prebuilt library: `GrammarBackend::create`
-is declared in `qualla/grammar.hpp` but defined nowhere in the shipped sources,
-so a library rebuilt from `examples/Genie/` has no grammar support and every
-G0x model load fails with `GenieDialog_create failed: -1` plus
-`"Grammar backend configured but qualla was built without ENABLE_GRAMMAR"` in
-the server log.
+**These tests need a `libGenie.so` that has the grammar backend.** Qualcomm's
+prebuilt library does: `GrammarBackend::create` is declared in
+`qualla/grammar.hpp` but defined nowhere in the shipped sources, so a library
+rebuilt from `examples/Genie/` has no grammar support unless you supply the
+backend yourself ([D3](../../docs/QAIRT_VERSIONS.md#d3--a-library-you-rebuild-has-no-grammar)).
+Without it every G0x model load fails with `GenieDialog_create failed: -1`
+plus `"Grammar backend configured but qualla was built without
+ENABLE_GRAMMAR"` in the server log.
+
+**On a stock library G01, G03, G05 and G06 fail**: the output is constrained
+correctly but ends with the model's end-of-sequence token as text, an SDK
+defect the tests report rather than excuse
+([D4](../../docs/QAIRT_VERSIONS.md#d4--grammar-leaks-the-terminal-token-into-the-text)).
+**G02 can fail on any library** with a small model: on `qwen3_0_6b` one of its
+two prompts gets `{` followed by whitespace until `max_tokens`, which XGrammar's
+JSON grammar allows. Measured on stock 2.49.40, 2.50.0 and 2.51.0, and on a
+2.51.0 library rebuilt with the backend and the D4 fix (where G01-G08 otherwise
+pass).
+
+These tests cover the bundle's grammar only. A per-request grammar
+(`response_format`, `structured_outputs`, QAIRT 2.51.0 and later) is not in the
+suite yet; the offline suite covers the server side (`tests/test_request_grammar.py`).
