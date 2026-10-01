@@ -327,9 +327,14 @@ a restored dialog with the same two-step run that did not save and restore:
 | about 1500 tokens | the server process dies with SIGSEGV on the first request that hits the cache |
 
 The boundary lies between 631 and 649 tokens, i.e. the group's budget. The defect is in the SDK
-(the same code is in QAIRT 2.50.0; on a stock 2.51.0 a standalone reproducer gives the same
-result, different output at 700 tokens and SIGSEGV at 1540), and it applies to any client of `GenieDialog_save` /
+(the same code is in QAIRT 2.50.0), and it applies to any client of `GenieDialog_save` /
 `GenieDialog_restore`, not to this server in particular.
+
+**On a stock 2.51.0 it is still there, with one difference through this server.** A standalone
+reproducer gives the same result as on 2.49.40: different output at 700 tokens, SIGSEGV at 1540.
+Through this server, with a 1540-token system prompt, all six requests that hit the cache came
+back as broken output (the same few tokens repeated) and the process stayed up. Do not read that
+as safer: the output is wrong either way, and the reproducer shows the crash is still reachable.
 
 **What to do.** With the stock SDK keep a Gemma 4 system prompt that you warm up under about 600
 tokens, or do not call `POST /v1/prefix/warmup` for that model: a normal request that misses the

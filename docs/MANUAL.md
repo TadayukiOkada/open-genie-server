@@ -1111,7 +1111,7 @@ A normal `/v1/chat/completions`/`/v1/completions` MISS does **not** populate the
 > visible; `usage.prompt_tokens` on a hit does not count the second BOS.
 >
 > **On a sliding-window bundle (Gemma 4) the stock SDK (2.49.40 through 2.51.0) cannot restore a prefix longer than about
-> 640 tokens**: the output of a hit goes wrong, and a longer prefix kills the process. Keep the
+> 640 tokens**: the output of a hit goes wrong, and a longer prefix can kill the process. Keep the
 > warmed system prompt under about 600 tokens, or do not warm that model up. Details and
 > measurements: [Platform Notes](./PLATFORM_NOTES.md#prefix-cache-on-a-sliding-window-bundle-gemma-4).
 > An SDK patched for these defects also removes the second BOS above.

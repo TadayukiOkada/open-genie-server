@@ -1029,7 +1029,7 @@ HIT:  GenieDialog_reset → GenieDialog_restore → query(remaining, SENTENCE_EN
 > サーバはそのまま見えるようにしており、HIT のときの `usage.prompt_tokens` はこの2個目を数えません。
 >
 > **スライディングウィンドウのバンドル(Gemma 4)では、stock の SDK(2.49.40〜2.51.0)は約 640 トークンを超える prefix を
-> 復元できません**。HIT の出力が崩れ、さらに長いとプロセスが落ちます。ウォームアップする system prompt は
+> 復元できません**。HIT の出力が崩れ、さらに長いとプロセスが落ちることがあります。ウォームアップする system prompt は
 > 約 600 トークン未満にするか、そのモデルはウォームアップしないでください。詳細と実測は
 > [プラットフォームノート](./PLATFORM_NOTES.ja.md#スライディングウィンドウのバンドルgemma-4での-prefix-cache)。
 > これらの欠陥を直したパッチ版の SDK では、上の2個目の BOS もなくなります。

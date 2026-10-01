@@ -347,8 +347,10 @@ measured) gives wrong output, and a longer one kills the process. Symptom,
 measurements and what to do are in
 [Platform Notes](./PLATFORM_NOTES.md#prefix-cache-on-a-sliding-window-bundle-gemma-4).
 
-Measured on stock 2.49.40.260810 and stock 2.51.0.260929 with the same result:
-a 700-token prefix restores to different output, a 1540-token one segfaults.
+Measured with a standalone reproducer on stock 2.49.40.260810 and stock
+2.51.0.260929, with the same result: a 700-token prefix restores to different
+output, a 1540-token one segfaults. Through this server on a stock 2.51.0, a
+1540-token prefix gave broken output on every hit and the process stayed up.
 2.50.0.260828 has the same code. Reported to Qualcomm with a patch; not fixed in
 2.51.0.
 
