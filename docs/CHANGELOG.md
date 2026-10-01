@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 — per-request grammar, and QAIRT 2.51.0
+
+A request can now carry its own grammar: OpenAI's `response_format` or
+vLLM's `structured_outputs`, applied with `GenieDialog_setGrammar`, which
+QAIRT 2.51.0 added (#49). The documentation covers 2.51.0, which fixes the
+three reset defects every 2.49.x and 2.50.x carries, so a stock library is
+now a reasonable default (#50).
+
+**One change is breaking**: a request with `response_format` used to be
+answered unconstrained, and on a slot that cannot apply a grammar it is now a
+`400` (see Changed).
+
+Checked on an SA8255P with QAIRT 2.51.0 before release: the per-request
+grammar through the server on four `libGenie.so` builds, stock and rebuilt,
+with and without the grammar backend.
 
 ### Added
 
@@ -25,7 +39,7 @@
 
 ### Changed
 
-- **`response_format` is no longer accepted and ignored.** Before #49 a request
+- **Breaking: `response_format` is no longer accepted and ignored.** Before #49 a request
   with `response_format` was answered unconstrained. It is now applied, or
   refused with a `400` on a slot that cannot apply it (any QAIRT before 2.51.0,
   or a library without the grammar backend). A client that sent it and ignored
@@ -35,7 +49,7 @@
 
 ### Documentation
 
-- **QAIRT 2.51.0.260929.** It fixes the three reset defects (D1, D2, D5) that
+- **QAIRT 2.51.0.260929** (#50). It fixes the three reset defects (D1, D2, D5) that
   every 2.49.x and 2.50.x carries; the stock library is now a reasonable
   default. D3 (a rebuilt library has no grammar), D4 (grammar leaks the
   terminal token) and the sliding-window save/restore defect, now listed as
@@ -49,6 +63,11 @@
   section), the grammar example and the integration-test notes.
 - `GENIE_LIB_PATH` notes that `libQnnSystem.so` is loaded from the same
   directory as `libGenie.so`.
+- **The prefix cache on a sliding-window bundle (Gemma 4)** (#48): on a stock
+  library a warmed prefix longer than about 640 tokens restores to wrong
+  output, and a longer one can kill the process. Platform Notes has the
+  measurements; keep a Gemma 4 system prompt you warm up under about 600
+  tokens.
 
 ## 1.5.0 — fixes from a repository-wide code review: safer defaults, strict input, and a readiness probe
 
