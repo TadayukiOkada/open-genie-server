@@ -11,10 +11,8 @@ Two layers are covered here:
     an offline check here catches config mistakes that would otherwise only
     surface as a failed model load on the board.
 
-Per-request constraints do not exist: grammar is read once, inside
-GenieDialog_create (docs/MANUAL.md, "Grammar-Constrained Decoding"). The
-OpenAI-facing counterpart (`response_format`) is therefore *not* implemented,
-which the last test pins down.
+Per-request constraints (`response_format`, `structured_outputs`, through
+GenieDialog_setGrammar) are covered in test_request_grammar.py.
 """
 
 import json
@@ -211,24 +209,6 @@ def test_shipped_example_config_is_sdk_valid():
     schema_file = example / grammar["file"]
     assert schema_file.exists()
     assert json.loads(schema_file.read_text())["type"] == "object"
-
-
-# --------------------------------------------------------- per-request gate
-
-def test_response_format_is_accepted_and_ignored(client):
-    """Grammar is fixed per slot, so OpenAI's per-request `response_format`
-    cannot be honoured. The server currently accepts and ignores it — the
-    same silent fallthrough that `tool_choice` used to have before it was
-    turned into a 400."""
-    r = client.post("/v1/chat/completions", json={
-        "model": "genie-local",
-        "messages": [{"role": "user", "content": "hi"}],
-        "response_format": {"type": "json_object"},
-    })
-
-    assert r.status_code == 200
-    content = r.json()["choices"][0]["message"]["content"]
-    assert content == "Hello world from Genie!"   # unconstrained, not JSON
 
 
 # ------------------------------------------- integration checker (offline)

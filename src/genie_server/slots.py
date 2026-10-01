@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import capi, templates, tool_formats
+from . import capi, grammar, templates, tool_formats
 from .config import DEFAULT_DIALOG_CONFIG, ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,8 @@ class ModelAssets:
     tool_format: object
     model_dir: Path
     sampler_defaults: dict = field(default_factory=dict)
+    grammar_support: grammar.GrammarSupport = field(
+        default_factory=lambda: grammar.GrammarSupport(False, "not probed"))
 
     @property
     def context_size(self) -> int | None:
@@ -122,6 +124,12 @@ class Slot:
         # template unless TOOL_FORMAT forces one. See tool_formats.
         self.tool_format = tool_formats.HermesToolFormat
         self.sampler_defaults: dict = {}
+        # Per-request grammar (GenieDialog_setGrammar): whether this model's
+        # dialog takes one, and which grammar the dialog holds now -- a
+        # RequestGrammar.key, grammar.BUNDLE, grammar.UNKNOWN, or None for
+        # none. Both belong to the dialog, so a model switch replaces them.
+        self.grammar_support = grammar.GrammarSupport(False, "no model loaded")
+        self.active_grammar: str | None = None
         self.active_model_id = model_root.name
         self.active_lora_adapter = ""
         # Alphas set through /v1/lora/strength since the adapter was applied,
@@ -164,6 +172,8 @@ class Slot:
         self.chat_template = assets.template
         self.tool_format = assets.tool_format
         self.sampler_defaults = assets.sampler_defaults
+        self.grammar_support = assets.grammar_support
+        self.active_grammar = assets.grammar_support.baseline
         self.model_root = assets.model_dir
         self.active_model_id = assets.model_dir.name
         self.active_lora_adapter = ""
@@ -332,9 +342,10 @@ def load_dialog_config(model_dir: Path, device_id: int | None, slot_name: str,
     # Grammar-constrained decoding (dialog.context.grammar): backend must be
     # "xgrammar" (the SDK's only implementation), type is "json-schema"
     # (default) | "regex" | "ebnf", and "file" holds the grammar definition
-    # itself. This is baked into the Dialog at GenieDialog_create() time: it
-    # applies to every query on this model/slot; there is no per-request
-    # override.
+    # itself. It is compiled at GenieDialog_create() time and applies to every
+    # query that does not bring its own: a request's response_format or
+    # structured_outputs replaces it for that request (GenieDialog_setGrammar,
+    # QAIRT 2.51.0+), and the next request without one gets it back.
     grammar_cfg = dcfg.get("context", {}).get("grammar")
     if grammar_cfg and grammar_cfg.get("file"):
         grammar_cfg["file"] = resolve_and_verify(grammar_cfg["file"], model_dir)
@@ -409,6 +420,15 @@ def load_dialog_config(model_dir: Path, device_id: int | None, slot_name: str,
     return json.dumps(genie_config_data).encode("utf-8"), dcfg
 
 
+def _grammar_summary(slot: Slot) -> str:
+    """For the slot-ready log line: whether requests can set a grammar."""
+    support = slot.grammar_support
+    if not support.supported:
+        return "bundle only" if support.bundle else "unavailable"
+    return "per-request" + (f" (bundle default: {support.bundle[0]})"
+                            if support.bundle else "")
+
+
 class SlotManager:
     """Owns every text Slot (and the VLM slot list), routes requests to
     them, and performs model hot-swaps."""
@@ -454,6 +474,11 @@ class SlotManager:
             model_dir, device_id, slot_name, self._htp_ext_cache_dir, poll,
             config_file)
         handle = self.lib.create_dialog(config_json, profile, self.log_handle)
+        try:
+            grammar_support = grammar.probe_support(self.lib, handle, dcfg, slot_name)
+        except Exception:
+            self.lib.free_dialog(handle)
+            raise
         sampler_cfg = dcfg.get("sampler", {}) or {}
         template = templates.detect_template(
             self.config.chat_template_override or model_dir.name)
@@ -467,6 +492,7 @@ class SlotManager:
                 self.config.tool_format_override or tool_formats.detect(template)),
             model_dir=model_dir,
             sampler_defaults=capi.sampler_defaults_from(sampler_cfg),
+            grammar_support=grammar_support,
         )
 
     def load_all(self) -> None:
@@ -489,7 +515,8 @@ class SlotManager:
                 f"Slot '{slot.name}' ready: model={slot.active_model_id} "
                 f"device_id={slot.device_id if slot.device_id is not None else '(unpinned)'} "
                 f"template={slot.chat_template} "
-                    f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token}")
+                f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token} "
+                f"grammar={_grammar_summary(slot)}")
         self._by_name = {s.name: s for s in self.slots}
         self.reindex()
 
@@ -716,4 +743,5 @@ class SlotManager:
         self.lib.free_dialog(old_handle_to_free)
         logger.info(f"[{slot.name}] Model switched: model={slot.active_model_id} "
                     f"template={slot.chat_template} "
-                    f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token}")
+                    f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token} "
+                    f"grammar={_grammar_summary(slot)}")

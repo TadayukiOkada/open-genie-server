@@ -6,8 +6,8 @@ an asyncio.Queue that both the SSE generator and the sync collector consume.
 
 Responsibilities handled here, in order, all under the target slot's lock:
 lock acquisition (abort-aware), watchdog, dialog reset, per-request SDK
-parameters (max tokens / stop sequences / sampling), prefix-cache routing,
-query, and finish_reason determination.
+parameters (max tokens / stop sequences / grammar / sampling), prefix-cache
+routing, query, and finish_reason determination.
 """
 
 import asyncio
@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import capi
+from . import capi, grammar as grammar_mod
 from .capi import GenieLib, make_sampler_params
 from .prefix_cache import PrefixCache
 from .slots import Slot
@@ -33,6 +33,9 @@ class GenParams:
     top_p: float | None = None
     top_k: int | None = None
     seed: int | None = None
+    # response_format / structured_outputs, already parsed. None: the
+    # bundle's own grammar, if it has one.
+    grammar: "grammar_mod.RequestGrammar | None" = None
 
 
 @dataclass
@@ -104,6 +107,9 @@ class Generation:
         # output is incomplete because of the timeout; error then says so.
         # Both the sync and the streaming path read this, never timed_out.
         self.timeout_error = False
+        # The request field whose grammar the SDK refused, so the query
+        # never ran: a client error (400), not a server one.
+        self.grammar_error: str | None = None
         # A SENTENCE_ABORT reached the token callback: the SDK itself says
         # the query was cut short, whatever status it returns.
         self.abort_seen = False
@@ -182,6 +188,8 @@ class Generation:
         if self.timeout_error:
             # Whatever arrived is a truncated output, not a completion.
             raise TimeoutError(f"Inference timed out [{self.request_id}]")
+        if self.grammar_error:
+            raise grammar_mod.GrammarRequestError(self.error, self.grammar_error)
         if self.error and not chunks:
             raise RuntimeError(self.error)
         return "".join(chunks)
@@ -254,6 +262,15 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
         lib.reset(slot.handle)
         lib.set_max_tokens(slot.handle, params.max_tokens)
         lib.set_stop_sequences(slot.handle, params.stop or None)
+        # Before the prefix restore: the SDK refuses a restore while a
+        # grammar has accepted tokens. The reset above cleared those.
+        grammar_failure = grammar_mod.apply_to_slot(
+            lib, slot, params.grammar, generation.request_id)
+        if grammar_failure is not None:
+            if params.grammar is not None:
+                generation.grammar_error = params.grammar.param
+            generation.error = grammar_failure
+            return
         if collector is not None:
             # Logprobs request: sampling moves into the collector (custom
             # sampler). temperature/top_p/top_k/seed are honored by the

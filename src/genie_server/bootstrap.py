@@ -29,6 +29,12 @@ def build_state(config_path: str = "env_config.json") -> ServerState:
     so_path = config.resolved_genie_lib_path()
     lib = GenieLib.load(so_path)
     logger.info(f"libGenie.so loaded from: {_mapped_path(so_path)}")
+    # The API version names the SDK release the library came from (2.51.0 is
+    # 1.21.0), which a mapped path alone may not. It does not say whether a
+    # per-request grammar works: each slot finds that out (grammar.probe_support).
+    logger.info(f"Genie API version: {lib.api_version() or 'unknown'}; "
+                "GenieDialog_setGrammar "
+                f"{'exported' if lib.has_set_grammar else 'not exported'}")
 
     from . import vlm
     from .slots import SlotManager

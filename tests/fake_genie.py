@@ -58,6 +58,14 @@ class FakeGenieLib:
         self.bound_loggers: list = []    # one entry per create_dialog call
         self.created_loggers: list = []  # levels passed to create_logger
         self.freed_loggers: list = []
+        # GenieDialog_setGrammar: has_set_grammar fakes an older libGenie
+        # when False; set_grammar_status a refusal (a library without the
+        # backend, an uncompilable grammar). Each call is recorded as
+        # (handle, kind, file content or None).
+        self.has_set_grammar = True
+        self.set_grammar_status = 0
+        self.grammar_calls: list = []
+        self.grammar: dict = {}          # handle -> (kind, content) in force
 
     @property
     def cdll(self):
@@ -213,6 +221,25 @@ class FakeGenieLib:
 
     def apply_sampler_params_to_handle(self, sampler_h, params) -> None:
         pass
+
+    # ------------------------------------------------------------ grammar
+
+    def set_grammar(self, handle, kind, path) -> int:
+        content = None
+        if path is not None:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+        self.grammar_calls.append((handle.value, kind, content))
+        if self.set_grammar_status != 0:
+            return self.set_grammar_status
+        if kind is None:
+            self.grammar.pop(handle.value, None)
+        else:
+            self.grammar[handle.value] = (kind, content)
+        return 0
+
+    def api_version(self) -> str:
+        return "1.21.0"
 
     # ------------------------------------------------------------ introspection
 
