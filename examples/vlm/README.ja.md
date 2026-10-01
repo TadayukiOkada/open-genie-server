@@ -21,7 +21,7 @@ VLM 対応(`genie_server/vlm.py`。ctypes バインディングは `genie_node.p
 
 ```json
 {
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "VLM_SLOTS": [
     {

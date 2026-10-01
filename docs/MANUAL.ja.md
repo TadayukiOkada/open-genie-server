@@ -116,14 +116,18 @@ open-genie-server は `libGenie.so` の薄いクライアントです。した�
 > [QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md) にまとめてあります。**
 > SDK ビルドを選ぶ前、モデルのエクスポート形式を決める前に読んでください。要点:
 >
+> - **2.51.0.260929 はスロットの楔とほかの 2 つのリセット欠陥を直しました。** 素の
+>   2.51.0 のライブラリは既定にしてよく、grammar(新しいリクエスト単位の grammar を含む)も
+>   使えます。grammar の終端トークンの漏れと、スライディングウィンドウのバンドル(Gemma 4)で
+>   長い prefix を保存・復元できない問題は残っています。
 > - **素の 2.49.x / 2.50.x はスロットを壊します** — `prompt_tokens + max_tokens` が
 >   `コンテキスト長 − AR_N` を超えたとき。壊したリクエスト自身は 200 で正常に見え、
 >   以後そのスロットは、モデルを再ロードするまで全リクエストが失敗します。
 >   **本サーバはこれを防ぎません。**
 > - **単一コンテキスト長でエクスポートしても消えません** — `[4096]` / AR-128 の
 >   バンドルで予算が 384 から 3968 に上がるだけです。
-> - **ライブラリをリビルドすれば直りますが、grammar 制約デコーディングを失います。**
->   両方を備えたビルドは存在しません。
+> - **2.49.x と 2.50.x では、ライブラリをリビルドすれば直りますが、grammar 制約デコーディングを
+>   失います。** これらの SDK が用意するものに、両方を備えたビルドはありません。
 > - **`2.49.1.260821` は数字が小さいのに `2.49.40.260810` より新しい**バージョンで、
 >   上記のどれも直っていません。
 > - **`2.50.0.260828` でも上記はどれも直っていません**。ただし差し替えはそのまま効きます —
@@ -132,12 +136,13 @@ open-genie-server は `libGenie.so` の薄いクライアントです。した�
 >   実行しており、どのテストもその予算に近づかないためです。**全件 PASS は楔について
 >   何も言っていません。**
 
-**検証済みの組み合わせ**: QAIRT **2.49.40.260810**・**2.49.1.260821**・**2.50.0.260828**、
+**検証済みの組み合わせ**: QAIRT **2.49.40.260810**・**2.49.1.260821**・**2.50.0.260828**・**2.51.0.260929**、
 `aarch64-oe-linux-gcc11.2`、SA8255Pボード、Qwen3 w4a16 のコンテキストバイナリ
 (`qwen3_0_6b`、`qwen3_4b_instruct_2507`)。加えて **2.48.40.260702**、
 `aarch64-android`、同じボードのAndroidゲスト([Androidで動かす](#androidで動かす))。
-**2.48 は3つのリセット欠陥をどれも持ちません** — いずれも 2.49 のスケジューラと
-ともに入ったものです。ここに挙げた中で、素のライブラリが不利にならない唯一のビルドです。
+**2.48 と 2.51.0 は3つのリセット欠陥をどれも持ちません** — いずれも 2.49 のスケジューラと
+ともに入り、2.51.0 で直りました。ここに挙げた中で、素のライブラリが不利にならないのはこの 2 つです。
+2.49.40 でエクスポートしたバンドルは、そのまま 2.51.0 のランタイムで動きます。
 
 以降のこの節は欠陥の話ではなく、**エクスポート時の選択** — バンドルにいくつの
 コンテキスト長をコンパイルするか — についてです。
@@ -260,7 +265,7 @@ API より下の層で2つのNSPが何かを共有している(メモリ帯域�
 
 ```json
 {
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "MODELS_BASE_DIR": "/home/root/models",
   "PREFIX_CACHE_DIR": "/home/root/prefix_cache",
@@ -697,7 +702,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `CORS_ALLOW_ORIGINS` | 任意 | `[]` | ブラウザ上のページがこのサーバを呼んでよいオリジン。例: `["http://localhost:3000"]`。`["*"]` なら全オリジン。**既定は空で、CORS ヘッダを一切返さない**。文書にあるクライアントはどれも要らない(`lm_eval`・`curl`・OpenAI SDK はブラウザではなく、[Open WebUI](#open-webui) はバックエンドから呼ぶ。ただし [Direct Connections](#direct-connections-には-cors_allow_origins-が必要) を使う場合は除く)。ブラウザから直接このサーバを呼ぶページのときだけ載せる。載せたページはモデルの切り替えを含む全エンドポイントを使える。1.4.0 までは全オリジンを許していた。 |
 | `MAX_REQUEST_BODY_MB` | 任意 | `64` | リクエストボディの上限(MB)。超えたら `413`。`0` で無制限。ボディは丸ごと保持してから別のコピーへパースするので、1 リクエストでサーバに確保させられる量をこれで抑える。これに近づくのは長い `video_url` だけで、エンコーダが受け取る程度のサイズなら 64 MB で数百フレーム入る。 |
 | `VLM_MAX_IMAGE_PIXELS` / `VLM_MAX_TOTAL_PIXELS` | 任意 | `16777216` / `1073741824` | 1 枚の画像・フレームの画素数の上限と、1 リクエストの画像・フレームの合計の上限。超えたら `400`。`0` で無制限。画像はスペックが縮める前に原寸でデコードされ、全部を同時に保持する(1 画素あたり RGB で 3 バイト、RGBA・CMYK・32 ビット画像で 4 バイト)。単色の PNG は 13000 × 13000(Pillow 自身の上限のすぐ下)でも約 500 KB で、デコードすると 483 MB になる。なので、ボディの上限では抑えられない。ヘッダから判定し、デコードの前に断る。既定は 4096 × 4096(テストとプローブが送るどの画像よりも大きい)と、その 64 倍(1 リクエストで送る枚数の最大が 64)。なので、1 枚の上限に収まるテストが合計で止まることはない。合計はデコード後で最大 4 GB になる(すべて RGB なら 3 GB。単色の 4096 × 4096 の RGBA PNG は 1 枚 63 KB なので、64 枚でもボディの上限に収まる)。余裕の無いボードでは下げる。抑えるのはサーバ自身のメモリで、SDK に届くものではない。コンテキストを超えるリクエストは、`VLM_VISION_BUDGET_GUARD` がオフなら従来どおり SDK に届く。 |
-| `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は`<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。SDKルートなしの`linux-ubuntu`ではシステムの`libGenie.so`。 |
+| `GENIE_LIB_PATH` | 任意 | (未設定) | `libGenie.so`への明示パス。既定は`<QAIRT_SDK_ROOT>/lib/<abi>/libGenie.so`。SDKルートなしの`linux-ubuntu`ではシステムの`libGenie.so`。Genie は `libQnnSystem.so` を `libGenie.so` と同じディレクトリから読むので、そのディレクトリには QAIRT ランタイムのほかのライブラリも要る(シンボリックリンクでよい)。無いとどのモデルのロードも `GenieDialog_create failed: -1` で失敗する。 |
 | `GENIE_PROFILE` | 任意 | `false` | 各テキストスロットに `GenieProfile` をバインドし、SDK自身が計測したTTFT/プレフィル/デコードのKPIを `GET /v1/server/profile` で取得できるようにする([プロファイリング](#プロファイリングsdk側のkpi)参照)。変更には再起動が必要。 |
 | `GENIE_LOG_LEVEL` | 任意 | `""`(無効) | libGenie 自身のログを `"error"` / `"warn"` / `"info"` / `"verbose"` で有効化します。`GenieLog` を1つ作り、本サーバが作る全ての dialog / node / pipeline のコンフィグにバインドします。**無効は「静か」ではなく「無音」です**: SDK 内の `__INFO`/`__ERROR` はロガーがバインドされているかで完全に止まるため、未設定だと SDK 自身の診断は1行も見えません(ロード失敗の理由すら見えません)。`"error"` は安価で、`"info"` にするとエンジンの構成判断(そのバンドルがどの推論経路に乗るか等)も出ます。ただし `"info"` は多く、0.6B の4スロット構成の起動1回で **1,836 行**が出ました(大半はバッファ単位のメモリ登録)。有用な行は少数かつ先頭付近にあり、例えば `qnn-htp-engine: inference scheduler created: 1 slot(s), ar_max=128` はエンジンがそのバンドルに対してどう構成されたかを教えてくれます。行を書くのは SDK 自身で、Linux では本プロセスの stdout(`Genie:  <ms> [ LEVEL ] ...`)、Android では logcat に出ます — Python の logging を通らないので、サーバ自身のログ書式にはなりません。コンフィグにバインドするため、変更には再起動が必要です。 |
 | `PROMPT_LOGPROBS` | 任意 | `false` | プロンプトスコアリング(`echo`+`logprobs`のteacher forcing、lm_evalのloglikelihoodタスクが使用)を起動時から有効化。実行時は`POST /v1/server/prompt_logprobs`でも切り替え可([Logprobs](#logprobs)参照)。 |
@@ -709,7 +714,7 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 
 ```json
 {
-  "QAIRT_SDK_ROOT": "/home/root/qairt/2.49.40.260810",
+  "QAIRT_SDK_ROOT": "/home/root/qairt/2.51.0.260929",
   "HEXAGON_VERSION": "v73",
   "MODELS_BASE_DIR": "/data/models",
   "TEXT_SLOTS": [{"model_root": "qwen3-4b-htp"}],
@@ -1023,7 +1028,7 @@ HIT:  GenieDialog_reset → GenieDialog_restore → query(remaining, SENTENCE_EN
 > SDK が BOS を足すのは `SENTENCE_COMPLETE` / `BEGIN` / `REWIND` のときだけです。SDK の挙動なので
 > サーバはそのまま見えるようにしており、HIT のときの `usage.prompt_tokens` はこの2個目を数えません。
 >
-> **スライディングウィンドウのバンドル(Gemma 4)では、stock の SDK は約 640 トークンを超える prefix を
+> **スライディングウィンドウのバンドル(Gemma 4)では、stock の SDK(2.49.40〜2.51.0)は約 640 トークンを超える prefix を
 > 復元できません**。HIT の出力が崩れ、さらに長いとプロセスが落ちます。ウォームアップする system prompt は
 > 約 600 トークン未満にするか、そのモデルはウォームアップしないでください。詳細と実測は
 > [プラットフォームノート](./PLATFORM_NOTES.ja.md#スライディングウィンドウのバンドルgemma-4での-prefix-cache)。
@@ -1063,6 +1068,11 @@ HITはバッチ単位でプレフィルを丸ごと消すので:
 
 Genie SDK(qualla)がgrammar制約デコーディング(XGrammarバックエンド)をサポートしている dialog 型は2つ、`basic`(大半のバンドルが宣言する型)と `eaglet` です。JSON Schema/正規表現/EBNFのいずれかで出力を制約し、無効なトークンをロジットマスキングで排除します(jump-forward高速化込み)。
 
+grammar の出どころは 2 つあります:
+
+- **リクエスト**(QAIRT 2.51.0 以降): `response_format` または `structured_outputs`。サーバは query の前に `GenieDialog_setGrammar` でスロットの dialog に設定します。フィールドの一覧は [API § 構造化出力](./API.ja.md#構造化出力response_formatstructured_outputs)。
+- **バンドル**: `genie_config.json` の `grammar` ブロック。自分の grammar を持たないすべてのリクエストに効き、どの QAIRT の版でも動きます。2.51.0 より前はこれしかなく、変えるにはモデルの再ロードが要ります。
+
 > [!NOTE]
 > **grammar を実装していない dialog 型は、無視するのではなく拒否します。**
 > `Dialog::create()` が `supportsGrammar()` 仮想関数で門番をしており、これを
@@ -1074,11 +1084,42 @@ Genie SDK(qualla)がgrammar制約デコーディング(XGrammarバックエン�
 > 制約の効かない出力が黙って返るのではなく、起動失敗
 > (または `/v1/models/switch` の HTTP 500)になります。
 
-**重要な制約: これはモデル/スロット単位で固定される機能であり、リクエストごとに切り替えることはできません。** Genie SDKの公開C API(`GenieDialog.h`)にはgrammarを実行時に設定・変更する関数が一切無く(`GenieDialog_setValue`のような汎用setterも存在しない)、grammarは`GenieDialog_create()`が内部でDialogを構築する際に`genie_config.json`から一度だけ読み込まれます。変更するには`GenieDialogConfig`からDialogを作り直す必要があり、これは`/v1/models/switch`と同等のコスト(モデル再ロード)です。
+### リクエスト単位の grammar
 
-OpenAI APIの`response_format`のようにリクエストごとに異なるスキーマを渡す用途には使えません。「常にJSON Schema Xに従って出力するモデル」を専用スロットとして用意する、という使い方をしてください。
+`/v1/chat/completions` と `/v1/completions` で、`response_format`(OpenAI)と `structured_outputs`(vLLM)を受け付けます。JSON Schema、`json_object`、正規表現、選択肢のリスト、EBNF の文法が使えます。対応表は [API リファレンス](./API.ja.md#構造化出力response_formatstructured_outputs)にあります。
 
-### 設定方法
+**スロットが受け付けられるかは、モデルのロード時に決まります。** 必要なのは:
+
+- QAIRT 2.51.0 以降(API がそこで入った)
+- grammar のバックエンドが入った `libGenie.so`: 素のライブラリには入っていて、リビルドしたものには入っていません([D3](./QAIRT_VERSIONS.ja.md#d3--リビルドしたライブラリには-grammar-が入らない))
+- `basic` か `eaglet` の dialog
+
+シンボルの有無だけでは決まりません。リビルドした 2.51.0 のライブラリも `GenieDialog_setGrammar` をエクスポートしていて、呼ぶと毎回失敗します。そこでサーバは grammar を外す呼び出しを 1 回だけ行い、その結果を見ます。バンドルが自分の grammar を持つ場合はこの呼び出しを省きます(バックエンドがあることはそれで分かり、呼べばその grammar を消してしまうため)。起動ログの `Slot '<name>' ready: ... grammar=...` が `per-request` / `bundle only` / `unavailable` のどれかを示し、`GET /v1/server/status` もスロットごとに報告します。受け付けられないスロットへの grammar つきのリクエストは、`code: "grammar_not_supported"` と理由つきの `400` になります。制約なしで答えることはありません。
+
+**dialog が持つ grammar。** リクエストの grammar は、そのリクエストの間だけバンドルの grammar に代わります。grammar を持たない次のリクエストでは、バンドルの grammar(無ければ無し)に戻ります。dialog がすでに持っている grammar と同じものは、コンパイルし直しません。
+
+**grammar のコンパイルには時間がかかり**、query の前にスロットのロックの中で行われます。SA8255P、QAIRT 2.51.0、Qwen3-0.6B のバンドルでの実測:
+
+| 呼び出し | 時間 |
+|---|---|
+| プロセスで最初の grammar | 約 0.5 秒 |
+| それ以降の grammar(JSON Schema・正規表現・EBNF・選択肢) | **約 0.26 秒** |
+| バンドルの grammar に戻す | 約 0.28 秒 |
+| grammar を外す | 約 2 ms |
+
+grammar の大きさはほとんど効きません。40 プロパティのスキーマも 1 行の正規表現と同じ時間でした。違う grammar を交互に送るクライアントは切り替えのたびにこれを払い、同じものを繰り返すクライアントは 1 回だけ払います。
+
+**SDK がコンパイルできない grammar はリクエストを失敗させます。** `400` が返り(stream なら `invalid_request_error` のイベント)、query は走りません。SDK 自身のメッセージ(たとえば XGrammar の `EBNF parser error at line 1, column 11`)は応答ではなくサーバのログに出ます。
+
+**使う前に知っておくこと:**
+
+- **grammar は最初の生成トークンから効きます。** thinking するモデルは `<think>` で始められません。Qwen3 の `enable_thinking` を有効にしたまま JSON Schema を指定すると、応答は `{` から始まります。構造化出力では `enable_thinking: false` を送ってください。
+- **小さいモデルは `max_tokens` まで空白を出し続けることがあります。** XGrammar の JSON Schema の文法はトークンの間の空白をいくらでも許し、Qwen3-0.6B は `{` の後に改行を出し続けて上限に達することがあります(`finish_reason: "length"`)。SDK にはこれを絞るオプションが無いので、`structured_outputs.disable_any_whitespace` は断ります。`max_tokens` を設定し、`finish_reason` を確かめてください。
+- **併用できるもの:** `stream: true`、`logprobs`(値は grammar のマスクを掛けた後のもの)、prefix KV キャッシュ(HIT でも MISS と同じように grammar が効く)。
+- **使えないもの:** 画像・動画のリクエスト(VLM のパイプラインには grammar の API が無い)と、プロンプトのスコアリング(`echo` + `logprobs`)。
+- **素のライブラリでは、応答の末尾に終端トークンが付きます**([下記](#実機で確認できたことおよび既知の欠陥1件))。
+
+### モデル単位の grammar(バンドルの設定)
 
 `genie_config.json`の`dialog.context`に`grammar`ブロックを追加します:
 
@@ -1107,16 +1148,16 @@ OpenAI APIの`response_format`のようにリクエストごとに異なるス�
 
 ### XGrammarが入ったライブラリが必要
 
-**素の** `libGenie.so`(`lib/aarch64-oe-linux-gcc11.2/`)にはXGrammarが静的リンクされているため、上記の設定はそのまま動作します。
+**素の** `libGenie.so`(`lib/aarch64-oe-linux-gcc11.2/`)にはXGrammarが静的リンクされているため、上記の設定も、2.51.0 のリクエスト単位の grammar も、そのまま動作します。
 
 > [!IMPORTANT]
-> **SDKのソースからリビルドした `libGenie.so` にはgrammarバックエンドが一切入りません** — スロット恒久故障の本質的な対策として[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md#選択肢1--修正した-libgenieso-を使うgrammar-が不要なら推奨)が推奨している修正版も同様です。そのライブラリでは、`grammar` ブロックを持つ `genie_config.json` のモデルをロードした時点で `GenieDialog_create failed: -1` となり、ログに `"Grammar backend configured but qualla was built without ENABLE_GRAMMAR"` が出ます(起動時なら起動失敗、`/v1/models/switch` 経由ならHTTP 500)。メッセージが示すリビルドフラグが役に立たない理由と、手元のライブラリを1行で判定する方法は、対処1の警告を参照してください。
+> **SDKのソースからリビルドした `libGenie.so` にはgrammarバックエンドが一切入りません** — 2.49.x と 2.50.x のスロット恒久故障の対策として[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md#選択肢1--修正した-libgenieso-を使う249x--250x-で-grammar-が不要なら推奨)が推奨している修正版も同様です。そのライブラリでは、`grammar` ブロックを持つ `genie_config.json` のモデルをロードした時点で `GenieDialog_create failed: -1` となり、ログに `"Grammar backend configured but qualla was built without ENABLE_GRAMMAR"` が出ます(起動時なら起動失敗、`/v1/models/switch` 経由ならHTTP 500)。リクエスト単位の grammar は `grammar_not_supported` で断られます。メッセージが示すリビルドフラグが役に立たない理由、バックエンドを自分で用意する方法、手元のライブラリを1行で判定する方法は [D3](./QAIRT_VERSIONS.ja.md#d3--リビルドしたライブラリには-grammar-が入らない) にあります。
 
 ### 実機で確認できたこと、および既知の欠陥1件
 
-素の 2.49.40.260810(SA8255P、`qwen3_0_6b` w4a16)では、3種別いずれも出力が正しく制約され、`stream: true` との併用も `logprobs` との併用も動作します。素の 2.50.0.260828 も、終端トークンの漏れを含めてまったく同じ挙動です。
+素の 2.49.40.260810(SA8255P、`qwen3_0_6b` w4a16)では、3種別いずれも出力が正しく制約され、`stream: true` との併用も `logprobs` との併用も動作します。素の 2.50.0.260828 と 2.51.0.260929 も、終端トークンの漏れを含めてまったく同じ挙動です。2.51.0 では、リクエスト単位の grammar も JSON Schema・`json_object`・正規表現・選択肢・EBNF で同じように確かめました。
 
-一方、3種別すべてに影響するSDKの欠陥が1件あります: **応答の末尾にモデルの終端トークンがそのままテキストとして付きます**(ChatMLモデルなら `<|im_end|>`)。制約された部分自体は正しい — JSONオブジェクトは完結しスキーマにも適合し、正規表現も厳密に一致します — が、この末尾のマーカーのせいで、JSON Schema制約の応答は `json.loads()` で解析できず、正規表現制約の応答は自分のパターンに一致しません。**サーバ側では除去していません**。本機能を使うクライアント側で末尾の特殊トークン文字列を取り除いてください。本件は再現プログラムと修正案を添えてQualcommへ報告済みです。
+一方、すべてに影響するSDKの欠陥が1件あります: **応答の末尾にモデルの終端トークンがそのままテキストとして付きます**(ChatMLモデルなら `<|im_end|>`)。制約された部分自体は正しい — JSONオブジェクトは完結しスキーマにも適合し、正規表現も厳密に一致します — が、この末尾のマーカーのせいで、JSON Schema制約の応答は `json.loads()` で解析できず、正規表現制約の応答は自分のパターンに一致しません。**サーバ側では除去していません**。本機能を使うクライアント側で末尾の特殊トークン文字列を取り除いてください。本件は再現プログラムと修正案を添えてQualcommへ報告済みで、その修正を入れてリビルドしたライブラリでは漏れません([D4](./QAIRT_VERSIONS.ja.md#d4--grammar-が終端トークンを本文に漏らす))。
 
 ## プロファイリング(SDK側のKPI)
 
@@ -1382,7 +1423,11 @@ indices 無しで元動画のレートを渡されると尺全体を取り違え
 SA8255Pでの実測(QAIRT 2.49.40.260810、Qwen3-VL 4B、コンテキスト4096、1ステップ256視覚トークン。
 質問文をパディングしてプロンプトを1トークンずつ掃引した)。
 **素の 2.50.0.260828 でも、楔もプロセス死もそのまま再現する** —
-`GenieNode.h` と `GeniePipeline.h` だけを使う単体の再現プログラムで確認済み:
+`GenieNode.h` と `GeniePipeline.h` だけを使う単体の再現プログラムで確認済み。
+**QAIRT 2.51.0.260929 は両方を直した**: 同じ再現プログラムで、超過は status 4
+(`GENIE_STATUS_WARNING_CONTEXT_EXCEEDED`)で返り、リセット後のパイプラインは普通に答え、
+17 フレームでもプロセスは落ちない。本サーバ経由の 2.51.0 はまだ測っていないので、下の表は
+2.49.x と 2.50.x のもの:
 
 | プロンプトトークン数(視覚+テキスト) | 結果 |
 |---|---|
@@ -1421,8 +1466,8 @@ SDKに楔があること自体が分からない。OFFのままでも収まら�
 
 ### 生成トークン数の上限
 
-VLMリクエストの`max_tokens`は**反映できない**。`GenieNode.h`/`GeniePipeline.h`には
-リクエスト単位のトークン上限も中断APIも無く、テキストコールバックの戻り値も捨てられるため、
+VLMリクエストの`max_tokens`は**反映できない**。QAIRT 2.50 までの `GenieNode.h`/`GeniePipeline.h`には
+リクエスト単位のトークン上限が無く、どの版にも中断APIが無く、テキストコールバックの戻り値も捨てられるため、
 生成の途中でパイプラインを止める手段が一切ない。SDKが用意している唯一の上限は
 text-generatorノードの`max-num-tokens`で、これはGenieが**ノード生成時に一度だけ**読む。
 サーバはこの値を`VLM_SLOTS[].max_tokens`から埋める:
@@ -1517,14 +1562,17 @@ VLM経路では以下がサポートされない:
 
 - **リクエスト単位の`max_tokens`/`stop`**: SDKレベルで強制する手段が無い。指定しても無視される
   (`GenieDialog_setMaxNumTokens`/`setStopSequence`相当が無い)。生成長はスロット単位で
-  制限する — [生成トークン数の上限](#生成トークン数の上限)を参照。
+  制限する — [生成トークン数の上限](#生成トークン数の上限)を参照。QAIRT 2.51.0 で
+  text-generator ノードの実行ごとのトークン上限(`GenieNode_setValue`)が入ったが、本サーバは
+  まだ使っていない。stop シーケンスに当たるものは今も無い。
 - **クライアント切断時の中断**: `GeniePipeline_execute()`はブロッキング呼び出しで、
   開始したら自然終了まで止められない(`GenieDialog_signal`相当が無い)。切断後もサーバ側では
   推論を最後まで実行し続け、そのVLMスロットのロックは自然終了まで保持される。
 - **マルチターン会話**: 常に単発(`pipeline.reset()`をリクエストごとに呼ぶ)。会話履歴は
   保持されない。
 - **`/v1/models/switch`によるホットスワップ、LoRA、Prefix KVキャッシュ、grammar制約**:
-  いずれも`GenieDialog`専用APIか、V1では未実装。
+  いずれも`GenieDialog`専用APIか、V1では未実装。`response_format` か `structured_outputs` を
+  付けた画像のリクエストは、制約なしで答えずに `400` で断る。
 - **リモートURL画像の取得**: `data:`(base64)形式のみ対応。`http(s)://`等は明確に400エラー
   (組み込み/自動車向けサーバから予期しない外部通信を行わないため)。
 
@@ -1572,7 +1620,7 @@ VLM経路では以下がサポートされない:
 
 Genie SDKは`GenieDialog`経由でlogitsを公開しませんが、SDKの**カスタムサンプラー**フック(`GenieSampler_registerUserDataCallback` + サンプラー設定`{"type": "custom"}`)が、生成1ステップごとにデクォンタイズ済みfloat32のlogitsベクトル全体をサーバに渡し、出力トークンの選択も委ねます。logprobsはこの仕組みで実装されています(`genie_server/logprobs.py`)。
 
-**生成トークンのlogprobs**(QAIRTランタイムがlogitsを渡す場合): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエストが指定しないパラメータは、logprobs が無いときと同じく、モデルの `genie_config.json` の既定値になるので、logprobs を求めてもサンプリングは変わりません。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応(またgrammar制約モデルではマスク後のlogitsに対する値になる点に注意)。
+**生成トークンのlogprobs**(QAIRTランタイムがlogitsを渡す場合): `/v1/completions`の`logprobs`(int)、`/v1/chat/completions`の`logprobs`/`top_logprobs`(bool/int)で、生成各トークンのlogprobと上位N候補を記録します。このリクエストではサンプリングがサーバ側に移ります(同じlogitsに対するgreedy/temperature/top-k/top-p。`temperature=0`はSDKのgreedyと完全一致)。リクエストが指定しないパラメータは、logprobs が無いときと同じく、モデルの `genie_config.json` の既定値になるので、logprobs を求めてもサンプリングは変わりません。リクエスト終了時にモデル既定値のbasicサンプラーへ復元されます。オーバーヘッドはトークンあたりvocab全体のlog-softmax1回(1〜2ms)で、NPUデコードの数十msに対して数% — logprobsを要求しないリクエストは完全にゼロです。`numpy`とモデルトークナイザが必要。`stream: true`との併用、VLMスロットは非対応。grammar があるときの値は grammar のマスクを掛けた後のもの: grammar が禁じるトークンは現れず、grammar が強制するトークンは 0 になる。
 
 カスタムサンプラーの設定を受け付けても、logits callbackを呼ばないランタイムがあります。QCS9075 UbuntuのQAIRT 2.46パッケージで、Qwen3-0.6Bバンドルを使って確認しました。最初の生成トークンがcallbackより先に届いた場合、サーバはそのクエリを止め、生成トークンのlogprobsとプロンプトスコアリングは、空や誤った値を返す代わりにHTTP 400の`error.code: "logprobs_not_supported"`を返します。スロットはこの結果を覚えるので、以降のlogprobsリクエストは生成を走らせずにすぐ同じ400を返します。プロンプトスコアリングはプロンプトトークンごとに1つずつスコアが揃ったかも確かめ、callbackが途中で止まった場合はHTTP 500を返します(足りないと全スコアが位置ずれするため)。同じバンドルでQAIRT 2.50.40のcallbackは動きましたが、無修正版では長い生成後のreset経路で失敗しました。詳しくは[QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照してください。
 
@@ -1842,12 +1890,12 @@ APIを残してあるのは、コストが無く、答えがターゲットご�
 | モデル切り替え後もLoRAが残っている | `/v1/models/switch` 成功時は対象スロットの `active_lora_adapter` を自動的に `""` にリセットしますが、SDK内部状態と食い違う場合は `/v1/lora/current?model=...` で実際の値を確認してください。 |
 | prefix warmupが `422` | 対象スロットのモデルのテンプレートがllama2/mistralの場合、systemプロンプトは`[INST]`に融合されるため分割・キャッシュ不可(仕様)。 |
 | `device_id`を指定したのにNSPが固定されていない | 起動ログに `device_id=... requested but ... has no dialog.engine.backend.extensions file to patch — NSP pinning skipped` の警告が出ていないか確認。モデルの`genie_config.json`にHTPバックエンド拡張設定ファイルへの参照が無いと固定できません。 |
-| あるスロットが突然、全リクエストで `GenieDialog_query failed [...]: -1` / `batch dispatch failed` を返すようになる | スロットに楔が入っています。素のQAIRT 2.49.x / 2.50.x の `libGenie.so` と、複数のコンテキスト長でエクスポートされたモデルの組み合わせです。原因となったリクエスト自身は成功して正常に返っており、失敗し始めるのはその次からです。`GenieDialog_reset()` では復旧しません。**復旧方法**: そのスロットを `POST /v1/models/switch {"slot": "<名前>", "model_dir": "<同じモデル>"}` で再ロードします。**回避方法と詳しい説明**: [QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md#d1--素のライブラリはスロットを壊す)を参照。 |
+| あるスロットが突然、全リクエストで `GenieDialog_query failed [...]: -1` / `batch dispatch failed` を返すようになる | スロットに楔が入っています。素のQAIRT 2.49.x / 2.50.x の `libGenie.so` と、複数のコンテキスト長でエクスポートされたモデルの組み合わせです(2.51.0 で直りました)。原因となったリクエスト自身は成功して正常に返っており、失敗し始めるのはその次からです。`GenieDialog_reset()` では復旧しません。**復旧方法**: そのスロットを `POST /v1/models/switch {"slot": "<名前>", "model_dir": "<同じモデル>"}` で再ロードします。**回避方法と詳しい説明**: [QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md#d1--素のライブラリはスロットを壊す)を参照。 |
 | SDK が何をしているのかログに何も出ない | libGenie は、ハンドルの生成元コンフィグにロガーがバインドされていない限り何も出しません。内部の `__INFO`/`__ERROR` が完全に無効化されるため、SDK 内部で起きた失敗が、API の返すステータスコード以外に痕跡を残さないことがあります。env_config.json に `"GENIE_LOG_LEVEL": "error"`(エンジンの構成判断まで見たいなら `"info"`)を設定して再起動してください。行はサーバプロセスの stdout に `Genie:  <ms> [ LEVEL ] ...` として出ます(Python の logging ではなく SDK 自身が書きます)。 |
 
 ## 制約事項
 
-- **本サーバは素のライブラリでのスロット恒久故障を防ぎません**。検知も自動復旧もせず、モデルが再ロードされるまでそのスロットは失敗し続けます。回避はサーバの設定ではなくデプロイ側の選択です — [QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照。
+- **本サーバは QAIRT 2.49.x / 2.50.x の素のライブラリでのスロット恒久故障を防ぎません**。検知も自動復旧もせず、モデルが再ロードされるまでそのスロットは失敗し続けます。回避はサーバの設定ではなくデプロイ側の選択です。2.51.0 かパッチ版のライブラリを使ってください — [QAIRT バージョン別の問題点](./QAIRT_VERSIONS.ja.md)を参照。
 - 1スロット = 1 `GenieDialog` ハンドルの直列処理。同時に処理できる推論は「スロット数」件まで(単一スロット構成では1件のみ)。さらに**実際に重なる本数はその下のNSPコア数で頭打ち**になります([コアより多いスロットは何も生まない](#コアより多いスロットは何も生まない))。
 - **SDK の継続バッチングはバンドルの設定からは有効にできず、しかも黙って失敗します。** `genie_config.json` の `dialog.engine.batching` に `max-slots` を 1 より大きい値で書いても、サーバは正常に起動しますが**設定は効きません** — エンジンはスケジューラのスロットを1つと報告したままで、同時実行数も変わりません(QAIRT 2.49.40 / 2.50.0 の実機で確認)。同じオブジェクトを1階層下の `engine.backend.QnnHtp` に置くともっと悪く、`Unknown QnnHtp config key: batching` で**起動そのものが失敗**します。どちらの置き方でも継続バッチングは得られないので、**このサーバの同時実行を制御する手段はスロット数だけ**だと考えてください。(どちらが起きたかは `GENIE_LOG_LEVEL: "info"` で見分けられます — 受理されて無視された場合、エンジンのスケジューラの行は1スロットのままです。)
 - `n > 1`(1リクエストで複数補完)は非対応。
@@ -1857,8 +1905,8 @@ APIを残してあるのは、コストが無く、答えがターゲットご�
 - `--workers` を1より大きくして起動しないこと(各スロットのグローバルなNPUハンドル状態が壊れます)。
 - `POST /v1/models/switch` は既定で旧モデルを解放してから新モデルをロードするため、ロードに失敗するとそのスロットは完全に未ロード状態になることがあり、以降そのスロットに触れる全エンドポイントが次のswitch成功まで`503`を返します。`"unload_first": false` は新旧を同時にHTPデバイスへ載せることで旧モデルをフォールバックとして残せますが、**SA8255Pボードではこの同時常駐は当てになりません** — 36回のスワップを実測した結果、成否はどのモデルの組み合わせかでは決まらず(同じ組み合わせがあるときは6/6、別のときは0/8)、デバイスのメモリに余裕があり、かつ自分たちのスワップをそこでテスト済みの場合にのみ使う価値があります。エンドポイント自身の説明を参照。
 - 2つのスロットが同じ`active_model_id`(モデルディレクトリ名)を持つ場合、`model`フィールドによる自動ルーティングは`slots`配列内で後にあるスロットを優先します。`/v1/completions`/`/v1/chat/completions`のbodyに明示的に`"slot": "<名前>"`を指定すればそのスロットを直接指定できます(`model`によるルーティングより優先)。他にもスロット名を直接使うAPI(`/v1/models/switch`の`slot`、`/v1/server/idle`の`?slot=`)があります。
-- **素の 2.49.x / 2.50.x ライブラリでは、`dialog.type` が `ssd-q1`(投機デコード)のバンドルにパッチ版が要ります。** 本サーバは毎クエリ前にリセットしますが、どちらの素のビルドでもこの種のダイアログがそれに耐えないためです。同じ理由で LoRA も使えません。これは投機デコードバンドル一般の制約ではなく **2.49 の回帰**で、2.48.40.260702 では正しく動きますし、以後の SDK で直る可能性もあります(ただし 2.50.0.260828 では直っていません)。症状・原因・手元の SDK のソースで1分で確かめる方法・パッチを当てられない場合の対処は [D5](./QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す) にあります。
-- Grammar制約([該当セクション](#grammar制約デコーディング))はモデル/スロット単位で固定であり、`response_format`のようなリクエスト単位の切り替えには対応していません(Genie SDKの公開APIに実行時変更手段が無いため)。
+- **素の 2.49.x / 2.50.x ライブラリでは、`dialog.type` が `ssd-q1`(投機デコード)のバンドルにパッチ版が要ります。** 本サーバは毎クエリ前にリセットしますが、どちらの素のビルドでもこの種のダイアログがそれに耐えないためです。同じ理由で LoRA も使えません。これは投機デコードバンドル一般の制約ではなく **2.49 の回帰**で、2.48.40.260702 では正しく動き、2.50.0.260828 では直っておらず、2.51.0.260929 ではソース上で直っています(実機では未確認)。症状・原因・手元の SDK のソースで1分で確かめる方法・パッチを当てられない場合の対処は [D5](./QAIRT_VERSIONS.ja.md#d5--リセットが投機デコードのダイアログを壊す) にあります。
+- リクエスト単位の grammar(`response_format`、`structured_outputs`)には QAIRT 2.51.0 以降と grammar のバックエンドが入ったライブラリが要ります。2.51.0 より前は grammar はモデル単位で固定です。grammar の切り替えには 1 回あたり約 0.26 秒かかり、`structural_tag` と空白のオプションには対応していません([Grammar制約デコーディング](#grammar制約デコーディング))。
 - VLM([該当セクション](#vlmマルチモーダル対応))は単発リクエストのみ(会話履歴なし)。リクエスト側の`max_tokens`/`stop`は無視され、生成長は代わりにスロット単位の`VLM_SLOTS[].max_tokens`で制限されます。クライアントが切断しても実行は止まりません — `GenieNode`/`GeniePipeline`にabort呼び出しが無いため、応答が終わるまでスロットは占有され、次のリクエストは待たされます。ストリーミングは動作し、非ストリーミングと同じテキストを返します。LoRA・Prefix KVキャッシュ・grammar制約・`/v1/models/switch`はVLMスロットには非対応です。
 - **メッセージの content はエスケープしません。** メッセージに書いたターンの区切り(`<|im_end|>`、`<|start_header_id|>` など)はそのままプロンプトに入り、トークナイザはそれを特殊トークンとして読むので、呼び出し側は自分のターンを閉じて別のロールのターンを書けます。計測器として意図したもので(vLLM も同じ)、自分で書いていないテキストの無害化は呼び出し側の役目です。[SECURITY.md](../SECURITY.ja.md) を参照。
 - 未知の `model` 名はプライマリのスロットに回すので、`lm_eval` の固定のプレースホルダは設定なしで動きます。typo も同じく回ってしまうので、`genie-local` 以外で、ロード中のどのモデルにも一致しない名前は、ロード中のモデルの一覧とともに WARNING で 1 回だけログに出します。画像付きリクエストが最初の VLM スロットに回る場合も同じです(ロード中のテキストモデルの名前はそこでは想定内なので出しません)。256 種類を超えたらそのことを 1 回だけ出し、以後は名前を覚えません。

@@ -14,34 +14,41 @@ model, read this page first.
 - [D2 — reset does not rewind the KV position allocator](#d2--reset-does-not-rewind-the-kv-position-allocator)
 - [D3 — a library you rebuild has no grammar](#d3--a-library-you-rebuild-has-no-grammar)
 - [D4 — grammar leaks the terminal token into the text](#d4--grammar-leaks-the-terminal-token-into-the-text)
+- [D5 — reset corrupts a speculative-decoding dialog](#d5--reset-corrupts-a-speculative-decoding-dialog)
+- [D6 — save and restore break a sliding-window cache group](#d6--save-and-restore-break-a-sliding-window-cache-group)
 - [Checking your own SDK](#checking-your-own-sdk)
 - [Choosing a library](#choosing-a-library)
 - [What 2.49.1 changed](#what-2491-changed)
 - [What 2.50.0 changed](#what-2500-changed)
+- [What 2.51.0 changed](#what-2510-changed)
 - [What we have and have not tested](#what-we-have-and-have-not-tested)
 
 ## At a glance
 
-| | 2.48.40.260702 | 2.49.40.260810 | 2.49.1.260821 | 2.50.0.260828 |
-|---|---|---|---|---|
-| **D1** slot wedge — KV occupancy is never rewound | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) |
-| **D2** reset does not rewind the KV position allocator | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) |
-| **D3** a rebuilt library has no grammar backend | **present** | **present** | **present** (measured) | **present** (source-identical) |
-| **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested | **present** (measured) |
-| **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) | **present** (measured) |
+| | 2.48.40.260702 | 2.49.40.260810 | 2.49.1.260821 | 2.50.0.260828 | 2.51.0.260929 |
+|---|---|---|---|---|---|
+| **D1** slot wedge — KV occupancy is never rewound | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (measured) |
+| **D2** reset does not rewind the KV position allocator | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (measured) |
+| **D3** a rebuilt library has no grammar backend | **present** | **present** | **present** (measured) | **present** (source-identical) | **present** (measured) |
+| **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested | **present** (measured) | **present** (measured) |
+| **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (source argument) |
+| **D6** save/restore breaks a sliding-window cache group | not tested | **present** (measured) | not tested | **present** (source-identical) | **present** (measured) |
 
 > [!WARNING]
 > **`2.49.1.260821` is newer than `2.49.40.260810`, despite the smaller number.**
 > Compare the `build_id` in `sdk.yaml`: `260821…` (21 Aug) against `260810…`
 > (10 Aug). Sorting these version strings will mislead you.
 
-**Nothing on this list is fixed by any SDK we have tested** — which is 2.48
-through 2.50.0, and says nothing about what comes after. D1, D2 and D5 are the
-reason this project rebuilds `libGenie.so`; D3 is the cost of doing so. Each
-section below says how to check a build we have not seen.
+**2.51.0.260929 fixes the three reset defects (D1, D2, D5)**, which every 2.49.x
+and 2.50.x build we tested carries. On 2.51.0 a stock library no longer wedges a
+slot, so it is the first build since 2.48 on which a stock library is a
+reasonable default. D3, D4 and D6 are still there. D1, D2 and D5 are why this
+project rebuilt `libGenie.so` for 2.49.x and 2.50.x; D3 is the cost of doing
+so. Each section below says how to check a build we have not seen. See
+[What 2.51.0 changed](#what-2510-changed).
 
 > [!NOTE]
-> **2.50.0.260828 is a large release that leaves all five in place.** Its Genie
+> **2.50.0.260828 is a large release that leaves every one of them in place.** Its Genie
 > sources differ from 2.49.40.260810 in 78 files, and its public C API headers
 > are byte-identical — so it is a drop-in swap that changes none of this. It
 > does fix one thing this server used to work around; see
@@ -65,10 +72,17 @@ section below says how to check a build we have not seen.
   the D1/D2 reproducers on 2.49.1. **2.50.0.260828 is not on this footing**:
   D1, D2, D4 and D5 were re-run on hardware there. Only its D3 rests on
   sources — `qualla/grammar.hpp` is identical and that build still ships no
-  file defining the backend it declares.
+  file defining the backend it declares. **2.51.0.260929**: D1, D2, D3, D4 and
+  D6 were measured on hardware, D1 and D2 on both a multi-context and a
+  single-context bundle. D5 rests on sources: no `ssd-q1` bundle was on the
+  board.
 - **not reproduced** — the reproducer was run and did not trigger. This is
   weaker than "absent": it means that sequence is safe on that build, not that
   no sequence is.
+- **fixed** — present in the build before, and the cause is gone: the code
+  that produced it was changed. "(measured)" adds that the reproducer no
+  longer triggers on hardware; "(source argument)" means only the sources were
+  read.
 - **not present (source argument)** — the code that produces the defect does
   not exist in that build. Also reasoning from the shipped sources rather than
   a hardware run, and it says nothing about defects we have not looked for.
@@ -86,7 +100,7 @@ the reset path do the same thing as each other.
 ## D1 — a stock library wedges a slot
 
 > [!WARNING]
-> On a stock 2.49.x library, a request whose **prompt + generated** tokens cross
+> On a stock 2.49.x or 2.50.x library, a request whose **prompt + generated** tokens cross
 > the cache budget permanently breaks its slot. The crossing request itself
 > returns normally; every request after it — including trivial ones — fails with
 > `GenieDialog_query failed [...]: -1` and `batch dispatch failed` in the log,
@@ -154,7 +168,7 @@ against a `[4096]` bundle is an ordinary summarisation request, it passes the
 obvious `prompt_tokens <= context.size` check, and it kills the slot.
 
 > [!WARNING]
-> **On a stock 2.49.x library there is no configuration that is safe by
+> **On a stock 2.49.x or 2.50.x library there is no configuration that is safe by
 > construction.** Exporting at a single context length still leaves you needing
 > to cap `prompt_tokens + max_tokens` at `context_length − AR_N` yourself.
 > **open-genie-server does not do this for you**: its context check looks at the
@@ -169,7 +183,9 @@ again, the switch back is refused as over budget, and — because that refusal's
 return value is discarded — the engine proceeds with mismatched graph tensors
 and fails as the generic `batch dispatch failed`.
 
-Reported to Qualcomm with a standalone reproducer.
+Reported to Qualcomm with a standalone reproducer. **Fixed in 2.51.0.260929**:
+the reproducers no longer trigger on a stock 2.51.0, on a multi-context bundle
+or a single-context one, and the reset path now rewinds the cache group.
 
 ## D2 — reset does not rewind the KV position allocator
 
@@ -192,12 +208,13 @@ engine rejects the batch. Same-length requests never expose it; you need
 Fixing D1 alone does not fix this — it only changes the symptom from D1's `-1`
 to this warning.
 
-Reported to Qualcomm together with D1.
+Reported to Qualcomm together with D1. **Fixed in 2.51.0.260929** (measured):
+the long → short → long reproducer no longer triggers.
 
 ## D3 — a library you rebuild has no grammar
 
-**This one is not version-specific.** It is the same in 2.48.40.260702,
-2.49.40.260810 and 2.49.1.260821.
+**This one is not version-specific.** It is the same in every build we have
+looked at, 2.48.40.260702 through 2.51.0.260929.
 
 The XGrammar backend is **not part of the SDK's source drop**:
 `GrammarBackend::create` is declared in `qualla/grammar.hpp` and defined in no
@@ -216,18 +233,35 @@ Check any library:
 
 ```sh
 strings libGenie.so | grep -ci xgrammar
-#  96  -> stock (grammar available)
-#   2  -> rebuilt (grammar compiled out)
+#  96  -> stock 2.48.x-2.50.x (grammar available); 97 on stock 2.51.0
+#  1-2 -> rebuilt (grammar compiled out)
 ```
 
-Verified on all three SDKs above: no grammar implementation file, no
-`ENABLE_GRAMMAR` in the build files, and 96 in every shipped `.so`.
+Verified on 2.48.40 through 2.50.0: no grammar implementation file, no
+`ENABLE_GRAMMAR` in the build files, and 96 in every shipped `.so`. 2.51.0 is
+the same, with 97.
 
-**So fixing D1/D2 is a trade-off, not a free upgrade**: the stock library has
-grammar and the reset defects; a rebuilt one fixes the defects and loses
-grammar. **There is no combination that keeps grammar *and* a slot that cannot
-wedge.** Raised with Qualcomm, asking for the backend to be included in the
-source drop.
+**The per-request grammar API added in 2.51.0 is also missing from a rebuilt
+library.** `GenieDialog_setGrammar` is exported, but a rebuilt library fails
+every call to it. This server detects that when it loads a model and refuses
+`response_format` / `structured_outputs` on that slot with a `400`
+`grammar_not_supported` (see
+[MANUAL § Grammar-Constrained Decoding](./MANUAL.md#grammar-constrained-decoding)).
+Measured on two rebuilt 2.51.0 libraries.
+
+**On 2.49.x and 2.50.x, fixing D1/D2 is therefore a trade-off, not a free
+upgrade**: the stock library has grammar and the reset defects; a rebuilt one
+fixes the defects and loses grammar. On those builds **there is no SDK-supplied
+combination that keeps grammar *and* a slot that cannot wedge.** On 2.51.0 the
+stock library has both, so the trade-off is gone unless you rebuild for D6.
+Raised with Qualcomm, asking for the backend to be included in the source drop.
+
+**The backend can be supplied yourself.** XGrammar is an open-source project
+(Apache-2.0). Implementing the declared `GrammarBackend::create` on top of the
+upstream library and building with `ENABLE_GRAMMAR` defined gives a rebuilt
+library grammar: both the bundle's own grammar and the per-request API. We
+have done this for 2.51.0 and checked it on hardware with this server. Such a
+library can also carry the fix for D4. The patch is not shipped here.
 
 ## D4 — grammar leaks the terminal token into the text
 
@@ -237,8 +271,15 @@ ends with the model's end-of-sequence token as literal text** (`<|im_end|>` for
 a ChatML model). The server does not strip it. See
 [MANUAL § Grammar-Constrained Decoding](./MANUAL.md#grammar-constrained-decoding).
 
-Measured on 2.49.40.260810 and 2.50.0.260828 — the same five of the eight
-grammar checks fail the same way on both. Not tested on the other builds.
+Measured on 2.49.40.260810, 2.50.0.260828 and 2.51.0.260929 — the same five of
+the eight grammar checks fail the same way on all three. On 2.51.0 the
+per-request grammar (`response_format`, `structured_outputs`) leaks the same
+token. Not tested on the other builds.
+
+The cause is one branch of the SDK's basic dialog: when the grammar says the
+output is complete, it hands the terminating token to the token callback as
+text. A library rebuilt with that branch changed to pass no tokens stops the
+leak; measured on hardware with all three grammar kinds.
 
 ## D5 — reset corrupts a speculative-decoding dialog
 
@@ -286,13 +327,30 @@ byte-identical. **2.48.40.260702 cannot have it** — the slot calls this is abo
 arrived with 2.49's scheduler, so there the constructor and `reset()` already do
 the same thing as each other. **2.50.0.260828 does not fix it** — its
 `ssd-q1.cpp` is byte-identical to 2.49.40.260810's, and the reproducer still
-triggers there. **A later SDK may**, and the check
-takes a minute on the sources the SDK ships: open
+triggers there. **2.51.0.260929 fixes it in its sources**: `reset()` now
+prepares the slot and calls `initSlotFromRestore()`, the same change as our
+patch. We have not run it on hardware, for lack of an `ssd-q1` bundle on the
+board. The check takes a minute on the sources the SDK ships: open
 `examples/Genie/Genie/src/qualla/dialogs/ssd-q1.cpp` and compare
 `SelfSpecDecDialog::reset()` against `SelfSpecDecDialog::completeInit()`. If
 `completeInit()` prepares the slot and calls `initSlotFromRestore()` around the
 prefix restore and `reset()` does not, the defect is there. If both do, or
 neither does, it is not.
+
+## D6 — save and restore break a sliding-window cache group
+
+Applies to bundles with a sliding-window cache group, which Gemma 4 has, and to
+anything that calls `GenieDialog_save` / `GenieDialog_restore` on them — in this
+server, the [prefix KV cache](./MANUAL.md#prefix-kv-cache). A restored prefix
+longer than the group's budget (about 640 tokens on the Gemma 4 E2B bundle we
+measured) gives wrong output, and a longer one kills the process. Symptom,
+measurements and what to do are in
+[Platform Notes](./PLATFORM_NOTES.md#prefix-cache-on-a-sliding-window-bundle-gemma-4).
+
+Measured on stock 2.49.40.260810 and stock 2.51.0.260929 with the same result:
+a 700-token prefix restores to different output, a 1540-token one segfaults.
+2.50.0.260828 has the same code. Reported to Qualcomm with a patch; not fixed in
+2.51.0.
 
 ## Checking your own SDK
 
@@ -325,7 +383,30 @@ If the second call fails, your SDK has D1. Reload the slot to recover:
 
 ## Choosing a library
 
-### Option 1 — run a fixed `libGenie.so` (recommended, unless you need grammar)
+### On 2.51.0 — the stock library is a reasonable default
+
+A stock 2.51.0 library has none of the reset defects (D1, D2, D5) and has
+grammar, including the per-request API. What it still carries:
+
+- **D4**: constrained output ends with the terminal token as text. Strip it in
+  the client, or rebuild with the fix.
+- **D6**: on a sliding-window bundle (Gemma 4), keep a warmed system prompt
+  under about 600 tokens, or do not warm that model up.
+- **A swallowed error** (change 2 below): when the SDK fails to switch graph
+  variant it carries on and reports `batch dispatch failed` instead of the real
+  reason. Harmless while D1 is gone, but it makes an engine failure hard to
+  read.
+- **The extra BOS on a prefix-cache hit** on a LUT-embedding bundle — see the
+  note in [MANUAL § Prefix KV Cache](./MANUAL.md#prefix-kv-cache).
+
+A rebuilt 2.51.0 library is worth it only for those. Rebuilding drops grammar
+unless you also supply the backend ([D3](#d3--a-library-you-rebuild-has-no-grammar)).
+If you rebuild, note that 2.51.0's OE makefile misses even more source
+directories than 2.50.0's (see [What 2.51.0 changed](#what-2510-changed)).
+
+The rest of this section is for 2.49.x and 2.50.x.
+
+### Option 1 — run a fixed `libGenie.so` (recommended on 2.49.x / 2.50.x, unless you need grammar)
 
 The SDK ships the complete, buildable reference sources for the Genie library
 under `examples/Genie/Genie/`, with makefiles for OE/Android/x86 (see the SDK's
@@ -354,7 +435,8 @@ point at must also contain the rest of the QAIRT runtime libraries (symlinks are
 fine).
 
 **Cost: you lose grammar-constrained decoding**
-([D3](#d3--a-library-you-rebuild-has-no-grammar)).
+([D3](#d3--a-library-you-rebuild-has-no-grammar)), unless you also supply the
+grammar backend.
 
 ### Option 2 — stay under the budget
 
@@ -406,7 +488,7 @@ its window size collapses to one token per prefill fire.
 
 ## What 2.50.0 changed
 
-A much bigger release than 2.49.1, and it still carries all five defects above.
+A much bigger release than 2.49.1, and it still carries D1 to D6.
 
 **It is a drop-in swap.** The public C API headers are byte-identical to
 2.49.40.260810's, and the shipped `libGenie.so` exports the identical 118
@@ -465,11 +547,67 @@ ordering in `qualla/dialog.cpp`, `KVManager::clearSlotPositions()`,
   filling those in** if you hand-write a sampler block.
 
 **If you rebuild the library** for D1/D2/D5, the three changes described under
-[Choosing a library](#option-1--run-a-fixed-libgenieso-recommended-unless-you-need-grammar)
+[Choosing a library](#option-1--run-a-fixed-libgenieso-recommended-on-249x--250x-unless-you-need-grammar)
 apply to 2.50.0's sources unchanged. One extra step: the shipped OE makefile is
 byte-identical to 2.49.40's, so it still misses several source directories, and
 it has **no entry at all for the new `src/qualla/embeddings/`** — add one, or
 `EmbeddingTable.cpp` will not be linked in. We have not built 2.50.0.
+
+## What 2.51.0 changed
+
+**It fixes the three reset defects.** D1, D2 and D5 are gone from 2.51.0.260929.
+For D1 and D2 this is measured: the reproducers do not trigger on a stock
+2.51.0, on a multi-context bundle or a single-context one. For D5 it rests on
+the sources (see [D5](#d5--reset-corrupts-a-speculative-decoding-dialog)).
+
+**It also fixes the VLM pipeline's context overrun.** On 2.49.x and 2.50.x, a
+VLM request whose prompt passes the context wedges the slot, and a request far
+past it kills the process (see
+[MANUAL § Limiting visual input](./MANUAL.md#limiting-visual-input)). On a stock
+2.51.0, a standalone reproducer with the same Qwen3-VL-4B bundle gets status 4
+(`GENIE_STATUS_WARNING_CONTEXT_EXCEEDED`) for the overrun, the pipeline answers
+normally after a reset, and 17 frames no longer kill the process. We have not
+yet measured this through this server.
+
+**It is a drop-in swap for this server.** Genie's C API moves from 1.20.0 to
+1.21.0: ten functions are added and none removed, and the stock library's
+`Genie*` exports go from 118 to 128. Bundles exported with 2.49.40 load and run
+on the 2.51.0 runtime without re-export. This server's integration suite on a
+stock 2.51.0 gave the same verdicts as on 2.49.40: all green on a Qwen3-1.7B
+bundle, and the usual single known failure on a Gemma 4 E2B text bundle.
+
+**What it adds that this server uses:**
+
+- `GenieDialog_setGrammar` replaces a dialog's grammar without recreating it.
+  The server maps `response_format` and `structured_outputs` onto it; see
+  [MANUAL § Grammar-Constrained Decoding](./MANUAL.md#grammar-constrained-decoding).
+  The server logs the Genie API version at startup.
+
+**What it adds that this server does not use yet:**
+
+- `GenieNode_setValue` with `GENIE_NODE_PARAM_TEXT_GENERATOR_MAX_NUM_TOKENS`
+  sets a VLM text generator's token limit per execution. VLM slots still use
+  `VLM_SLOTS[].max_tokens` for the whole slot; there is still no abort and no
+  stop sequence on that path.
+- Per-stage performance policies (prefill / decode), and a count of the tokens
+  the last query generated.
+
+**One behaviour change.** A `SENTENCE_BEGIN` or `SENTENCE_CONTINUE` query now
+only prefills. Up to 2.50 it sampled one token as well. The prefix-cache warmup
+uses `SENTENCE_BEGIN`; on hardware, with a library rebuilt for D6, hits matched
+misses at least as often as on 2.49.40.
+
+**What it does not fix:** D3, D4, D6, the extra BOS on a LUT-embedding bundle's
+prefix-cache hit, and the swallowed graph-variant error (change 2 of
+[Option 1](#option-1--run-a-fixed-libgenieso-recommended-on-249x--250x-unless-you-need-grammar)).
+The reset now also clears the whole KV buffer, which costs a little time per
+request; we have not measured how much on 2.51.0.
+
+**If you rebuild the library**: the shipped OE makefile misses the four source
+directories 2.50.0's did, plus five that are new in 2.51.0 (the config manager,
+the JSON schema validator and three engine directories). Add the same set
+`make/Android.mk` lists. The library links without them, because the shared
+object is not linked with `--no-undefined`, and fails at `dlopen` on the board.
 
 ## What we have and have not tested
 
@@ -478,11 +616,15 @@ it has **no entry at all for the new `src/qualla/embeddings/`** — add one, or
 and one Gemma-family bundle, on 2.49.40.260810 (extensively), 2.49.1.260821
 (integration suite, generation probes, a benchmark subset) and 2.50.0.260828
 (the D1/D2/D4/D5 reproducers with a stock 2.49.40 run as a control, the
-integration suite, and the grammar checks).
+integration suite, and the grammar checks), and 2.51.0.260929 (the D1/D2/D4/D6
+reproducers, the VLM overrun reproducer, the integration suite on stock and
+rebuilt libraries, the grammar checks, and the per-request grammar through this
+server on four libraries).
 
 **Not tested:** every other SoC, ABI and model family. The D1/D2 reproducers on
-2.49.1. D4 on 2.48.40.260702 or 2.49.1.260821. A rebuilt 2.50.0 library. Any SDK
-older than 2.48.40.260702 or newer than 2.50.0.260828.
+2.49.1. D4 on 2.48.40.260702 or 2.49.1.260821. D5 on 2.51.0. A rebuilt 2.50.0
+library. 2.50.40. Any SDK older than 2.48.40.260702 or newer than
+2.51.0.260929.
 
 **Treat an untested SDK build as suspect** and run
 [the check](#checking-your-own-sdk) against it.

@@ -164,9 +164,10 @@ def _parse_gen_params(body: dict, allow_stop: bool = True) -> GenParams:
 # tool_choice values this server can honor. "auto" (and an absent field)
 # means "inject the tools and let the model decide"; "none" suppresses the
 # injection. OpenAI's "required" and the {"type":"function", ...} form both
-# *guarantee* a call, which needs constrained decoding we do not implement —
-# so they are rejected rather than silently degraded to "auto", which would
-# hand the caller ordinary prose where their code expects tool_calls.
+# *guarantee* a call, which this server does not force (it does not turn
+# `tools` into a grammar) — so they are rejected rather than silently degraded
+# to "auto", which would hand the caller ordinary prose where their code
+# expects tool_calls.
 _SUPPORTED_TOOL_CHOICE = (None, "auto", "none")
 
 
@@ -185,7 +186,7 @@ def _reject_unsupported(body: dict, endpoint: str) -> None:
                 'tool_choice supports only "auto" and "none" on this server. '
                 + (f'Forcing a specific function ({named!r}) ' if named
                    else f'{choice!r} ')
-                + "requires constrained decoding, which is not implemented; "
+                + "requires forcing a tool call, which this server does not do; "
                   'use "auto" and check whether the model returned '
                   "tool_calls.", "tool_choice")
     if endpoint == "completions" and body.get("suffix"):

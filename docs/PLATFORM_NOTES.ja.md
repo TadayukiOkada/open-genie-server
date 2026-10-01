@@ -25,7 +25,7 @@
 | システムの Python | 3.10.14、pip なし |
 | 使用している Hexagon NSP コア | **2**(`/dsp/image/dsp/cdsp0` と `cdsp1`。`device_id` の 0 と 1 で指定) |
 | サブシステムリスタート(SSR) | **使えません。** ゲスト内では `/sys/class/remoteproc` が空なので、固まった cDSP の復旧はサブシステムの再起動ではなく**ボードの電源サイクル**になります |
-| QAIRT | 2.49.40.260810・2.49.1.260821・2.50.0.260828、`aarch64-oe-linux-gcc11.2` |
+| QAIRT | 2.49.40.260810・2.49.1.260821・2.50.0.260828・2.51.0.260929、`aarch64-oe-linux-gcc11.2` |
 | モデルバンドル | Qwen3 w4a16 のコンテキストバイナリ(0.6B / 1.7B / 4B / VL-4B)、Gemma-4 E2B |
 
 同じボード上の Android ゲストがもう1つの参考点です: RAM **6.0 GiB**、CPU 8、
@@ -280,7 +280,7 @@ GenieX形式のマルチモーダルエクスポート(執筆時点でGemma 4 E4
 ## スライディングウィンドウのバンドル(Gemma 4)での prefix cache
 
 prefix KV キャッシュ([prefix KV キャッシュ](./MANUAL.ja.md#prefix-kvキャッシュ))は
-`GenieDialog_save` / `GenieDialog_restore` で KV の状態を保存・復元します。QAIRT 2.49.40 の stock の
+`GenieDialog_save` / `GenieDialog_restore` で KV の状態を保存・復元します。QAIRT 2.49.40〜2.51.0 の stock の
 libGenie では、この組が**スライディングウィンドウの cache group** を持つバンドルで正しく動きません。
 Gemma 4 がそれに当たります(`swa_` group。窓 512、グラフのコンテキスト 768)。この group が持てるのは
 `グラフのコンテキスト − AR 長` までで、ここで測った Gemma 4 E2B のバンドルでは AR-128 の prefill グラフで
@@ -295,7 +295,7 @@ SA8255P で `gemma4_e2b_it_qat`(コンテキスト 4096、AR-128 + AR-1)を gree
 | 約 650 トークン以上 | 復元した対話の出力が違う(709 トークンでは答えずに prompt の表の頭から繰り返した) |
 | 約 1500 トークン | キャッシュに当たった最初のリクエストで、サーバのプロセスが SIGSEGV で落ちる |
 
-境目は 631 と 649 トークンの間で、group の予算と一致します。欠陥は SDK 側(QAIRT 2.50.0 にも同じコードがあります)で、
+境目は 631 と 649 トークンの間で、group の予算と一致します。欠陥は SDK 側(QAIRT 2.50.0 にも同じコードがあり、stock の 2.51.0 でも単体の再現プログラムで同じ結果 — 700 トークンで出力が変わり、1540 トークンで SIGSEGV — になります)で、
 `GenieDialog_save` / `GenieDialog_restore` を使うクライアントすべてに当たり、このサーバに固有ではありません。
 
 **どうするか。** stock の SDK では、ウォームアップする Gemma 4 の system prompt を約 600 トークン未満に

@@ -27,7 +27,7 @@ properties of the SoC, and how to find out what yours does instead.
 | System Python | 3.10.14, without pip |
 | Hexagon NSP cores in use | **2** — `/dsp/image/dsp/cdsp0` and `cdsp1`, addressed as `device_id` 0 and 1 |
 | Subsystem restart (SSR) | **Not available.** `/sys/class/remoteproc` is empty inside the guest, so a wedged cDSP is recovered by power-cycling the board, not by restarting the subsystem |
-| QAIRT | 2.49.40.260810, 2.49.1.260821 and 2.50.0.260828, `aarch64-oe-linux-gcc11.2` |
+| QAIRT | 2.49.40.260810, 2.49.1.260821, 2.50.0.260828 and 2.51.0.260929, `aarch64-oe-linux-gcc11.2` |
 | Model bundles | Qwen3 w4a16 context binaries (0.6B, 1.7B, 4B, VL-4B), Gemma-4 E2B |
 
 The Android guest on the same board is a second data point: **6.0 GiB** of RAM,
@@ -312,7 +312,7 @@ is built on — which is out of scope for now.
 
 The prefix KV cache ([Prefix KV Cache](./MANUAL.md#prefix-kv-cache)) saves and restores the KV
 state with `GenieDialog_save` / `GenieDialog_restore`. On the stock libGenie of QAIRT 2.49.40
-that pair does not work for a bundle with a **sliding-window cache group**, which Gemma 4 has
+through 2.51.0 that pair does not work for a bundle with a **sliding-window cache group**, which Gemma 4 has
 (the `swa_` group: window 512, graph context 768). The group holds at most
 `graph context - AR length` entries — **640** with the AR-128 prefill graph on the Gemma 4 E2B
 bundle measured here — and the SDK saves and restores it as if it were the full-length group.
@@ -327,7 +327,8 @@ a restored dialog with the same two-step run that did not save and restore:
 | about 1500 tokens | the server process dies with SIGSEGV on the first request that hits the cache |
 
 The boundary lies between 631 and 649 tokens, i.e. the group's budget. The defect is in the SDK
-(the same code is in QAIRT 2.50.0), and it applies to any client of `GenieDialog_save` /
+(the same code is in QAIRT 2.50.0; on a stock 2.51.0 a standalone reproducer gives the same
+result, different output at 700 tokens and SIGSEGV at 1540), and it applies to any client of `GenieDialog_save` /
 `GenieDialog_restore`, not to this server in particular.
 
 **What to do.** With the stock SDK keep a Gemma 4 system prompt that you warm up under about 600

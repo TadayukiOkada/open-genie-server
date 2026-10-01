@@ -21,9 +21,15 @@ A pair of `genie_config.json` (with `dialog.context.grammar` set) and `grammar_s
 
 ## Notes
 
-- `dialog.context.grammar` is fixed per slot/model (see "Grammar-constrained
+- `dialog.context.grammar` is the slot's default (see "Grammar-constrained
   decoding" in docs/MANUAL.md). Every request to this slot is constrained by this
-  same schema.
+  schema unless it brings its own grammar in `response_format` or
+  `structured_outputs`, which needs QAIRT 2.51.0 or later. The next request
+  without one gets this schema back. Before 2.51.0 the schema is fixed per model.
+- You do not need this example for a per-request grammar: on QAIRT 2.51.0 any
+  bundle takes one, with a `libGenie.so` that has the grammar backend.
+- On a stock library the response ends with `<|im_end|>` as text, an SDK defect
+  the server does not hide (D4 in docs/QAIRT_VERSIONS.md).
 - `backend` must be `"xgrammar"`. `file` points at a plain text file containing
   the schema definition itself (`grammar_schema.txt`) — the filename is
   arbitrary and doesn't need a `.json` extension.

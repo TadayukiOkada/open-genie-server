@@ -899,8 +899,8 @@ def t_disconnect_aborts(ctx):
 
 # ------------------------------------------------------ grammar (G0x)
 #
-# Grammar-constrained decoding is fixed per model/slot (docs/MANUAL.md), so
-# each grammar kind is its own model directory, built by
+# These tests exercise the bundle's own grammar, which is set per model
+# (docs/MANUAL.md), so each grammar kind is its own model directory, built by
 # setup_grammar_models.py on the target. Every test switches the slot to the
 # directory it needs (and skips the switch if it is already loaded), so
 # --only G05 works on its own. G08 puts the base model back.

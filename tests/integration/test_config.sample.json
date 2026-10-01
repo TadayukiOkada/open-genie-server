@@ -25,7 +25,7 @@
   },
 
   "grammar": {
-    "_comment": "Grammar-constrained decoding (docs/MANUAL.md). Grammar is fixed per model, so each kind needs its own model directory: build them on the target with 'python3 setup_grammar_models.py --base <model bundle> --out /home/root/grammar_test'. Every G0x test switches the slot itself and G08 restores restore_model_dir.",
+    "_comment": "Grammar-constrained decoding (docs/MANUAL.md). These tests use the bundle's own grammar, which is set per model, so each kind needs its own model directory: build them on the target with 'python3 setup_grammar_models.py --base <model bundle> --out /home/root/grammar_test'. Every G0x test switches the slot itself and G08 restores restore_model_dir. Needs a libGenie.so with the grammar backend: the stock one, or a rebuilt one you added the backend to (docs/QAIRT_VERSIONS.md, D3).",
     "enabled": false,
     "slot": "",
     "unload_first": true,

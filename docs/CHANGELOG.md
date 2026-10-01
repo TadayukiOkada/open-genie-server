@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Per-request grammar: `response_format` and `structured_outputs`** (#49).
+  On QAIRT 2.51.0 and later a request can constrain its own output: OpenAI's
+  `response_format` (`json_schema`, `json_object`) or vLLM's
+  `structured_outputs` (`json`, `regex`, `choice`, `grammar`, `json_object`),
+  on `/v1/chat/completions` and `/v1/completions`. The server sets the grammar
+  with `GenieDialog_setGrammar` before the query; a request without one gets
+  the bundle's grammar back, or none.
+  - Whether a slot can take one is decided when its model loads. It is
+    reported in the startup log and in `GET /v1/server/status`
+    (`slots[].grammar`). The startup log also prints the Genie API version.
+  - A request the server cannot honour is a `400`, never an unconstrained
+    answer: a slot that cannot set a grammar (`grammar_not_supported`), an
+    image or video request, `structural_tag`, compiler options the SDK cannot
+    take, vLLM's removed `guided_*` fields, and a grammar the SDK cannot
+    compile.
+  - Measured on SA8255P with QAIRT 2.51.0 and a Qwen3-0.6B bundle: each switch
+    to a different grammar costs about 0.26 s. See
+    [MANUAL § Grammar-Constrained Decoding](MANUAL.md#grammar-constrained-decoding).
+
+### Changed
+
+- **`response_format` is no longer accepted and ignored.** Before #49 a request
+  with `response_format` was answered unconstrained. It is now applied, or
+  refused with a `400` on a slot that cannot apply it (any QAIRT before 2.51.0,
+  or a library without the grammar backend). A client that sent it and ignored
+  the result gets a `400` on those slots.
+- The `400` for `tool_choice: "required"` now says the server does not force a
+  tool call, rather than that constrained decoding is not implemented.
+
+### Documentation
+
+- **QAIRT 2.51.0.260929.** It fixes the three reset defects (D1, D2, D5) that
+  every 2.49.x and 2.50.x carries; the stock library is now a reasonable
+  default. D3 (a rebuilt library has no grammar), D4 (grammar leaks the
+  terminal token) and the sliding-window save/restore defect, now listed as
+  D6, remain. [QAIRT Version Issues](QAIRT_VERSIONS.md) has a 2.51.0 column,
+  a [What 2.51.0 changed](QAIRT_VERSIONS.md#what-2510-changed) section, and
+  advice per version in
+  [Choosing a library](QAIRT_VERSIONS.md#choosing-a-library). The sample
+  configs point at 2.51.0.
+- The grammar documentation describes the per-request API: MANUAL, API
+  (a new [Structured output](API.md#structured-output-response_format-structured_outputs)
+  section), the grammar example and the integration-test notes.
+- `GENIE_LIB_PATH` notes that `libQnnSystem.so` is loaded from the same
+  directory as `libGenie.so`.
+
 ## 1.5.0 — fixes from a repository-wide code review: safer defaults, strict input, and a readiness probe
 
 Almost everything in this release comes out of one code review
@@ -460,7 +510,7 @@ markers.
   bundle's text-encoder config is left as declared: libGenie then prepends it
   to every text segment, which is logged at startup and counted in `usage`,
   and the template writes no BOS of its own. See
-  [MANUAL.md](MANUAL.md#configuration-1).
+  [MANUAL.md](MANUAL.md#configuration).
 - **`GENIE_LOG_LEVEL`** (default `""`, off; `error`, `warn`, `info` or
   `verbose`). libGenie logs nothing unless a logger is bound to the config a
   handle was created from, so a failure inside the SDK used to leave nothing
