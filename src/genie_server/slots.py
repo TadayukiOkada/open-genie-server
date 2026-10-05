@@ -213,6 +213,18 @@ class Slot:
         token = self.dialog_cfg.get("context", {}).get("bos-token")
         return token if isinstance(token, int) and token >= 0 else None
 
+    @property
+    def saves_state(self) -> bool:
+        """Whether GenieDialog_save / restore carry the whole decoding state.
+        Not on a linear-attention bundle (engine.model."linear-attention",
+        Qwen3.5): its conv / recurrent states are neither saved with the KV
+        cache nor rewindable, so the prefix cache is off for it."""
+        engines = self.dialog_cfg.get("engine", {})
+        for engine in engines if isinstance(engines, list) else [engines]:
+            if isinstance(engine, dict) and (engine.get("model") or {}).get("linear-attention"):
+                return False
+        return True
+
     def count_prompt_tokens(self, text: str) -> int:
         """What the SDK prefills for this prompt: count_tokens plus the BOS it
         adds itself (sdk_bos_token)."""
@@ -516,7 +528,8 @@ class SlotManager:
                 f"device_id={slot.device_id if slot.device_id is not None else '(unpinned)'} "
                 f"template={slot.chat_template} "
                 f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token} "
-                f"grammar={_grammar_summary(slot)}")
+                f"grammar={_grammar_summary(slot)}"
+                + ("" if slot.saves_state else " prefix-cache=off (linear-attention state)"))
         self._by_name = {s.name: s for s in self.slots}
         self.reindex()
 

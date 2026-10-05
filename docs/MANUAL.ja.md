@@ -82,9 +82,9 @@ Qualcomm のスタックは1つのハードウェアに3通りの名前を付け
 |---|---|
 | `genie_server/config.py` | `env_config.json` のパース、プロセス環境変数の設定 |
 | `genie_server/capi.py` | GenieDialog C APIのctypesバインディング(`GenieLib`)+ SDK定数 |
-| `genie_server/templates.py` | チャットテンプレート描画(chatml/llama3/llama2/gemma/gemma4)、prefix分割、`/no_think` |
+| `genie_server/templates.py` | チャットテンプレート描画(chatml/qwen3_5/llama3/llama2/gemma/gemma4)、prefix分割、`/no_think` |
 | `genie_server/tools.py` | OpenAI `tools`(function calling)の Hermes 方言: プロンプト生成・出力パース・ストリーミングフィルタ |
-| `genie_server/tool_formats.py` | ツール呼び出し方言のレジストリ(Hermes / gemma4)と、スロットがどれを使うかの判定 |
+| `genie_server/tool_formats.py` | ツール呼び出し方言のレジストリ(Hermes / gemma4 / Qwen3.5 の XML)と、スロットがどれを使うかの判定 |
 | `genie_server/slots.py` | `Slot`/`SlotManager`: モデルロード、ルーティング、ホットスワップ |
 | `genie_server/prefix_cache.py` | ディスク上のKVキャッシュスナップショット |
 | `genie_server/engine.py` | 生成エンジン: ロック、ウォッチドッグ、SDKパラメータ、prefixキャッシュ、`finish_reason` |
@@ -694,8 +694,8 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `VLM_SLOTS` | 任意 | (未設定) | `TEXT_SLOTS`とは別系統・並列のマルチモーダル(`GenieNode`/`GeniePipeline`)スロット構成。`[{"name","device_id","model_root","spec","max_tokens"}, ...]`。`TEXT_SLOTS`の有無に関わらず独立して設定可能([VLM(マルチモーダル)対応](#vlmマルチモーダル対応)参照)。`max_tokens`はそのスロットの生成上限(既定`1024`、`0`で上限なし) — [生成トークン数の上限](#生成トークン数の上限)を参照。 |
 | `PREFIX_CACHE_DIR` | 任意 | `"./prefix_cache"` | prefix KVキャッシュ、およびHTP拡張設定コピー(`.htp_ext_cache/`)の保存先ディレクトリ。相対パスはサーバの作業ディレクトリ基準で解決されるため、起動ディレクトリが一定しない運用では絶対パスを設定しておくのが無難です。 |
 | `MODELS_BASE_DIR` | 任意 | (未設定) | **相対パス**で書かれたモデルパス全ての基準ディレクトリ。起動時の `TEXT_SLOTS`/`VLM_SLOTS` の `model_root` と、`POST /v1/models/switch` の `model_dir` の両方に適用される。**絶対パス**の場合はこの値を無視してそのまま使う。未設定時、相対パスはサーバの作業ディレクトリ基準で解決される。これを設定しておけば、設定ファイル中の各モデルをディレクトリ名だけで書ける。なお基準であって閉じ込め(sandbox)ではない — 絶対パスの `model_dir` は依然として配下の外からロードできる。 |
-| `CHAT_TEMPLATE` | 任意 | (未設定=自動判定) | チャットテンプレートを `"llama3"` / `"llama2"` / `"chatml"` / `"gemma"` / `"gemma4"` のいずれかに固定。全スロット共通の上書き。未設定時はスロットごとにモデルディレクトリ名から自動判定([該当節](#チャットテンプレートの選択ルール)参照)。 |
-| `TOOL_FORMAT` | 任意 | (未設定) | モデルが話すツール呼び出しの方言: `hermes`(`<tool_call>` タグ内の JSON。Qwen3 ほか手元の全モデル)か `gemma4`(`<\|tool_call>call:NAME{...}<tool_call\|>`。値は JSON ではなく gemma4 独自の記法)。**未設定ならスロットごとにチャットテンプレートから導出**します(バンドル名がテンプレート判定を誤らせる場合以外は、これで正しくなります)。方言は、宣言を system ターンにどう描画するか・応答から呼び出しをどう取り出すか・アシスタントターンの `tool_calls` を次のターン用にどう描画し直すかを決めます。 |
+| `CHAT_TEMPLATE` | 任意 | (未設定=自動判定) | チャットテンプレートを `"llama3"` / `"llama2"` / `"chatml"` / `"qwen3_5"` / `"gemma"` / `"gemma4"` のいずれかに固定。全スロット共通の上書き。未設定時はスロットごとにモデルディレクトリ名から自動判定([該当節](#チャットテンプレートの選択ルール)参照)。 |
+| `TOOL_FORMAT` | 任意 | (未設定) | モデルが話すツール呼び出しの方言: `hermes`(`<tool_call>` タグ内の JSON。Qwen3 ほか手元の全モデル)か `gemma4`(`<\|tool_call>call:NAME{...}<tool_call\|>`。値は JSON ではなく gemma4 独自の記法)か `qwen3_xml`(Qwen3.5: `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`)。**未設定ならスロットごとにチャットテンプレートから導出**します(バンドル名がテンプレート判定を誤らせる場合以外は、これで正しくなります)。方言は、宣言を system ターンにどう描画するか・応答から呼び出しをどう取り出すか・アシスタントターンの `tool_calls` を次のターン用にどう描画し直すかを決めます。 |
 | `DEFAULT_MAX_TOKENS` | 任意 | `0`(無効) | `/v1/completions`/`/v1/chat/completions`で`max_tokens`/`max_completion_tokens`が未指定の場合に、モデル自身の残りコンテキスト容量に加えて適用される追加の上限([APIリファレンス](./API.ja.md)の`max_tokens`項目参照)。`0`は追加上限なし(コンテキストサイズのみで制限 — Qualcomm自身のqai-appbuilderリファレンスサーバと同じ挙動)を意味する。特定のモデル/構成が暴走しやすいと分かっていて、より小さい安全マージンが欲しい場合に正の値を設定する([トラブルシューティング](#トラブルシューティング)参照)。クライアントが明示的に`max_tokens`を指定した場合は常にそちらが優先される。 |
 | `INFERENCE_TIMEOUT` | 任意 | `120` | 1回の`GenieDialog_query`に対するウォッチドッグ制限(秒)。遅いターゲットでの長い生成にはこの値を上げる。`GET /v1/server/idle`や同期パスの全体待ち時間(この2倍)にも使われる。シャットダウンは、使用中のスロットを最大でこの値+5秒待ってからハンドルを解放する。VLMの呼び出しは中断できないため、固まったVLMスロットがあるとシャットダウンはその時間だけ止まり、2回目のCtrl+Cでも待機は打ち切られない。それでも使用中のスロットは解放せずに残す。 |
 | `HOST` / `PORT` | 任意 | `"0.0.0.0"` / `8080` | 待受アドレス/ポート。CLIの`--host`/`--port`が優先。 |
@@ -937,7 +937,7 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 
 ## チャットテンプレートの選択ルール
 
-`format_chat_prompt` / `split_prompt_for_prefix_cache` が使うテンプレート(`llama3` / `llama2` / `chatml` / `gemma` / `gemma4`)は、**リクエストの `model` フィールドではなく、選択されたスロットが実際にロードしているモデル**(`slot.chat_template`)から決まります。
+`format_chat_prompt` / `split_prompt_for_prefix_cache` が使うテンプレート(`llama3` / `llama2` / `chatml` / `qwen3_5` / `gemma` / `gemma4`)は、**リクエストの `model` フィールドではなく、選択されたスロットが実際にロードしているモデル**(`slot.chat_template`)から決まります。
 
 判定順序(`_detect_template`、スロットごとに起動時/切り替え時に一度だけ実行):
 
@@ -947,6 +947,7 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
    - `"llama2"` または `"mistral"` を含む → `llama2`
    - `"gemma4"` または `"gemma-4"` を含む → `gemma4`(**先に判定される**。下記参照)
    - `"gemma"` を含む → `gemma`(Gemma 2/3系。systemロールが無く、systemテキストは最初のuserターンに前置、assistantロール名は`model`)
+   - `"qwen3_5"`・`"qwen3.5"`・`"qwen3-5"`・`"qwen35"` のいずれかを含む → `qwen3_5`(下記参照)
    - それ以外 → `chatml`(Qwen等はここに該当)
 
 > **注意**: 以前のバージョンはリクエストの `model` フィールドで判定していましたが、`lm_eval` はモデル名に関わらず常に固定文字列 `"genie-local"` を送るため、実際には常にChatML分岐に落ちるバグがありました。現在は選択されたスロットの状態のみで決まります。リクエストの `model` フィールドは(1)どのスロットにルーティングするかの選択、(2)レスポンスへのecho、の2用途にのみ使われ、テンプレートは選択しません。
@@ -958,6 +959,7 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 | `llama3` | `<\|begin_of_text\|><\|start_header_id\|>role<\|end_header_id\|>\n\ncontent<\|eot_id\|>...` | 可能(system メッセージのみprefix化) |
 | `llama2` | `<s>[INST] <<SYS>>...<</SYS>>...content [/INST] ... </s>` | **不可**(systemが`[INST]`に融合するため) |
 | `chatml` | `<\|im_start\|>role\ncontent<\|im_end\|>\n...` | 可能 |
+| `qwen3_5` | ChatML。末尾が `<\|im_start\|>assistant\n<think>\n\n</think>\n\n`(思考オフ)または `...<think>\n`(オン) | 分割はできるが、線形アテンションのバンドルでは prefix キャッシュを使わない(下記) |
 | `gemma` | `<bos><start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n` | **不可**(systemは最初のuserターンに融合) |
 | `gemma4` | `<bos><\|turn>system\n...<turn\|>\n<\|turn>user\n...<turn\|>\n<\|turn>model\n` | 可能(system が独立したターンのため) |
 
@@ -1002,9 +1004,30 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 > `/no_think` ソフトスイッチであり、本サーバに gemma4 版の相当物はありません。
 > gemma4 バンドルはバンドル自身の既定の思考モードのままになります。
 
+> **なぜ Qwen3.5 を別系統にしているか。** ターンは ChatML ですが、Qwen3.5 自身の
+> `chat_template.jinja` には Qwen3 と違う点が3つあり、`qwen3_5` テンプレートはこのファイルと
+> バイト単位で同じ出力にしています(`transformers` の描画結果と突き合わせて確認):
+>
+> 1. **思考は頼まない限りオフで、`/no_think` はありません。** テンプレートはプロンプトの末尾に
+>    空の `<think>\n\n</think>\n\n` を置きます。`enable_thinking: true` では末尾が `<think>\n` になり、
+>    モデルの出力は思考の途中から始まります。サーバはその `<think>\n` を応答の先頭に付けるので
+>    (ストリームでも同じ)、クライアントには Qwen3 と同じ `<think>...</think>` の対が見えます。
+>    それより前のアシスタントターンの思考は、テンプレートと同じく落とします。
+> 2. **ツールの方言が独自です**(`qwen3_xml`)。宣言は system テキストの**前**の `# Tools` ブロックに入り、
+>    呼び出しは `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>` です。
+>    VALUE は素のテキストなので、サーバはリクエストのツールのスキーマで読み戻します。`integer` と
+>    宣言した引数は数値で、`string` と宣言した引数は数値に見えても(`"007"`)文字列のまま返ります。
+>    連続するツールの結果は、テンプレートと同じく1つの user ターンにまとめます。
+> 3. **system メッセージは先頭にだけ置けます。** 2つ目は `400` です(テンプレート自身も拒否します)。
+>
+> 対象にしたバンドルは、線形アテンションの層を持つ Qwen3.5 の変換物です。prefix キャッシュは
+> 使いません — [Prefix KVキャッシュ](#prefix-kvキャッシュ) を参照。
+
 ## Prefix KVキャッシュ
 
 `messages` に `system` ロールが含まれ、かつテンプレートが分割可能(llama3/chatml/gemma4)な場合、system プロンプト部分だけを別途KVキャッシュとして保存・復元します。
+
+**線形アテンションのバンドルでは使いません。** `genie_config.json` で `dialog.engine.model.linear-attention` が立っているバンドル(Qwen3.5)は、KV キャッシュのほかに層ごとの再帰状態と畳み込み状態を持ち、`GenieDialog_save` / `GenieDialog_restore` はその状態を運びません。復元した prefix は、直前に走ったリクエストの状態から続いてしまいます。そうしたスロットは毎回プロンプト全体を処理し、起動ログに `prefix-cache=off (linear-attention state)` と出て、`POST /v1/prefix/warmup` は `422` を返します。[PLATFORM_NOTES](./PLATFORM_NOTES.ja.md#qwen35線形アテンションのバンドル) を参照。
 
 - キャッシュキー: `sha256(f"{namespace}\x1f{prefix_prompt}")[:16]`。`namespace` は `f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}"` で、LoRA の強さを設定した後はその後ろに `|tensor=alpha,...` が付く(`Slot.cache_namespace`)
 - **スロット/モデル/LoRAでnamespace化**されているため、`/v1/models/switch` や `/v1/lora/apply` で状態を切り替えても、別スロット/別モデル/別LoRA用に保存されたKVキャッシュを誤って復元することはありません(単にキーが変わるため自然にmiss扱いになります)。

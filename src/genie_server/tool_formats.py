@@ -6,6 +6,7 @@ and they do not resemble each other:
 
     Hermes (Qwen3, ...)   <tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>
     gemma4                <|tool_call>call:f{a:1}<tool_call|>
+    qwen3_xml (Qwen3.5)   <tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>
 
 The second is not JSON: strings are wrapped in a `<|"|>` delimiter, keys come
 in dictsort order, and type names are Gemini-flavoured (OBJECT, NUMBER). A
@@ -337,6 +338,127 @@ class Gemma4ToolFormat:
         return BufferedStreamFilter(Gemma4ToolFormat, known_tool_names)
 
 
+# ------------------------------------------------------------------ qwen3_xml
+
+_QX_INSTRUCTIONS = (
+    "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
+    "<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n"
+    "</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\n"
+    "that can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\n"
+    "Reminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> "
+    "block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be "
+    "specified\n- You may provide optional reasoning for your function call in natural language "
+    "BEFORE the function call, but NOT after\n- If there is no function call available, answer the "
+    "question like normal with your current knowledge and do not tell the user about function calls\n"
+    "</IMPORTANT>")
+_QX_CALL = re.compile(r"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s*</tool_call>", re.S)
+_QX_PARAM = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
+
+
+class Qwen3XmlToolFormat:
+    """Qwen3.5's tool dialect (the Qwen3-Coder XML form), from the model's own
+    chat_template.jinja: the declarations are JSON lines inside <tools>, placed
+    BEFORE the system prompt, and a call is
+
+        <tool_call>
+        <function=NAME>
+        <parameter=KEY>
+        VALUE
+        </parameter>
+        </function>
+        </tool_call>
+
+    VALUE is the template's rendering: JSON for an object or array, the plain
+    string otherwise. Reading it back needs the parameter's declared type
+    (a string "007" must stay a string, an integer 7 must not); bind() gives
+    the format the request's tool schemas, and without them only objects and
+    arrays are decoded.
+    """
+
+    name = "qwen3_xml"
+    tools_before_system = True   # templates.prepare_messages: block first, then the system text
+
+    def __init__(self, schemas: dict | None = None):
+        self._schemas = schemas or {}
+
+    def bind(self, tools: list) -> "Qwen3XmlToolFormat":
+        """A copy that knows this request's parameter types (see the class doc)."""
+        schemas = {}
+        for t in tools or []:
+            fn = t.get("function") if isinstance(t, dict) else None
+            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                props = (fn.get("parameters") or {}).get("properties") or {}
+                schemas[fn["name"]] = props if isinstance(props, dict) else {}
+        return Qwen3XmlToolFormat(schemas)
+
+    @staticmethod
+    def render_tools_block(tools: list) -> str:
+        lines = "".join("\n" + json.dumps(t, ensure_ascii=False) for t in tools or [])
+        return ("# Tools\n\nYou have access to the following functions:\n\n<tools>" + lines
+                + "\n</tools>" + _QX_INSTRUCTIONS)
+
+    @staticmethod
+    def format_tool_call_for_prompt(tool_call: dict) -> str:
+        from .templates import UnrenderableMessageError
+        fn = tool_call.get("function") if isinstance(tool_call, dict) else None
+        if not isinstance(fn, dict):
+            raise UnrenderableMessageError(
+                f"a tool_call must be an object with a 'function' object, got {tool_call!r}")
+        args = fn.get("arguments")
+        if args is None or (isinstance(args, str) and not args.strip()):
+            args = {}
+        elif isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = None
+        if not isinstance(args, dict):
+            raise UnrenderableMessageError(
+                f"tool_call {fn.get('name', '')!r}: arguments must be a JSON object to "
+                f"render it back into the prompt, got {fn.get('arguments')!r}")
+        out = f"<tool_call>\n<function={fn.get('name', '')}>\n"
+        for key, value in args.items():
+            text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+            out += f"<parameter={key}>\n{text}\n</parameter>\n"
+        return out + "</function>\n</tool_call>"
+
+    def _value(self, name: str, key: str, raw: str):
+        kind = ((self._schemas.get(name) or {}).get(key) or {}).get("type")
+        text = raw.strip()
+        try:
+            if kind == "integer":
+                return int(text)
+            if kind == "number":
+                return float(text) if any(c in text for c in ".eE") else int(text)
+            if kind == "boolean" and text.lower() in ("true", "false"):
+                return text.lower() == "true"
+            if kind in ("object", "array") or (kind is None and text[:1] in "[{"):
+                return json.loads(text)
+            if kind == "null" and text in ("null", "None"):
+                return None
+        except (ValueError, json.JSONDecodeError):
+            pass
+        return raw
+
+    def parse_tool_calls(self, text: str, known_tool_names=None):
+        """(content, calls). A call is only taken whole (opening and closing
+        tags); anything else stays in the content as the model wrote it."""
+        text = text or ""
+        calls = []
+
+        def replace(match):
+            name = match.group(1).strip()
+            args = {k.strip(): self._value(name, k.strip(), v) for k, v in _QX_PARAM.findall(match.group(2))}
+            calls.append(hermes.build_call(name, args))
+            return ""
+
+        content = _QX_CALL.sub(replace, text)
+        return content.strip(), calls
+
+    def stream_filter(self, known_tool_names=None):
+        return BufferedStreamFilter(self, known_tool_names)
+
+
 # ------------------------------------------------------------------ streaming
 
 
@@ -368,7 +490,9 @@ class BufferedStreamFilter:
 
 # ------------------------------------------------------------------- registry
 
-FORMATS = {f.name: f for f in (HermesToolFormat, Gemma4ToolFormat)}
+# Hermes and gemma4 are used as classes (static methods); qwen3_xml as an instance,
+# because bind() hands each request a copy that carries the request's tool schemas.
+FORMATS = {f.name: f for f in (HermesToolFormat, Gemma4ToolFormat, Qwen3XmlToolFormat())}
 DEFAULT_FORMAT = HermesToolFormat.name
 
 
@@ -380,7 +504,11 @@ def detect(chat_template: str) -> str:
     a bundle that renders as gemma4 turns also speaks gemma4 tool tokens, and
     there is no way to configure a combination that cannot exist.
     """
-    return "gemma4" if chat_template == "gemma4" else DEFAULT_FORMAT
+    if chat_template == "gemma4":
+        return "gemma4"
+    if chat_template == "qwen3_5":
+        return Qwen3XmlToolFormat.name
+    return DEFAULT_FORMAT
 
 
 def get(name: str):

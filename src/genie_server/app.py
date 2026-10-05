@@ -1094,8 +1094,10 @@ def create_app(state: ServerState) -> FastAPI:
         if not isinstance(chat_template_kwargs, dict):
             raise InvalidRequestError(
                 "chat_template_kwargs must be an object", "chat_template_kwargs")
-        enable_thinking = _flag(chat_template_kwargs, "enable_thinking",
-                                _flag(body, "enable_thinking", True))
+        # None = not said; the slot's template decides (templates.default_thinking:
+        # Qwen3 thinks by default, Qwen3.5's own template does not).
+        requested_thinking = _flag(chat_template_kwargs, "enable_thinking",
+                                   _flag(body, "enable_thinking", None))
 
         # tools: OpenAI function calling. tool_choice is already validated
         # down to "auto"/"none"/absent by _reject_unsupported.
@@ -1144,8 +1146,15 @@ def create_app(state: ServerState) -> FastAPI:
         # placeholder for every request).
         # ...and so does the tool dialect: the model in the slot decides how
         # calls are declared, emitted and parsed (tool_formats).
+        enable_thinking = (templates.default_thinking(slot.chat_template)
+                           if requested_thinking is None else requested_thinking)
+        # A dialect may need this request's tool schemas to read calls back
+        # (tool_formats.Qwen3XmlToolFormat.bind); the others are used as they are.
+        tool_format = slot.tool_format
+        if tools and hasattr(tool_format, "bind"):
+            tool_format = tool_format.bind(tools)
         msgs = templates.prepare_messages(messages, enable_thinking, tools,
-                                          slot.tool_format)
+                                          tool_format, template=slot.chat_template)
         # Names this request actually declared, for tools.parse_tool_calls to
         # match a mangled or missing <tool_call> marker against (F25). Left
         # None when TOOL_CALL_RECOVERY is off, which restores the strict
@@ -1158,11 +1167,16 @@ def create_app(state: ServerState) -> FastAPI:
         try:
             prefix_prompt, query_prompt, cacheable = \
                 templates.split_prompt_for_prefix_cache(
-                    msgs, slot.chat_template, slot.tool_format,
-                    bos=slot.sdk_bos_token is None)
+                    msgs, slot.chat_template, tool_format,
+                    bos=slot.sdk_bos_token is None,
+                    enable_thinking=enable_thinking)
         except templates.UnrenderableMessageError as e:
             raise InvalidRequestError(str(e), "messages") from None
         full_prompt = prefix_prompt + query_prompt if cacheable else query_prompt
+        # A bundle whose state GenieDialog_save does not capture (linear
+        # attention) cannot be restored from a prefix: run it whole, every time.
+        cacheable = cacheable and slot.saves_state
+        reply_prefix = templates.generation_prefix(slot.chat_template, enable_thinking)
         _require_context_room(slot, full_prompt)
         params.max_tokens = engine.default_max_tokens(
             slot, full_prompt, params.max_tokens, cfg.default_max_tokens_cap)
@@ -1188,19 +1202,21 @@ def create_app(state: ServerState) -> FastAPI:
                         request_id, model_name, {"content": text}),
                     make_final=lambda reason: protocol.chat_chunk(
                         request_id, model_name, {}, finish_reason=reason),
-                    preamble=[protocol.chat_role_chunk(request_id, model_name)],
-                    tool_filter=slot.tool_format.stream_filter(known_tool_names)
+                    preamble=[protocol.chat_role_chunk(request_id, model_name)] + (
+                        [protocol.chat_chunk(request_id, model_name, {"content": reply_prefix})]
+                        if reply_prefix else []),
+                    tool_filter=tool_format.stream_filter(known_tool_names)
                     if tools else None,
                     include_usage=include_usage,
                     prompt_tokens=slot.count_prompt_tokens(full_prompt),
                 ),
                 media_type="text/event-stream")
 
-        text = await _collect_or_raise(gen, state, collector=collector)
+        text = reply_prefix + await _collect_or_raise(gen, state, collector=collector)
         tool_calls = None
         finish_reason = gen.finish_reason
         if tools:
-            text, tool_calls = slot.tool_format.parse_tool_calls(
+            text, tool_calls = tool_format.parse_tool_calls(
                 text, known_tool_names)
             if tool_calls:
                 finish_reason = "tool_calls"
@@ -1343,12 +1359,21 @@ def create_app(state: ServerState) -> FastAPI:
         # cached prefix and therefore its key. Warming the raw prompt and then
         # sending enable_thinking=false is a silent, permanent MISS — so take
         # the same flag here and warm the variant the caller will actually use.
-        enable_thinking = _flag(body, "enable_thinking", True)
+        if not slot.saves_state:
+            raise InvalidRequestError(
+                f"Slot '{slot.name}' model '{slot.active_model_id}' does not "
+                "support prefix caching (its bundle has linear-attention state, "
+                "which GenieDialog_save does not capture: a restored prefix "
+                "would continue from the wrong state).",
+                status_code=422)
+        enable_thinking = _flag(body, "enable_thinking",
+                                templates.default_thinking(slot.chat_template))
         messages = templates.prepare_messages(
             [{"role": "system", "content": system_prompt}],
-            enable_thinking=enable_thinking)
+            enable_thinking=enable_thinking, template=slot.chat_template)
         prefix_prompt, _, cacheable = templates.split_prompt_for_prefix_cache(
-            messages, slot.chat_template, bos=slot.sdk_bos_token is None)
+            messages, slot.chat_template, bos=slot.sdk_bos_token is None,
+            enable_thinking=enable_thinking)
         if not cacheable or not prefix_prompt:
             # Name the actual reason for this template — quoting Llama2's
             # would just misdirect someone debugging a Gemma slot.
