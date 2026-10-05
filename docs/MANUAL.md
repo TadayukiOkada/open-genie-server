@@ -87,7 +87,7 @@ The rest is Qualcomm's or ours:
 | `genie_server/capi.py` | ctypes bindings for the GenieDialog C API (`GenieLib`) + SDK constants |
 | `genie_server/templates.py` | chat-template rendering (chatml/llama3/llama2/gemma/gemma4), prefix splitting, `/no_think` |
 | `genie_server/tools.py` | OpenAI `tools` (function calling), Hermes dialect: prompt rendering, output parsing, streaming filter |
-| `genie_server/tool_formats.py` | the registry of tool-call dialects (Hermes, gemma4) and which one a slot uses |
+| `genie_server/tool_formats.py` | the registry of tool-call dialects (Hermes, gemma4, Qwen3.5's XML) and which one a slot uses |
 | `genie_server/slots.py` | `Slot`/`SlotManager`: model loading, request routing, hot-swap |
 | `genie_server/prefix_cache.py` | on-disk KV-cache snapshots |
 | `genie_server/engine.py` | the generation engine: lock, watchdog, SDK params, prefix cache, `finish_reason` |
@@ -760,8 +760,8 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens","pipeline_script","node_configs","static_tensors"}, ...]`. Only `model_root` is required — the bundle layout is read from the bundle itself and `spec` (the VLM family) is auto-detected when omitted; the last three are an escape hatch for a layout `vlm_layout.py` cannot read on its own. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
 | `PREFIX_CACHE_DIR` | optional | `"./prefix_cache"` | Directory for the prefix KV cache and HTP extension config copies (`.htp_ext_cache/`). A relative value is resolved against the server's working directory, so an absolute path is worth setting if the server may be started from anywhere but its own directory. |
 | `MODELS_BASE_DIR` | optional | (unset) | Base directory every **relative** model path resolves against: `TEXT_SLOTS`/`VLM_SLOTS` `model_root` at startup, and `POST /v1/models/switch`'s `model_dir`. An **absolute** path ignores it and is used as given. Unset, a relative path is resolved against the server's working directory. Set this and a config can name each model by bare directory name. Note it is a base, not a sandbox — an absolute `model_dir` still loads from outside the tree. |
-| `CHAT_TEMPLATE` | optional | (unset = auto-detect) | Pins the chat template to `"llama3"` / `"llama2"` / `"chatml"` / `"gemma"` / `"gemma4"`. Overrides for every slot. If unset, each slot auto-detects it from its model directory name (see [the relevant section](#chat-template-selection-rules)). |
-| `TOOL_FORMAT` | optional | (unset) | Which tool-call dialect the models speak: `hermes` (JSON in `<tool_call>` tags — Qwen3 and everything else we have) or `gemma4` (`<\|tool_call>call:NAME{...}<tool_call\|>`, values in gemma4's own notation rather than JSON). Unset derives it per slot from that slot's chat template, which is what you want unless a bundle's name misleads the template detection. A dialect decides how declarations are rendered into the system turn, how a call is parsed out of the reply, and how an assistant turn's `tool_calls` are rendered back for the follow-up. |
+| `CHAT_TEMPLATE` | optional | (unset = auto-detect) | Pins the chat template to `"llama3"` / `"llama2"` / `"chatml"` / `"qwen3_5"` / `"gemma"` / `"gemma4"`. Overrides for every slot. If unset, each slot auto-detects it from its model directory name (see [the relevant section](#chat-template-selection-rules)). |
+| `TOOL_FORMAT` | optional | (unset) | Which tool-call dialect the models speak: `hermes` (JSON in `<tool_call>` tags — Qwen3 and everything else we have) or `gemma4` (`<\|tool_call>call:NAME{...}<tool_call\|>`, values in gemma4's own notation rather than JSON) or `qwen3_xml` (Qwen3.5: `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`). Unset derives it per slot from that slot's chat template, which is what you want unless a bundle's name misleads the template detection. A dialect decides how declarations are rendered into the system turn, how a call is parsed out of the reply, and how an assistant turn's `tool_calls` are rendered back for the follow-up. |
 | `DEFAULT_MAX_TOKENS` | optional | `0` (disabled) | Extra cap applied to `/v1/completions`/`/v1/chat/completions` requests that don't specify `max_tokens`/`max_completion_tokens`, on top of the model's own remaining context space (see `max_tokens` under [API Reference](./API.md)). `0` means no extra cap — bound only by context size, matching Qualcomm's own qai-appbuilder reference server. Set a positive value if a specific model/deployment is known to run away and you want a smaller safety margin (see [Troubleshooting](#troubleshooting)). Explicit client-provided `max_tokens` always overrides this. |
 | `INFERENCE_TIMEOUT` | optional | `120` | Watchdog limit (seconds) for one `GenieDialog_query` call. Long generations on slow targets may need this raised. Also bounds `GET /v1/server/idle` and the sync path's overall wait (2x this value). Shutdown waits up to this + 5 s for busy slots before freeing their handles: a VLM call cannot be aborted, so a wedged VLM slot holds shutdown that long, and a second Ctrl+C does not cut the wait short. A slot still busy then is left allocated. |
 | `HOST` / `PORT` | optional | `"0.0.0.0"` / `8080` | Listen address / port. The `--host` / `--port` CLI flags override these. |
@@ -1013,7 +1013,7 @@ same approach should work for `tokenizers`, which is also Rust.
 
 ## Chat Template Selection Rules
 
-The template (`llama3` / `llama2` / `chatml` / `gemma` / `gemma4`) used by `format_chat_prompt` / `split_prompt_for_prefix_cache` is decided **not by the request's `model` field, but by the model actually loaded in the selected slot** (`slot.chat_template`).
+The template (`llama3` / `llama2` / `chatml` / `qwen3_5` / `gemma` / `gemma4`) used by `format_chat_prompt` / `split_prompt_for_prefix_cache` is decided **not by the request's `model` field, but by the model actually loaded in the selected slot** (`slot.chat_template`).
 
 Determination order (`_detect_template`, run once per slot at startup/switch time):
 
@@ -1023,6 +1023,7 @@ Determination order (`_detect_template`, run once per slot at startup/switch tim
    - contains `"llama2"` or `"mistral"` → `llama2`
    - contains `"gemma4"` or `"gemma-4"` → `gemma4` (checked first — see below)
    - contains `"gemma"` → `gemma` (Gemma 2/3 family — no system role; system text is prepended to the first user turn, assistant role is `model`)
+   - contains `"qwen3_5"`, `"qwen3.5"`, `"qwen3-5"` or `"qwen35"` → `qwen3_5` (see below)
    - otherwise → `chatml` (Qwen etc. fall here)
 
 > **Note**: earlier versions decided this from the request's `model` field, but since `lm_eval` always sends the fixed string `"genie-local"` regardless of the actual model name, it always fell into the ChatML branch — a bug. It's now decided purely by the selected slot's state. The request's `model` field is used only for (1) selecting which slot to route to, and (2) echoing back in the response; it never selects the template.
@@ -1034,6 +1035,7 @@ Prompt format per template:
 | `llama3` | `<\|begin_of_text\|><\|start_header_id\|>role<\|end_header_id\|>\n\ncontent<\|eot_id\|>...` | possible (only the system message is prefixed) |
 | `llama2` | `<s>[INST] <<SYS>>...<</SYS>>...content [/INST] ... </s>` | **not possible** (system gets folded into `[INST]`) |
 | `chatml` | `<\|im_start\|>role\ncontent<\|im_end\|>\n...` | possible |
+| `qwen3_5` | ChatML, ending in `<\|im_start\|>assistant\n<think>\n\n</think>\n\n` (thinking off) or `...<think>\n` (on) | the prompt splits, but a linear-attention bundle has no prefix cache (see below) |
 | `gemma` | `<bos><start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n` | **not possible** (system folded into the first user turn) |
 | `gemma4` | `<bos><\|turn>system\n...<turn\|>\n<\|turn>user\n...<turn\|>\n<\|turn>model\n` | possible (system is its own turn) |
 
@@ -1082,9 +1084,36 @@ Prompt format per template:
 > `/no_think` soft switch and has no gemma4 equivalent in this server, so a
 > gemma4 bundle is left in whatever thinking mode it defaults to.
 
+> **Why Qwen3.5 is a separate family.** Its turns are ChatML, but three things
+> in its own `chat_template.jinja` differ from Qwen3, and the `qwen3_5`
+> template follows that file byte for byte (checked against `transformers`'
+> rendering of it):
+>
+> 1. **Thinking is off unless asked for, and there is no `/no_think`.** The
+>    template ends the prompt with an empty `<think>\n\n</think>\n\n` block;
+>    `enable_thinking: true` ends it with `<think>\n` instead, so the model's
+>    output begins inside its reasoning. The server then puts that `<think>\n`
+>    in front of the reply (streamed or not), so a client sees the same
+>    `<think>...</think>` pair a Qwen3 reply carries. Earlier assistant turns
+>    lose their reasoning, as the template drops it.
+> 2. **Tools have their own dialect** (`qwen3_xml`): the declarations go in a
+>    `# Tools` block *before* the system text, and a call is
+>    `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>`.
+>    VALUE is plain text, so the server reads it back with the request's tool
+>    schema: a parameter declared `integer` comes back as a number, one
+>    declared `string` stays a string even when it looks like one (`"007"`).
+>    Consecutive tool results are sent as one user turn, as the template does.
+> 3. **A system message is accepted only as the first message**; another one
+>    is a `400`, because the template refuses it too.
+>
+> The bundles this was written for are Qwen3.5 exports with linear-attention
+> layers. Their prefix cache is off — see [Prefix KV Cache](#prefix-kv-cache).
+
 ## Prefix KV Cache
 
 When `messages` includes a `system` role and the template supports splitting (llama3/chatml/gemma4), the system prompt portion is saved and restored as a separate KV cache entry.
+
+**Not on a linear-attention bundle.** A bundle whose `genie_config.json` sets `dialog.engine.model.linear-attention` (Qwen3.5) keeps per-layer recurrent and convolution state besides its KV cache, and `GenieDialog_save` / `GenieDialog_restore` do not carry that state: a restored prefix would continue from the state of whatever ran last. Such a slot runs every prompt whole, the startup log says `prefix-cache=off (linear-attention state)`, and `POST /v1/prefix/warmup` answers `422`. See [PLATFORM_NOTES](./PLATFORM_NOTES.md#qwen35-linear-attention-bundles).
 
 - Cache key: `sha256(f"{namespace}\x1f{prefix_prompt}")[:16]`, where `namespace` is `f"{slot.name}|{slot.active_model_id}|{slot.active_lora_adapter}"`, followed by `|tensor=alpha,...` once a LoRA strength has been set (`Slot.cache_namespace`)
 - **Namespaced by slot/model/LoRA**, so switching state via `/v1/models/switch` or `/v1/lora/apply` never accidentally restores a KV cache saved for a different slot/model/LoRA (the key simply changes, so it naturally misses).

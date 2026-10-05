@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — Qwen3.5
+
+Qwen3.5 bundles can be served. Checked on an SA8255P with QAIRT 2.51.0 and a
+Qwen3.5-2B bundle with an 8192-token context: plain and thinking replies,
+streamed and not, a tool call and its result, and a 7,021-token prompt — see
+[PLATFORM_NOTES § Qwen3.5](PLATFORM_NOTES.md#qwen35-linear-attention-bundles).
+
+### Added
+
+- **A `qwen3_5` chat template**, picked when the bundle directory's name
+  contains `qwen3_5`, `qwen3.5`, `qwen3-5` or `qwen35`. It renders Qwen3.5's
+  own `chat_template.jinja` byte for byte. Thinking is off by default, as in
+  that template; `enable_thinking: true` turns it on, and the reply then starts
+  with the `<think>\n` the prompt opened. A system message that is not the
+  first message is a `400`. See
+  [MANUAL § Chat Template Selection Rules](MANUAL.md#chat-template-selection-rules).
+- **A `qwen3_xml` tool dialect** for that template:
+  `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`,
+  declarations before the system text. Arguments are typed from the request's
+  tool schema.
+
+### Changed
+
+- **No prefix cache on a linear-attention bundle.** A bundle whose
+  `genie_config.json` sets `dialog.engine.model.linear-attention` keeps
+  recurrent state that `GenieDialog_save` / `GenieDialog_restore` do not
+  carry. Its slot now runs every prompt whole (the startup log says
+  `prefix-cache=off`) and `POST /v1/prefix/warmup` answers `422`.
+- `enable_thinking` left out of a request now means the template's default:
+  `true` as before for every template but `qwen3_5`.
+
 ## 1.6.0 — per-request grammar, and QAIRT 2.51.0
 
 A request can now carry its own grammar: OpenAI's `response_format` or

@@ -114,7 +114,7 @@ curl $base_url/v1/completions \
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `messages` | array | 必須、非空。`{"role": "...", "content": "..."}` の配列。 |
-| `enable_thinking` / `chat_template_kwargs.enable_thinking` | bool | 既定 `true`。OpenAI標準フィールドではなく、Qwen3向けの独自拡張。トップレベルの`enable_thinking`、または`chat_template_kwargs`にネストした形式(vLLM/SGLangの流儀 — このdictをそのままHFの`apply_chat_template()`に渡す実装で、`enable_thinking`はQwen3自身のチャットテンプレートが読むkwarg名そのもの。両方指定時は`chat_template_kwargs`側が優先)のどちらでも受け付ける。`false`を指定すると、systemプロンプトに文字列`/no_think`をそのまま追記する(systemメッセージが無ければ新規作成する) — Qwen3自身が公式にドキュメント化しているチャットテンプレート向けのソフトスイッチで、モデルは自前の推論をスキップして直接回答する。**空の`<think>\n\n</think>\n\n`ブロックを事前に埋め込む方式(HuggingFaceのチャットテンプレートの仕組み)では実装していない** — Qualcommの公式リファレンスサーバ(`qai-appbuilder/samples/genie/c++/Service`)が実機検証で、この方式だと短いプロンプトでQwen3が退化する(直前のターンをそのまま繰り返した直後に終了する)ことを確認しているため、本サーバは彼らが検証済みの`/no_think`方式に合わせている。Qwen3系以外のテンプレート/モデルには影響しない(単なるプロンプト文字列であり、SDK側に推論ON/OFFの切り替え機能自体が存在しないため)。 |
+| `enable_thinking` / `chat_template_kwargs.enable_thinking` | bool | 既定 `true`(`qwen3_5` のスロットでは `false` で、切り替えは `/no_think` ではなくテンプレート自身の `<think>` ブロック。[MANUAL](./MANUAL.ja.md#チャットテンプレートの選択ルール) を参照)。OpenAI標準フィールドではなく、Qwen3向けの独自拡張。トップレベルの`enable_thinking`、または`chat_template_kwargs`にネストした形式(vLLM/SGLangの流儀 — このdictをそのままHFの`apply_chat_template()`に渡す実装で、`enable_thinking`はQwen3自身のチャットテンプレートが読むkwarg名そのもの。両方指定時は`chat_template_kwargs`側が優先)のどちらでも受け付ける。`false`を指定すると、systemプロンプトに文字列`/no_think`をそのまま追記する(systemメッセージが無ければ新規作成する) — Qwen3自身が公式にドキュメント化しているチャットテンプレート向けのソフトスイッチで、モデルは自前の推論をスキップして直接回答する。**空の`<think>\n\n</think>\n\n`ブロックを事前に埋め込む方式(HuggingFaceのチャットテンプレートの仕組み)では実装していない** — Qualcommの公式リファレンスサーバ(`qai-appbuilder/samples/genie/c++/Service`)が実機検証で、この方式だと短いプロンプトでQwen3が退化する(直前のターンをそのまま繰り返した直後に終了する)ことを確認しているため、本サーバは彼らが検証済みの`/no_think`方式に合わせている。Qwen3系以外のテンプレート/モデルには影響しない(単なるプロンプト文字列であり、SDK側に推論ON/OFFの切り替え機能自体が存在しないため)。 |
 | `tools` | array | OpenAI function callingのツール定義 — 後述の[Function calling](#function-calling-tools)参照。 |
 | `tool_choice` | string | `"auto"`(既定)と`"none"`(ツール注入を無効化)のみ。`"required"` および `{"type":"function", ...}` の関数指定形式は**`400`で拒否**する — どちらもOpenAIのセマンティクスでは呼び出しを保証するもので、本サーバは呼び出しを強制しない(`tools` を grammar に変換しない)ため。`"auto"`を使い、応答に実際に`tool_calls`が入っているかを確認すること。 |
 | `logprobs` / `top_logprobs` | bool / int (0-20) | 生成トークンのOpenAI chat形式logprobs(`choices[0].logprobs.content[...]`)。非ストリーミングのみ。logits callbackを呼ばないQAIRTランタイムではHTTP 400 `logprobs_not_supported`。[Logprobs](./MANUAL.ja.md#logprobs)参照。 |
@@ -183,12 +183,13 @@ curl $base_url/v1/chat/completions \
 
 #### Function calling (`tools`)
 
-OpenAIの `tools` はワイヤーフォーマットであってプロンプトフォーマットではありません。そこでサーバは、**そのスロットのモデルが学習している方言**でsystemプロンプトに描画します。実装済みの方言は2つで、スロットは自身のチャットテンプレートから選びます(`TOOL_FORMAT` で上書き可 — [MANUAL](./MANUAL.ja.md#設定-env_configjson) 参照):
+OpenAIの `tools` はワイヤーフォーマットであってプロンプトフォーマットではありません。そこでサーバは、**そのスロットのモデルが学習している方言**でsystemプロンプトに描画します。実装済みの方言は3つで、スロットは自身のチャットテンプレートから選びます(`TOOL_FORMAT` で上書き可 — [MANUAL](./MANUAL.ja.md#設定-env_configjson) 参照):
 
 | 方言 | 対象スロット | 宣言 | 呼び出し |
 |---|---|---|---|
-| `hermes`(既定) | `gemma4` 以外の全テンプレート | `<tools>` … `</tools>` | `<tool_call>{"name": …, "arguments": …}</tool_call>` |
+| `hermes`(既定) | `gemma4` と `qwen3_5` 以外の全テンプレート | `<tools>` … `</tools>` | `<tool_call>{"name": …, "arguments": …}</tool_call>` |
 | `gemma4` | `gemma4` テンプレート | `<\|tool>declaration:NAME{...}<tool\|>` | `<\|tool_call>call:NAME{...}<tool_call\|>` |
+| `qwen3_xml` | `qwen3_5` テンプレート | system テキストの前の `# Tools` / `<tools>` … `</tools>` | `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>` |
 
 Hermes は Qwen3系モデルが実際に学習しているフォーマットで、Qualcomm自身の `qai-appbuilder` GenieAPIService リファレンスと同じアプローチです。gemma4 の方は Google 自身のもので、**JSONではありません** — 文字列は `<\|"\|>` で囲まれ、キーは dictsort 順に並びます。**送受信するワイヤー形式はどちらでもOpenAIのまま**で、違うのはプロンプトと解析だけです。以下は Hermes を基準に説明し、gemma4 が異なる箇所を都度示します。
 
@@ -201,6 +202,7 @@ Hermes は Qwen3系モデルが実際に学習しているフォーマットで�
 - **llama2 と Gemma 2/3 のスロットは、ツールの履歴を `400` で断ります。** これらのチャットテンプレートにはツール呼び出しにもツール結果にも形がありません。以前は llama2 がツール結果を丸ごと捨て、両方とも呼び出しを捨てていたので、モデルは欠けた往復を見ていました。llama2 のスロットは、`system`・`user`・`assistant` 以外のロールも、捨てずに断ります。
 - **ストリーミング(Hermes)**: `<tool_call>` ブロックはホールドバックされ(テキストとしてクライアントに漏れません)、生成完了後に完全な呼び出しを載せた `delta.tool_calls` チャンクを1つ送出し、`finish_reason: "tool_calls"` で終わります。`TOOL_CALL_RECOVERY`をONにしたとき、化けたマーカーはタグではないため、気づく前にcontentとして流れ出てしまい取り消せません。そこでテキストを1行ずつ保留し、呼び出しの本体でもその隣のマーカーでもないと確定してから流します。散文は通常どおりストリーミングされますが、最初の1語だけは「その行がマーカーではない」ことを示す空白が来るまで待ちます。
 - **ストリーミング(gemma4)、`tools` を付けたリクエストのとき**: これはそのリクエストだけの話で、`tools` が無ければ gemma4 のスロットもトークンごとに流れ、`tools` を無視する VLM スロットも同じです。`tools` があると、応答を**丸ごとバッファし**、最後にまとめて解決します。したがってクライアントには content と `tool_calls` が終盤のチャンクで届き、**それまでテキストは1文字も流れません**(チャンク列としては正しいSSEですが、逐次的には届きません)。Hermes には手書きの逐次フィルタがあり gemma4 には無い、というだけの違いです。バッファ方式は方言を書いたその日から使えるようにするためのもので、後から逐次版に差し替えてもクライアントから見える違いは**テキストが届くタイミングだけ**です。チャンク形状の確認が目的でないなら、gemma4 では非ストリーミングを使ってください。
+- **Qwen3.5(`qwen3_xml`)**: 引数の VALUE は素のテキストなので、リクエストのツールのスキーマで読み戻します — `integer` / `number` / `boolean` は JSON の値に、`object` / `array` は JSON として解釈し、それ以外は文字列のままです。連続する `role: "tool"` の結果は1つの user ターンにまとめます。`tools` 付きのストリーミングは gemma4 と同じくバッファしてから返します。
 
 ```bash
 curl $base_url/v1/chat/completions -H "Content-Type: application/json" -d '{

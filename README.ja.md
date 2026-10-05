@@ -25,7 +25,7 @@ Qualcomm Genie C API (`libGenie.so`) を OpenAI互換のREST APIとして公開�
 ## 特徴
 
 - `/v1/completions`・`/v1/chat/completions` — OpenAI互換のテキスト/チャット補完(ストリーミング対応。`/v1` なしのパスにも登録)
-- **Function calling(`tools`)対応** — プロンプトの方言を2つ実装し、スロットのチャットテンプレートから自動で選択。Qwen3系向けの Hermes `<tool_call>` JSON と、gemma4 独自の `<|tool_call>call:NAME{...}` トークン。どちらでもワイヤー形式はOpenAIのままで、`message.tool_calls` / `finish_reason: "tool_calls"` に変換し、ストリーミング中にテキストとして漏らさない
+- **Function calling(`tools`)対応** — プロンプトの方言を3つ実装し、スロットのチャットテンプレートから自動で選択。Qwen3系向けの Hermes `<tool_call>` JSON、gemma4 独自の `<|tool_call>call:NAME{...}` トークン、Qwen3.5 の `<function=NAME><parameter=KEY>` XML。どちらでもワイヤー形式はOpenAIのままで、`message.tool_calls` / `finish_reason: "tool_calls"` に変換し、ストリーミング中にテキストとして漏らさない
 - `lm_eval`(`local-completions` / `local-chat-completions`)にそのまま対応。トークンID形式のプロンプトもサーバ側でデコード
 - **Logprobs対応**(SDKのカスタムサンプラーフック経由): 生成トークンの`logprobs`/`top_logprobs`(トークンあたり数msのオーバーヘッド、未使用時はゼロ)に加え、**プロンプトスコアリング**(`echo`+`logprobs`のteacher forcing)でlm_evalのloglikelihoodタスク(hellaswag, arc, mmlu等)も実行可能 — デコード速度で走るため`POST /v1/server/prompt_logprobs`によるゲート付き
 - Open WebUIフレンドリー — parts配列形式 `content` のフラット化、`GET /health`、明示で有効にする CORS(`CORS_ALLOW_ORIGINS`)、ストリーミング `usage` チャンク(`stream_options.include_usage`)
@@ -217,6 +217,7 @@ pull request のたびに Python 3.10 / 3.12 / 3.14 で実行されます
 - 1テキストスロット = 1 `GenieDialog` ハンドルで、スロット内のリクエストはそのスロット自身のロックで直列化されます(`TEXT_SLOTS` 未設定時は単一スロットのみで、従来通り全リクエストが直列化されます)。
 - `n > 1`(1リクエストでの複数補完同時生成)は非対応で、`400` で拒否されます。
 - Llama2/Mistralテンプレートはシステムプロンプトを `[INST]` に埋め込むため、prefix KVキャッシュの対象外。
+- 線形アテンションのバンドル(Qwen3.5)では prefix KV キャッシュを使いません。`GenieDialog_save` がその再帰状態を保存しないため、毎回プロンプト全体を処理します。[PLATFORM_NOTES](https://github.com/TadayukiOkada/open-genie-server/blob/master/docs/PLATFORM_NOTES.ja.md#qwen35線形アテンションのバンドル) を参照。
 - `POST /v1/models/switch` は既定で旧モデルを解放してから新モデルをロードするため、ロードに失敗するとそのスロットは次のswitchが成功するまでモデル未ロードのままになります。その間、そのスロットに触れる全エンドポイントは `503` を返します。
 - `"unload_first": false` にすると新旧を同時にHTPデバイスへ載せてこれを避けられますが、**SA8255Pボードではこの同時常駐は当てになりません**。36回のスワップを実測した結果、成否は**どのモデルの組み合わせかでは決まりませんでした** — 同じ組み合わせがあるときは6回中6回成功し、別のときは8回中8回失敗し、6回の連続実行の途中で失敗から成功に転じたこともあります。決めているのはホストからは観測できないデバイス側の状態です。**デバイスのメモリに十分な余裕があり、かつ実運用で行うスワップをコールドスタートからの反復も含めてテスト済みの場合にだけ**使ってください。
 - リクエスト単位の grammar には QAIRT 2.51.0 以降と grammar のバックエンドが入ったライブラリが要ります(素のライブラリには入っていて、リビルドしたものには入っていない)。素のライブラリでは、制約つきの出力の末尾にモデルの終端トークンが付きます。grammar の切り替えは、当方の環境で 1 回あたり約 0.26 秒かかります。

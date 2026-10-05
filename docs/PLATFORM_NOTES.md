@@ -355,6 +355,36 @@ makes a hit about 18% faster end to end than a full prefill (1423 to 1168 ms per
 SDK's example sources. What the fixed library changes for you is only that the limits above go
 away.
 
+## Qwen3.5 (linear-attention) bundles
+
+Qwen3.5 mixes full-attention layers with linear-attention (Gated DeltaNet) layers. A Genie
+bundle of it marks this with `"linear-attention": true` under `dialog.engine.model` in
+`genie_config.json`, and keeps a recurrent and a convolution state per linear-attention layer
+next to the KV cache. `GenieDialog_save` / `GenieDialog_restore` save and restore the KV cache
+only, and that state cannot be rewound either, so the server turns the prefix cache off for such
+a slot (see [Prefix KV Cache](./MANUAL.md#prefix-kv-cache)). Every request is prefilled whole;
+`GenieDialog_reset` between requests does clear the state.
+
+Checked on an SA8255P with QAIRT 2.51.0, one slot on `device_id` 0, a Qwen3.5-2B bundle with an
+8192-token context (4-bit LPBQ weights with some layers at 8 bits, 16-bit activations):
+
+| Check | Result |
+|---|---|
+| Same greedy request twice | identical replies |
+| A 7,021-token prompt, then a short request | 26.6 s for the long one (200 tokens generated); the short reply is identical to the one before it |
+| A prompt over 8,192 tokens | `400 context_length_exceeded`, before the SDK is called |
+| Tool call, then the tool result back | `get_weather(city="Tokyo", days=3)` with `days` an integer; streamed the same; the follow-up answer used the result |
+| `enable_thinking: true` | the reply starts with `<think>\n`, streamed or not |
+| `POST /v1/prefix/warmup` | `422`, naming the linear-attention state |
+
+Use QAIRT 2.51.0 or later for these bundles if requests come near the context size: on the stock
+2.49.40 library a request that went past the context size minus the AR length broke the dialog for
+every request after it (the reset defects in [QAIRT Version Issues](./QAIRT_VERSIONS.md)).
+
+The server does not convert models; a Qwen3.5 bundle is something you build. The `qwen3_5`
+template is picked from the bundle directory's name, so keep `qwen3_5` (or `qwen3.5`, `qwen35`)
+in it, or set `CHAT_TEMPLATE`.
+
 ## Reading the rest of this documentation
 
 These claims are measurements from the bench above. They are honest about that
