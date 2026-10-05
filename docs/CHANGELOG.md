@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased — Qwen3.5
+## 1.7.0 — Qwen3.5
 
-Qwen3.5 bundles can be served. Checked on an SA8255P with QAIRT 2.51.0 and a
+Qwen3.5 bundles can be served (#52). Checked on an SA8255P with QAIRT 2.51.0 and a
 Qwen3.5-2B bundle with an 8192-token context: plain and thinking replies,
 streamed and not, a tool call and its result, and a 7,021-token prompt — see
 [PLATFORM_NOTES § Qwen3.5](PLATFORM_NOTES.md#qwen35-linear-attention-bundles).
