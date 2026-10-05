@@ -78,7 +78,9 @@ _SYSTEM_SHAPES = {
 }
 
 
-@pytest.mark.parametrize("template", templates.TEMPLATE_FAMILIES)
+# qwen3_5 refuses a system message that does not open the conversation, as its
+# own template does (test_qwen35.py).
+@pytest.mark.parametrize("template", [t for t in templates.TEMPLATE_FAMILIES if t != "qwen3_5"])
 @pytest.mark.parametrize("shape", list(_SYSTEM_SHAPES))
 def test_split_prefix_keeps_every_system_message_in_order(template, shape):
     msgs = _SYSTEM_SHAPES[shape]

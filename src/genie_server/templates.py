@@ -1,4 +1,4 @@
-"""Chat-template rendering (chatml / llama3 / llama2) and prompt splitting.
+"""Chat-template rendering (chatml / qwen3_5 / llama3 / llama2 / gemma / gemma4) and prompt splitting.
 
 Template selection runs off the loaded model's own directory name (or the
 CHAT_TEMPLATE override) — never the client-supplied request 'model' field,
@@ -15,7 +15,7 @@ from . import tool_formats
 
 logger = logging.getLogger(__name__)
 
-TEMPLATE_FAMILIES = ("chatml", "llama3", "llama2", "gemma", "gemma4")
+TEMPLATE_FAMILIES = ("chatml", "qwen3_5", "llama3", "llama2", "gemma", "gemma4")
 
 
 class UnrenderableMessageError(ValueError):
@@ -53,7 +53,26 @@ def detect_template(hint: str) -> str:
         return "gemma4"
     if "gemma" in h:
         return "gemma"
+    # Qwen3.5 is ChatML with its own thinking switch and tool dialect (see
+    # _render_qwen3_5); plain "qwen3" stays chatml.
+    if any(k in h for k in ("qwen3_5", "qwen3.5", "qwen3-5", "qwen35")):
+        return "qwen3_5"
     return "chatml"
+
+
+def default_thinking(template: str) -> bool:
+    """enable_thinking when the request does not say. Qwen3 thinks unless told
+    not to; Qwen3.5's own template renders the empty think block (no thinking)
+    unless enable_thinking is set."""
+    return template != "qwen3_5"
+
+
+def generation_prefix(template: str, enable_thinking: bool) -> str:
+    """Text the template writes after the assistant header that belongs to the
+    reply. Qwen3.5 opens the reasoning itself ("<think>\n" in the prompt), so
+    the model's output starts inside it; prepending this to the reply gives
+    clients the same <think>...</think> pair a Qwen3 reply carries."""
+    return "<think>\n" if template == "qwen3_5" and enable_thinking else ""
 
 
 def content_to_text(content) -> str:
@@ -76,7 +95,8 @@ def content_to_text(content) -> str:
 
 
 def prepare_messages(messages: list, enable_thinking: bool = True,
-                     tools: list | None = None, tool_format=None) -> list:
+                     tools: list | None = None, tool_format=None,
+                     template: str | None = None) -> list:
     """Normalizes an OpenAI messages array for rendering:
 
     - copies every message (the caller's list is never mutated),
@@ -88,7 +108,11 @@ def prepare_messages(messages: list, enable_thinking: bool = True,
       system turn even without a system prompt. A system message later in
       the conversation is left as the caller wrote it,
     - applies Qwen3's "/no_think" soft switch when enable_thinking=False,
-      separated from whatever precedes it by a blank line.
+      separated from whatever precedes it by a blank line — except for
+      template "qwen3_5", which has no soft switch (its template turns
+      thinking off with an empty <think></think> after the assistant header,
+      see render_chat_prompt) and whose tool dialect puts the tools block
+      BEFORE the system text.
 
     "/no_think" is Qwen3's own documented mechanism for disabling reasoning:
     a literal command appended to the system prompt text. (Injecting an empty
@@ -110,8 +134,17 @@ def prepare_messages(messages: list, enable_thinking: bool = True,
         out.insert(0, {"role": "system", "content": text.lstrip("\n")})
 
     fmt = tool_format or tool_formats.HermesToolFormat
-    if tools:
+    if tools and getattr(fmt, "tools_before_system", False):
+        block = fmt.render_tools_block(tools)
+        if out and out[0].get("role") == "system":
+            text = out[0]["content"].strip()
+            out[0]["content"] = block + ("\n\n" + text if text else "")
+        else:
+            out.insert(0, {"role": "system", "content": block})
+    elif tools:
         _append_to_system(fmt.render_tools_block(tools))
+    if template == "qwen3_5":
+        return out
     if not enable_thinking:
         # The leading blank line is load-bearing.  render_tools_block() ends
         # with the literal "</tool_call>" of its format example, so appending a
@@ -148,8 +181,62 @@ def _render_chatml_message(m: dict, tool_format=None) -> str:
     return f"<|im_start|>{role}\n{content}<|im_end|>\n"
 
 
+def _render_qwen3_5(messages: list, tool_format, enable_thinking: bool) -> str:
+    """Qwen3.5's chat_template.jinja, text only (the bundles served here have no
+    vision encoder). Content is trimmed as the template trims it. A system
+    message must open the conversation. An assistant turn after the last user
+    query keeps its reasoning (<think>...</think>, from reasoning_content or
+    the content itself); earlier ones lose it. Consecutive tool results share
+    one user turn. The generation header ends with "<think>\n" when thinking,
+    or the empty block "<think>\n\n</think>\n\n" when not."""
+    fmt = tool_format or tool_formats.get("qwen3_xml")
+    last_query = -1
+    for i, m in enumerate(messages):
+        if m.get("role") == "user":
+            c = (m.get("content") or "").strip()
+            if not (c.startswith("<tool_response>") and c.endswith("</tool_response>")):
+                last_query = i
+    if last_query < 0:
+        raise UnrenderableMessageError("Qwen3.5's chat template needs a user query in the messages")
+    out = ""
+    for i, m in enumerate(messages):
+        role, content = m.get("role", "user"), (m.get("content") or "").strip()
+        if role == "system":
+            if i != 0:
+                raise UnrenderableMessageError(
+                    f"messages[{i}]: Qwen3.5's chat template takes a system message only at the beginning")
+            out += f"<|im_start|>system\n{content}<|im_end|>\n"
+        elif role == "user":
+            out += f"<|im_start|>user\n{content}<|im_end|>\n"
+        elif role == "assistant":
+            reasoning = m.get("reasoning_content")
+            if not isinstance(reasoning, str):
+                reasoning = ""
+                if "</think>" in content:
+                    reasoning = content.split("</think>")[0].rstrip("\n").split("<think>")[-1].lstrip("\n")
+                    content = content.split("</think>")[-1].lstrip("\n")
+            reasoning = reasoning.strip()
+            if i > last_query:
+                out += f"<|im_start|>assistant\n<think>\n{reasoning}\n</think>\n\n{content}"
+            else:
+                out += f"<|im_start|>assistant\n{content}"
+            for k, tc in enumerate(m.get("tool_calls") or []):
+                sep = ("\n\n" if content.strip() else "") if k == 0 else "\n"
+                out += sep + fmt.format_tool_call_for_prompt(tc)
+            out += "<|im_end|>\n"
+        elif role == "tool":
+            if i == 0 or messages[i - 1].get("role") != "tool":
+                out += "<|im_start|>user"
+            out += f"\n<tool_response>\n{content}\n</tool_response>"
+            if i == len(messages) - 1 or messages[i + 1].get("role") != "tool":
+                out += "<|im_end|>\n"
+        else:
+            raise UnrenderableMessageError(f"messages[{i}]: unexpected role {role!r}")
+    return out + "<|im_start|>assistant\n" + ("<think>\n" if enable_thinking else "<think>\n\n</think>\n\n")
+
+
 def render_chat_prompt(messages: list, template: str, tool_format=None,
-                       bos: bool = True) -> str:
+                       bos: bool = True, enable_thinking: bool | None = None) -> str:
     """Formats a prepared messages array into a prompt string ending with the
     assistant generation header.
 
@@ -162,7 +249,12 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
     bundle's dialog context names a bos-token: libGenie then prepends that
     token to every query itself, and writing it here as well puts two in
     front of the prompt (measured on gemma4, where the SDK prefilled
-    [2, 2, 105, ...]). Either way the bundle's own setting is left as it is."""
+    [2, 2, 105, ...]). Either way the bundle's own setting is left as it is.
+
+    enable_thinking matters only to qwen3_5 (None: its template's default, off)."""
+    if template == "qwen3_5":
+        return _render_qwen3_5(messages, tool_format,
+                               default_thinking(template) if enable_thinking is None else enable_thinking)
     if template == "llama3":
         out = "<|begin_of_text|>" if bos else ""
         for m in messages:
@@ -292,7 +384,8 @@ def render_chat_prompt(messages: list, template: str, tool_format=None,
 
 def split_prompt_for_prefix_cache(messages: list, template: str,
                                   tool_format=None,
-                                  bos: bool = True) -> tuple[str, str, bool]:
+                                  bos: bool = True,
+                                  enable_thinking: bool | None = None) -> tuple[str, str, bool]:
     """Returns (prefix_prompt, remaining_prompt, cacheable) for the prefix KV
     cache: the system turn is the cacheable prefix, everything after it the
     per-request remainder. Llama2/Mistral fuses system into [INST] and Gemma
@@ -300,6 +393,17 @@ def split_prompt_for_prefix_cache(messages: list, template: str,
     keeps system as its own turn, so it splits like chatml does."""
     if template in ("llama2", "gemma"):
         return "", render_chat_prompt(messages, template, tool_format, bos), False
+    if template == "qwen3_5":
+        # Rendered whole: the template looks across the whole conversation
+        # (last user query, grouped tool results). The split below is still
+        # valid for it, since its system turn stands alone.
+        full = render_chat_prompt(messages, template, tool_format, bos, enable_thinking)
+        n_sys = sum(1 for m in messages if m.get("role") == "system")
+        if n_sys == 1 and messages[0].get("role") == "system":
+            prefix = f"<|im_start|>system\n{(messages[0].get('content') or '').strip()}<|im_end|>\n"
+            if full.startswith(prefix):
+                return prefix, full[len(prefix):], True
+        return "", full, False
 
     # Only a conversation that OPENS with its one and only system message
     # splits into prefix + remainder. Anything else -- no system message, a
