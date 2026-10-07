@@ -625,10 +625,12 @@ def count_prompt_tokens(vslot, segments: list) -> int:
 
 
 def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
-                  video_meta: dict, guard: bool = False) -> list:
+                  video_meta: dict, guard: bool = False,
+                  enable_thinking: bool = False) -> list:
     """Builds the spec's text/step segment list, and — when `guard` is on —
     refuses it up front if its vision tokens cannot fit the text-generator's
-    context.
+    context. enable_thinking goes to the spec's template as resolved by the
+    caller (a family without a thinking switch ignores it).
 
     **The guard is off by default** (VLM_VISION_BUDGET_GUARD), because it
     conceals a defect this server exists to expose. What it conceals is worth
@@ -670,7 +672,8 @@ def plan_segments(vslot: VLMSlot, system_text: str, parts: list,
     does not hide it — it is the opposite.
     """
     spec = vslot.spec
-    segments = spec.build_prompt_segments(system_text, parts, video_meta, spec)
+    segments = spec.build_prompt_segments(system_text, parts, video_meta, spec,
+                                          enable_thinking=enable_thinking)
     steps = sum(1 for kind, _ in segments if kind == "step")
     if not steps or not vslot.context_size:
         return segments

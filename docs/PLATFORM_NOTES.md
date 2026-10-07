@@ -385,6 +385,31 @@ The server does not convert models; a Qwen3.5 bundle is something you build. The
 template is picked from the bundle directory's name, so keep `qwen3_5` (or `qwen3.5`, `qwen35`)
 in it, or set `CHAT_TEMPLATE`.
 
+### Image input
+
+A Qwen3.5 bundle with an image encoder goes in `VLM_SLOTS` and is detected as the `qwen3_5_vl`
+family (see [MANUAL § VLM](./MANUAL.md#vlm-multimodal-support)). Checked on an SA8255P with
+QAIRT 2.51.0, one slot on `device_id` 0, a Qwen3.5-4B bundle with a 4096-token context
+(4-bit weights, 16-bit activations, a 512 x 512 ViT):
+
+| Check | Result |
+|---|---|
+| Greedy, one image, served as `qwen3_vl` (before this family) | `<think>\n</think>\n\n` and nothing else, 4 out of 4 |
+| Greedy, the same requests as `qwen3_5_vl` | a description of the image, 115 tokens, ending on its own (`stop`); identical across repeats |
+| A different image | a description of that image |
+| A Japanese instruction | a Japanese description |
+| `enable_thinking: true` | the reply starts with `<think>\n`, closes it and answers |
+
+The same bundle run with `genie-app` and a prompt ending at the bare `<|im_start|>assistant\n`
+stopped after two tokens under greedy decoding, and answered when the prompt ended with
+`<think>\n` or the empty think block, so it is the prompt and not the server that made the
+difference. Video input goes through the same path as Qwen3-VL's and has not been checked on a
+device.
+
+Thinking is off by default, as on a `qwen3_5` text slot. That is the default of Qwen3.5-2B's
+own `chat_template.jinja`; Qwen3.5-4B's turns thinking **on** unless told otherwise, so send
+`enable_thinking: true` to a 4B slot to get what its template gives.
+
 ## Reading the rest of this documentation
 
 These claims are measurements from the bench above. They are honest about that

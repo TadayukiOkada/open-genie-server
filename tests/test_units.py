@@ -2241,6 +2241,60 @@ def _spec():
     return vlm_specs.get_spec("qwen3_vl")
 
 
+def test_qwen3_vl_prompt_ends_at_the_bare_assistant_header():
+    """Qwen3-VL has no thinking switch: enable_thinking leaves its prompt
+    alone."""
+    spec = _spec()
+    for thinking in (False, True):
+        segs = spec.build_prompt_segments(
+            "", [("image", 0), ("text", "hi")], {}, spec, enable_thinking=thinking)
+        assert segs[-1] == ("text", "<|vision_end|>hi<|im_end|>\n<|im_start|>assistant\n")
+
+
+def test_qwen35_vl_prompt_follows_its_chat_template():
+    """Qwen3.5's chat_template.jinja: system and user turn trimmed as a whole,
+    and the generation header past the assistant one — the empty think block
+    unless thinking. Without it a greedy reply on the device was
+    "<think>\\n</think>\\n\\n" and nothing more."""
+    from genie_server import vlm_specs
+    spec = vlm_specs.get_spec("qwen3_5_vl")
+    parts = [("text", "  What is this? "), ("image", 0), ("text", " Be brief.  ")]
+    segs = spec.build_prompt_segments(" sys ", parts, {}, spec)
+    assert segs == [
+        ("text", "<|im_start|>system\nsys<|im_end|>\n<|im_start|>user\n"
+                 "What is this? <|vision_start|>"),
+        ("step", (0, 0)),
+        ("text", "<|vision_end|> Be brief.<|im_end|>\n<|im_start|>assistant\n"
+                 "<think>\n\n</think>\n\n"),
+    ]
+    thinking = spec.build_prompt_segments("", [("image", 0)], {}, spec,
+                                          enable_thinking=True)
+    assert thinking[0] == ("text", "<|im_start|>user\n<|vision_start|>")
+    assert thinking[-1] == ("text", "<|vision_end|><|im_end|>\n<|im_start|>assistant\n"
+                                    "<think>\n")
+
+
+def test_qwen35_vl_thinking_follows_the_qwen3_5_text_template():
+    """The same default and reply prefix a qwen3_5 text slot has."""
+    from genie_server import templates, vlm_specs
+    tmpl = vlm_specs.get_spec("qwen3_5_vl").chat_template
+    assert tmpl == "qwen3_5"
+    assert templates.default_thinking(tmpl) is False
+    assert templates.generation_prefix(tmpl, True) == "<think>\n"
+    assert templates.generation_prefix(tmpl, False) == ""
+    assert templates.generation_prefix(_spec().chat_template, True) == ""
+
+
+def test_plan_segments_hands_enable_thinking_to_the_template():
+    from genie_server import vlm, vlm_specs
+    slot = _BudgetSlot()
+    slot.spec = vlm_specs.get_spec("qwen3_5_vl")
+    on = vlm.plan_segments(slot, "", [("image", 0)], {}, enable_thinking=True)
+    off = vlm.plan_segments(slot, "", [("image", 0)], {})
+    assert on[-1][1].endswith("assistant\n<think>\n")
+    assert off[-1][1].endswith("assistant\n<think>\n\n</think>\n\n")
+
+
 def test_a_still_image_still_duplicates_its_own_frame():
     """Unchanged behaviour: one picture is one step, the ViT's temporal
     dimension filled by repeating it."""

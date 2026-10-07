@@ -988,13 +988,15 @@ def create_app(state: ServerState) -> FastAPI:
     # ------------------------------------------------------------ chat
 
     async def _vlm_chat(request: Request, body: dict, requested_model: str,
-                        params: GenParams, stream: bool):
+                        params: GenParams, stream: bool,
+                        requested_thinking: bool | None = None):
         """Chat requests whose messages contain image or video parts — routed through
         the GenieNode/GeniePipeline path. Single-turn only; the request's
         max_tokens/stop plus prefix-cache/LoRA/tools do not apply (no SDK APIs
         for them). Generation length is bounded by the slot's static
         VLM_SLOTS[].max_tokens instead; hitting it, or filling the context,
-        comes back as finish_reason="length"."""
+        comes back as finish_reason="length". enable_thinking is resolved and
+        the reply prefixed as on a text slot, by the family's chat_template."""
         if not vlm.VLM_AVAILABLE:
             return openai_error(
                 503, "VLM support is not available on this server "
@@ -1008,6 +1010,10 @@ def create_app(state: ServerState) -> FastAPI:
                 "This request has image or video content but no VLM_SLOTS "
                 "are configured on this server.", "model")
         model_name = vslot.active_model_id   # the model that answers, see above
+        chat_template = vslot.spec.chat_template
+        enable_thinking = (templates.default_thinking(chat_template)
+                           if requested_thinking is None else requested_thinking)
+        reply_prefix = templates.generation_prefix(chat_template, enable_thinking)
         try:
             system_text, parts, sources = vlm.extract_multimodal_parts(
                 body["messages"])
@@ -1024,7 +1030,8 @@ def create_app(state: ServerState) -> FastAPI:
             # for turning its frames into bitmaps.
             segments = vlm.plan_segments(vslot, system_text, parts,
                                          vlm.extract_video_meta(body),
-                                         guard=cfg.vlm_vision_budget_guard)
+                                         guard=cfg.vlm_vision_budget_guard,
+                                         enable_thinking=enable_thinking)
             images = await asyncio.to_thread(
                 vlm.decode_media_sources, sources,
                 max_image_pixels=cfg.vlm_max_image_pixels,
@@ -1054,14 +1061,16 @@ def create_app(state: ServerState) -> FastAPI:
                         request_id, model_name, {"content": text}),
                     make_final=lambda reason: protocol.chat_chunk(
                         request_id, model_name, {}, finish_reason=reason),
-                    preamble=[protocol.chat_role_chunk(request_id, model_name)],
+                    preamble=[protocol.chat_role_chunk(request_id, model_name)] + (
+                        [protocol.chat_chunk(request_id, model_name, {"content": reply_prefix})]
+                        if reply_prefix else []),
                     include_usage=_include_usage(body),
                     prompt_tokens=prompt_tokens,
                     abortable=False,
                 ),
                 media_type="text/event-stream")
 
-        text = await _collect_or_raise(gen, state)
+        text = reply_prefix + await _collect_or_raise(gen, state)
         return protocol.chat_response(
             request_id, model_name, text, gen.finish_reason,
             prompt_tokens, gen.completion_tokens or vslot.count_tokens(text))
@@ -1113,7 +1122,8 @@ def create_app(state: ServerState) -> FastAPI:
                     "A grammar constraint cannot apply to an image or video "
                     "request: the SDK's VLM pipeline has no grammar API.",
                     params.grammar.param, code="grammar_not_supported")
-            return await _vlm_chat(request, body, requested_model, params, stream)
+            return await _vlm_chat(request, body, requested_model, params, stream,
+                                   requested_thinking)
 
         slot = manager.select_for_request(body, requested_model)
         manager.require_loaded(slot)

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A Qwen3.5 bundle with an image encoder answered nothing under greedy
+  decoding.** `VLM_SLOTS` detected it as `qwen3_vl` and ended the prompt at
+  the bare assistant header, where Qwen3.5's template writes a think block;
+  the model wrote its own `<think>` and, greedily, stopped there
+  (`<think>\n</think>\n\n` on every request, checked on an SA8255P with a
+  Qwen3.5-4B bundle). See
+  [PLATFORM_NOTES § Image input](PLATFORM_NOTES.md#image-input).
+
+### Added
+
+- **A `qwen3_5_vl` VLM family**, auto-detected when the text-generator
+  config sets `engine.model."linear-attention"`: Qwen3-VL's vision side and
+  Qwen3.5's chat template — the empty think block by default, `<think>\n`
+  with `enable_thinking: true`, and the reply prefixed as on a `qwen3_5` text
+  slot. `enable_thinking` and `chat_template_kwargs.enable_thinking` now reach
+  the VLM path; `qwen3_vl` and `gemma4` slots ignore them as before. See
+  [MANUAL § VLM](MANUAL.md#vlm-multimodal-support).
+
 ## 1.7.0 — Qwen3.5
 
 Qwen3.5 bundles can be served (#52). Checked on an SA8255P with QAIRT 2.51.0 and a

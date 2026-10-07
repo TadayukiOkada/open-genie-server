@@ -1578,6 +1578,57 @@ def test_an_image_request_goes_through_the_http_path(state, monkeypatch, tmp_pat
     assert pipeline.executed == 1
 
 
+@pytest.mark.parametrize("extra, header, prefix", [
+    ({}, "<think>\n\n</think>\n\n", ""),
+    ({"enable_thinking": True}, "<think>\n", "<think>\n"),
+    ({"chat_template_kwargs": {"enable_thinking": True}}, "<think>\n", "<think>\n"),
+    ({"enable_thinking": False}, "<think>\n\n</think>\n\n", ""),
+])
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_qwen35_image_request_gets_the_qwen3_5_generation_header(
+        state, monkeypatch, tmp_path, extra, header, prefix, stream):
+    """A Qwen3.5 bundle was served with Qwen3-VL's bare assistant header, and
+    greedy replies came back as an empty think block. The prompt now ends as
+    Qwen3.5's template ends it, and a thinking reply starts with the
+    "<think>\\n" the prompt opened, as on a qwen3_5 text slot."""
+    pytest.importorskip("numpy")
+    PIL = pytest.importorskip("PIL.Image")
+    import base64
+    import io
+    from pathlib import Path
+
+    from fake_genie import FakeVLMNode, FakeVLMPipeline
+    from genie_server import genie_node, vlm
+
+    monkeypatch.setattr(genie_node, "Node", FakeVLMNode)
+    monkeypatch.setattr(genie_node, "Pipeline", FakeVLMPipeline)
+    bundle = Path(__file__).parent / "data" / "vlm_bundles" / "qwen35_vl"
+    vslot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=bundle,
+                        spec_name=None, htp_ext_cache_dir=tmp_path)
+    state.manager.vlm_slots = [vslot]
+    text_encoder = vslot.text_encoder
+
+    buf = io.BytesIO()
+    PIL.new("RGB", (4, 4)).save(buf, "PNG")
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    with TestClient(create_app(state)) as c:
+        r = c.post("/v1/chat/completions", json={"stream": stream, **extra, "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": "describe"}]}]})
+    assert r.status_code == 200, r.text
+    assert text_encoder.texts[-1][1] == \
+        "<|vision_end|>describe<|im_end|>\n<|im_start|>assistant\n" + header
+    if stream:
+        events = sse_events(r.text)
+        assert events[-1] == "[DONE]"
+        assert "".join(
+            e["choices"][0]["delta"].get("content", "")
+            for e in events[:-1] if isinstance(e, dict) and e.get("choices")) == prefix
+    else:
+        assert r.json()["choices"][0]["message"]["content"] == prefix
+
+
 def test_an_image_over_the_pixel_ceiling_is_a_400_before_the_npu(
         state, monkeypatch, tmp_path):
     """VLM_MAX_IMAGE_PIXELS reaches the HTTP path: the request is refused as

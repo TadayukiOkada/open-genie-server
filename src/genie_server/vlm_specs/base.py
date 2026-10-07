@@ -26,7 +26,8 @@ class VLMFamily:
     bind() for which fields it actually reads from the bundle)."""
     name: str
 
-    # (system_text, parts, video_meta, spec) -> list[("text", str) | ("step", payload)]
+    # (system_text, parts, video_meta, spec, enable_thinking=...) ->
+    # list[("text", str) | ("step", payload)]
     # See VLMSpec.build_prompt_segments for the full contract — it is the
     # same function, just stored here before a layout is known.
     build_prompt_segments: Callable = field(repr=False)
@@ -58,6 +59,13 @@ class VLMFamily:
     # fixed maximum and told at load time how many of them are real
     # (Gemma 4). 0 = the input is exactly the resolution's own patch count.
     max_patches: int = 0
+
+    # The text chat template (templates.TEMPLATE_FAMILIES) whose thinking
+    # rules this family's prompt follows: templates.default_thinking for what
+    # a request that does not say gets, templates.generation_prefix for what
+    # the reply is given back with. "" = the family has no thinking switch,
+    # and enable_thinking does not change its prompt.
+    chat_template: str = ""
 
 
 @dataclass
@@ -92,11 +100,14 @@ class VLMSpec:
     normalize_std: tuple
 
     # Prompt template function:
-    #   (system_text, parts, video_meta, spec) -> list[("text", str) | ("step", payload)]
+    #   (system_text, parts, video_meta, spec, enable_thinking=...) ->
+    #   list[("text", str) | ("step", payload)]
     # parts is exactly the ("text"|"image"|"video", value) list returned by
     # vlm.extract_multimodal_parts(); video_meta is the dict from
-    # vlm.extract_video_meta(). The return value is the exact order to feed
-    # into the Accumulator (the final text/step interleave order).
+    # vlm.extract_video_meta(); enable_thinking is the request's, resolved
+    # against chat_template's default (a family without one ignores it). The
+    # return value is the exact order to feed into the Accumulator (the final
+    # text/step interleave order).
     #
     # A "step" is one image-encoder execution, NOT one input image: the ViT
     # consumes temporal_patch_size frames at a time. The payload is whatever
@@ -121,6 +132,9 @@ class VLMSpec:
     # libGenie prepends a BOS to every text segment itself. Set by VLMSlot
     # from the loaded config; a template with a BOS of its own leaves it out.
     text_encoder_adds_bos: bool = False
+
+    # See VLMFamily.chat_template.
+    chat_template: str = ""
 
     @property
     def vision_tokens_per_step(self) -> int:
@@ -157,6 +171,7 @@ def template(family: VLMFamily) -> VLMSpec:
         build_prompt_segments=family.build_prompt_segments,
         preprocess_step=family.preprocess_step,
         max_patches=family.max_patches,
+        chat_template=family.chat_template,
     )
 
 

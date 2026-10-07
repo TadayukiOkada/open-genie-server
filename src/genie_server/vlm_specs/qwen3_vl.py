@@ -156,10 +156,12 @@ def _qwen3vl_step_time(times: list, start: int, per_step: int) -> float:
 
 
 def qwen3vl_build_prompt_segments(system_text: str, parts: list,
-                                  video_meta: dict, spec: "VLMSpec") -> list:
+                                  video_meta: dict, spec: "VLMSpec",
+                                  enable_thinking: bool = False) -> list:
     """Converts OpenAI content parts (an ordered list of text/image/video
     tuples) into Accumulator-feed-order segments, including the Qwen3-VL chat
-    template.
+    template. Qwen3-VL's template has no thinking switch, so enable_thinking
+    is not read; the prompt ends at the bare assistant header.
 
     Each returned element: ("text", str) | ("step", (frame_idx, ...))
     Text segments are complete fragments with <|vision_start|>/<|vision_end|>
@@ -335,16 +337,32 @@ def qwen3vl_bind(spec: "VLMSpec", node_cfgs: dict, layout) -> "VLMSpec":
     return spec
 
 
-def qwen3vl_detect(tokenizer_json: dict, node_cfgs: dict) -> bool:
-    """Auto-detection signal for VLM_SLOTS[].spec when it is not given: the
-    tokenizer's own vision marker, or (belt and suspenders) the
-    text-generator's mRoPE rope-type."""
+def _qwen_vision_markers(tokenizer_json: dict, node_cfgs: dict) -> bool:
+    """The tokenizer's own vision marker, or (belt and suspenders) the
+    text-generator's mRoPE rope-type. Qwen3-VL and Qwen3.5 share both."""
     added = {t.get("content") for t in (tokenizer_json or {}).get("added_tokens", [])}
     if "<|vision_start|>" in added:
         return True
     tg = next(iter(node_cfgs.get("text_generator", {}).values()), {})
     rope_type = _dig(tg, "engine", "model", "positional-encoding", "rope-scaling", "rope-type")
     return rope_type == "qwen3vl-mrope"
+
+
+def is_linear_attention(node_cfgs: dict) -> bool:
+    """The text-generator config's engine.model."linear-attention" — set on a
+    Qwen3.5 bundle (Gated DeltaNet layers between the attention ones), never
+    on a Qwen3-VL one. What tells the two families apart: their vision side
+    is the same."""
+    tg = next(iter(node_cfgs.get("text_generator", {}).values()), {})
+    return bool(_dig(tg, "engine", "model", "linear-attention"))
+
+
+def qwen3vl_detect(tokenizer_json: dict, node_cfgs: dict) -> bool:
+    """Auto-detection signal for VLM_SLOTS[].spec when it is not given: the
+    Qwen vision markers on a bundle without linear attention (one with it is
+    Qwen3.5, see qwen3_5_vl.py)."""
+    return (_qwen_vision_markers(tokenizer_json, node_cfgs)
+            and not is_linear_attention(node_cfgs))
 
 
 QWEN3_VL_FAMILY = VLMFamily(

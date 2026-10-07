@@ -97,7 +97,8 @@ def _mmss(seconds: float) -> str:
 
 
 def gemma4_build_prompt_segments(system_text: str, parts: list,
-                                 video_meta: dict, spec: "VLMSpec") -> list:
+                                 video_meta: dict, spec: "VLMSpec",
+                                 enable_thinking: bool = False) -> list:
     """OpenAI content parts -> Accumulator-order segments in Gemma 4's chat
     format.
 
@@ -118,6 +119,9 @@ def gemma4_build_prompt_segments(system_text: str, parts: list,
     assume 24 fps. Every frame is encoded at this slot's grid, and Gemma 4's
     video processor budgets 70 soft tokens a frame against 280 for a still:
     a slot meant for video wants the smaller grid (24x24 for 512x512 frames).
+
+    enable_thinking is not read: this family has no chat_template, so the
+    request's flag does not change the prompt.
     """
     segments = []
     buf = "" if spec.text_encoder_adds_bos else "<bos>"
