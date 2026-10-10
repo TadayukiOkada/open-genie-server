@@ -689,9 +689,9 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `HEXAGON_VERSION` | 任意 | `"v73"` | `ADSP_LIBRARY_PATH` に使うHexagonバージョン(例: `hexagon-v73`)。 |
 | `TARGET_PLATFORM` | 任意 | `"auto"` | `"linux-oe"` / `"linux-ubuntu"` / `"android"` / 自動判定の `"auto"`。ライブラリと`ADSP_LIBRARY_PATH`の構成を選ぶ — [UbuntuのQAIRTパッケージ](#ubuntuのqairtパッケージ)と[Androidで動かす](#androidで動かす)参照。 |
 | `TEXT_SLOTS` | `VLM_SLOTS`未設定なら必須 | (未設定) | 常駐させるテキストモデルごとに1エントリ: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`。必須なのは`model_root`だけで、`name`は`slot<i>`(名前は`TEXT_SLOTS`と`VLM_SLOTS`を合わせて一意で、パス区切り・`|`・制御文字・前後の空白を含められない。重複は起動時エラー)、`device_id`未設定ならモデル自身のHTP設定が指定するコアに載るため、単一モデルなら`[{"model_root": "..."}]`で済む([マルチテキストスロット](#マルチテキストスロット)参照。2本目が必ず載るとは限らない点と、2つのスロットが同じ `device_id` を共有すること自体は可能だがそれで同時実行にはならない点に注意)。`poll`はそのスロットで使うモデルの`QnnHtp.poll`を上書きする(下の`POLL`参照)。`config_file`は`model_root`内のダイアログ設定ファイル名で、既定は`genie_config.json`。genie-appが設定パスをコマンドラインで受け取る以上、エクスポート側がモデル名にちなんだ名前(`acme-7b-htp.json`など)を付けることがあり、**コピーを作るよりスロットからそのファイルを指す方がよい**。`poll`と`config_file`はどちらも**モデルではなくスロットに属する**ので、`/v1/models/switch`をまたいでも残る。`TEXT_SLOTS`と`VLM_SLOTS`のどちらも無い設定は起動時に拒否される。 |
-| `POLL` | 任意 | (未設定) | 各スロットの`poll`の既定値。`true`/`false`で各モデルバンドルの`dialog.engine.backend.QnnHtp.poll`を上書きし、未設定ならバンドルの値をそのまま使う。**通常は`false`が正解** — SA8255Pではポーリングに約260%のCPUを使う一方、レイテンシはブロッキングと区別がつかない(後述の`QnnHtp.poll`の節)。スロット個別の`poll`が優先される。テキストスロット専用でVLMスロットには影響しない。 |
+| `POLL` | 任意 | (未設定) | 各スロットの`poll`の既定値。`true`/`false`で各モデルバンドルの`dialog.engine.backend.QnnHtp.poll`を上書きし、未設定ならバンドルの値をそのまま使う。**通常は`false`が正解** — SA8255Pではポーリングに約260%のCPUを使う一方、レイテンシはブロッキングと区別がつかない(後述の`QnnHtp.poll`の節)。スロット個別の`poll`が優先される。テキストスロットと、VLMのtext-generatorノードの既存の`engine.backend.QnnHtp`に適用する。スロットの明示的な`"poll": null`は`POLL`の上書きを解除し、バンドルの設定を維持する。元ファイルは変更せずメモリ上で適用し、CPU側のノードにはHTP設定を追加しない。 |
 | `SLOT_LOAD_ORDER` | 任意 | `"vlm-first"` | `TEXT_SLOTS`と`VLM_SLOTS`の両方を設定した場合に、どちらを先に生成するか: `"vlm-first"` または `"text-first"`。[スロット生成順](#スロット生成順slot_load_order)および[2つのモデルを同時にロードする](#2つのモデルを同時にロードする)を参照。それ以外の値は起動時にエラー。 |
-| `VLM_SLOTS` | 任意 | (未設定) | `TEXT_SLOTS`とは別系統・並列のマルチモーダル(`GenieNode`/`GeniePipeline`)スロット構成。`[{"name","device_id","model_root","spec","max_tokens"}, ...]`。`TEXT_SLOTS`の有無に関わらず独立して設定可能([VLM(マルチモーダル)対応](#vlmマルチモーダル対応)参照)。`max_tokens`はそのスロットの生成上限(既定`1024`、`0`で上限なし) — [生成トークン数の上限](#生成トークン数の上限)を参照。 |
+| `VLM_SLOTS` | 任意 | (未設定) | `TEXT_SLOTS`とは別系統・並列のマルチモーダル(`GenieNode`/`GeniePipeline`)スロット構成。`[{"name","device_id","model_root","spec","max_tokens","poll"}, ...]`。`TEXT_SLOTS`の有無に関わらず独立して設定可能([VLM(マルチモーダル)対応](#vlmマルチモーダル対応)参照)。`max_tokens`はそのスロットの生成上限(既定`1024`、`0`で上限なし) — [生成トークン数の上限](#生成トークン数の上限)を参照。 |
 | `PREFIX_CACHE_DIR` | 任意 | `"./prefix_cache"` | prefix KVキャッシュ、およびHTP拡張設定コピー(`.htp_ext_cache/`)の保存先ディレクトリ。相対パスはサーバの作業ディレクトリ基準で解決されるため、起動ディレクトリが一定しない運用では絶対パスを設定しておくのが無難です。 |
 | `MODELS_BASE_DIR` | 任意 | (未設定) | **相対パス**で書かれたモデルパス全ての基準ディレクトリ。起動時の `TEXT_SLOTS`/`VLM_SLOTS` の `model_root` と、`POST /v1/models/switch` の `model_dir` の両方に適用される。**絶対パス**の場合はこの値を無視してそのまま使う。未設定時、相対パスはサーバの作業ディレクトリ基準で解決される。これを設定しておけば、設定ファイル中の各モデルをディレクトリ名だけで書ける。なお基準であって閉じ込め(sandbox)ではない — 絶対パスの `model_dir` は依然として配下の外からロードできる。 |
 | `CHAT_TEMPLATE` | 任意 | (未設定=自動判定) | チャットテンプレートを `"llama3"` / `"llama2"` / `"chatml"` / `"qwen3_5"` / `"gemma"` / `"gemma4"` のいずれかに固定。全スロット共通の上書き。未設定時はスロットごとにモデルディレクトリ名から自動判定([該当節](#チャットテンプレートの選択ルール)参照)。 |
@@ -785,7 +785,10 @@ SA8255P(QAIRT 2.49)で同一内容の64トークン生成を25回、1スロッ�
 `POLL` が全スロットの既定値で、スロット個別の `poll` がそれを上書きする。
 **どちらも未設定なら何も変えない**ので、既存のデプロイは従来どおりの挙動になる。
 この上書きは**スロットの属性**なので、`/v1/models/switch` で別モデルに切り替えても維持される。
-VLMスロットは参照しない。
+VLMスロットではtext-generatorの既存のHTPバックエンドに適用する。
+encoderノードのSDK設定は`poll`を受け付けないため変更しない。
+どちらの種類のスロットでも、明示的な`"poll": null`は`POLL`の上書きを解除してバンドルの設定を維持する。
+元のバンドルファイルは書き換えず、メモリ上で適用する。
 
 一度だけ観測して再現しなかった注意点: `poll: false` で**起動直後の1リクエストだけ**
 中央値の2倍かかったことがある(続く26リクエストは全て互いに0.01秒以内)。テールレイテンシが
@@ -1239,12 +1242,13 @@ Qwen3-VLのような画像入力モデルに対応する。**テキスト専用�
 
 ### 設定方法
 
-`env_config.json`に`TEXT_SLOTS`と並列の`VLM_SLOTS`キーを追加する:
+`env_config.json`に`TEXT_SLOTS`と並列の`VLM_SLOTS`キーを追加する。
+`POLL`でテキスト・VLM共通の既定値を指定し、スロット個別の`poll`で上書きできる:
 
 ```json
 {
   "VLM_SLOTS": [
-    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl"}
+    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl", "poll": false}
   ]
 }
 ```

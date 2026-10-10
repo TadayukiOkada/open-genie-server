@@ -755,9 +755,9 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `HEXAGON_VERSION` | optional | `"v73"` | Hexagon version used in `ADSP_LIBRARY_PATH` (e.g. `hexagon-v73`). |
 | `TARGET_PLATFORM` | optional | `"auto"` | `"linux-oe"`, `"linux-ubuntu"`, `"android"`, or `"auto"` to detect. Selects the library and `ADSP_LIBRARY_PATH` layout — see [Ubuntu with QAIRT packages](#ubuntu-with-qairt-packages) and [Running on Android](#running-on-android). |
 | `TEXT_SLOTS` | required unless `VLM_SLOTS` is set | (unset) | One entry per text model to keep resident: `[{"model_root", "name", "device_id", "poll", "config_file"}, ...]`. Only `model_root` is required — `name` defaults to `slot<i>` (names must be unique across `TEXT_SLOTS` and `VLM_SLOTS` together and may not contain a path separator, `|`, a control character or surrounding whitespace; a clash is a startup error) and an unset `device_id` leaves the model on whichever core its own HTP config names, so a single-model server is `[{"model_root": "..."}]`. See [Multi Text Slots](#multi-text-slots), and note that a second slot does not always fit — and that two slots sharing a `device_id` is allowed but does not run them concurrently. `poll` overrides that model's `QnnHtp.poll` for this slot — see `POLL` below. `config_file` names the dialog config inside `model_root`, default `genie_config.json`: an export is free to call it after the model (`acme-7b-htp.json`) because genie-app takes the path on its command line, and pointing a slot at that file beats copying it. Both `poll` and `config_file` belong to the slot, so they survive a `/v1/models/switch`. A config with neither `TEXT_SLOTS` nor `VLM_SLOTS` is rejected at startup. |
-| `POLL` | optional | (unset) | Default for every slot's `poll`: `true`/`false` overrides `dialog.engine.backend.QnnHtp.poll` in each model bundle, unset leaves each bundle as it is. **`false` is usually what you want** — polling costs ~260% CPU on SA8255P for latency indistinguishable from blocking (see [`QnnHtp.poll`](#qnnhtppoll-costs-260-cpu-and-buys-nothing-here)). A per-slot `poll` wins over this. Text slots only; VLM slots are unaffected. |
+| `POLL` | optional | (unset) | Default for every slot's `poll`: `true`/`false` overrides `dialog.engine.backend.QnnHtp.poll` in each model bundle, unset leaves each bundle as it is. **`false` is usually what you want** — polling costs ~260% CPU on SA8255P for latency indistinguishable from blocking (see [`QnnHtp.poll`](#qnnhtppoll-costs-260-cpu-and-buys-nothing-here)). A per-slot `poll` wins over this. Applies to text slots and existing `engine.backend.QnnHtp` backends in VLM text-generator nodes. A slot's explicit `"poll": null` opts out of `POLL` and keeps its bundle settings. |
 | `SLOT_LOAD_ORDER` | optional | `"vlm-first"` | Which slot kind is created first when both `TEXT_SLOTS` and `VLM_SLOTS` are set: `"vlm-first"` or `"text-first"`. See [Slot creation order](#slot-creation-order-slot_load_order) and [Loading Two Models at Once](#loading-two-models-at-once). Any other value is rejected at startup. |
-| `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens","pipeline_script","node_configs","static_tensors"}, ...]`. Only `model_root` is required — the bundle layout is read from the bundle itself and `spec` (the VLM family) is auto-detected when omitted; the last three are an escape hatch for a layout `vlm_layout.py` cannot read on its own. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
+| `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens","poll","pipeline_script","node_configs","static_tensors"}, ...]`. Only `model_root` is required — the bundle layout is read from the bundle itself and `spec` (the VLM family) is auto-detected when omitted; the last three are an escape hatch for a layout `vlm_layout.py` cannot read on its own. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
 | `PREFIX_CACHE_DIR` | optional | `"./prefix_cache"` | Directory for the prefix KV cache and HTP extension config copies (`.htp_ext_cache/`). A relative value is resolved against the server's working directory, so an absolute path is worth setting if the server may be started from anywhere but its own directory. |
 | `MODELS_BASE_DIR` | optional | (unset) | Base directory every **relative** model path resolves against: `TEXT_SLOTS`/`VLM_SLOTS` `model_root` at startup, and `POST /v1/models/switch`'s `model_dir`. An **absolute** path ignores it and is used as given. Unset, a relative path is resolved against the server's working directory. Set this and a config can name each model by bare directory name. Note it is a base, not a sandbox — an absolute `model_dir` still loads from outside the tree. |
 | `CHAT_TEMPLATE` | optional | (unset = auto-detect) | Pins the chat template to `"llama3"` / `"llama2"` / `"chatml"` / `"qwen3_5"` / `"gemma"` / `"gemma4"`. Overrides for every slot. If unset, each slot auto-detects it from its model directory name (see [the relevant section](#chat-template-selection-rules)). |
@@ -852,7 +852,11 @@ someone else's model directory:
 `POLL` sets the default for every slot and a slot's own `poll` overrides it;
 leaving both unset changes nothing, so an existing deployment behaves exactly
 as before. The override is a property of the *slot*, so it survives
-`/v1/models/switch` onto a different model. VLM slots do not read it.
+`/v1/models/switch` onto a different text model. VLM slots apply it to each
+existing text-generator HTP backend. Encoder nodes are left alone because
+their SDK configuration does not accept `poll`. Explicit `"poll": null`
+on either kind of slot keeps the bundle settings even when `POLL` is set.
+Overrides are made in memory; the original bundle files are never rewritten.
 
 One caveat we saw once and could not reproduce: a single request right after
 startup took 2× the median with `poll: false`; the following 26 requests were
@@ -1324,12 +1328,13 @@ Without `numpy`/`Pillow` installed, this is automatically disabled (a warning is
 
 ### Configuration
 
-Add a `VLM_SLOTS` key alongside `TEXT_SLOTS` in `env_config.json`:
+Add a `VLM_SLOTS` key alongside `TEXT_SLOTS` in `env_config.json`. Set `POLL` for a shared text/VLM default,
+or `poll` on a VLM slot to override it:
 
 ```json
 {
   "VLM_SLOTS": [
-    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl"}
+    {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl", "poll": false}
   ]
 }
 ```
