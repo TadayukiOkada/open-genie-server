@@ -48,7 +48,7 @@ _TERMINAL_CODES = {"complete", "end", "abort"}
 
 def _load_vlm_node_config(config_path: Path, device_id: int | None,
                           slot_name: str, node_key: str, htp_ext_cache_dir: Path,
-                          max_tokens: int = 0):
+                          max_tokens: int = 0, poll: bool | None = None):
     """Reads one node config (img-enc-htp.json / text-encoder.json /
     text-generator.json) and returns a dict for genie_node.Node(...) with
     every relative asset path resolved against the config's own directory —
@@ -64,7 +64,9 @@ def _load_vlm_node_config(config_path: Path, device_id: int | None,
     If device_id is given, the HTP backend extensions file is also pinned to
     that device, mirroring slots.pin_htp_device. Not every node type has an
     engine.backend.extensions field (text-encoder is a pure CPU-side LUT —
-    no HTP device to pin)."""
+    no HTP device to pin). If poll is given, only existing QnnHtp backends
+    on text-generator nodes are overridden in memory; embedding nodes do not
+    accept this option. The bundle files stay untouched."""
     with open(config_path) as f:
         node_cfg = json.load(f)
     base = config_path.parent
@@ -98,6 +100,14 @@ def _load_vlm_node_config(config_path: Path, device_id: int | None,
 
     # htp_backend_ext_config.json (image-encoder, text-generator)
     backend = engine.get("backend", {})
+    htp = backend.get("QnnHtp")
+    if poll is not None and top_key == "text-generator" and isinstance(htp, dict):
+        if htp.get("poll") != poll:
+            logger.info(
+                f"[{slot_name}] node '{node_key}': QnnHtp.poll "
+                f"{htp.get('poll')!r} -> {poll!r} (overridden by config)")
+        htp["poll"] = poll
+
     if backend.get("extensions"):
         backend["extensions"] = resolve_and_verify(backend["extensions"], base)
         if device_id is not None:
@@ -218,7 +228,8 @@ class VLMSlot:
     def __init__(self, name: str, device_id: int | None, model_root: Path,
                  spec_name: str | None, htp_ext_cache_dir: Path, max_tokens: int = 0,
                  log_handle=None, pipeline_script: str | None = None,
-                 node_configs: dict | None = None, static_tensors: dict | None = None):
+                 node_configs: dict | None = None, static_tensors: dict | None = None,
+                 poll: bool | None = None):
         self.name = name
         self.device_id = device_id
         self.model_root = model_root
@@ -258,7 +269,8 @@ class VLMSlot:
             cfg_path = Path(resolve_and_verify(
                 self.layout.node_config_files[node_key], model_root))
             node_cfgs[node_key] = _load_vlm_node_config(
-                cfg_path, device_id, name, node_key, htp_ext_cache_dir, max_tokens)
+                cfg_path, device_id, name, node_key, htp_ext_cache_dir, max_tokens,
+                poll=poll)
 
         # Before any node exists, so a family's bind() can both read the
         # bundle's own settings (Gemma 4's patch grid, Qwen3-VL's
@@ -387,7 +399,7 @@ def create_vlm_slots(config: ServerConfig, genie_cdll,
                         max_tokens=spec.max_tokens, log_handle=log_handle,
                         pipeline_script=spec.pipeline_script,
                         node_configs=spec.node_configs,
-                        static_tensors=spec.static_tensors)
+                        static_tensors=spec.static_tensors, poll=spec.poll)
         out.append(vslot)
         logger.info(
             f"VLM slot '{vslot.name}' ready: model={vslot.active_model_id} "
