@@ -151,6 +151,8 @@ class VLMSlotSpec:
     pipeline_script: str | None = None
     node_configs: dict | None = None
     static_tensors: dict | None = None
+    # None keeps each HTP node's bundle setting; explicit null opts out of POLL.
+    poll: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -523,6 +525,9 @@ def _parse_vlm_slots(raw_cfg: dict,
           {"name": "vision", "device_id": 0, "model_root": "/models/qwen3-vl"}
         ]
     model_root follows the same MODELS_BASE_DIR rule as TEXT_SLOTS.
+    poll follows TEXT_SLOTS too: a slot value overrides POLL, absent inherits
+    it, and explicit null leaves the bundle alone. Only existing QnnHtp
+    backends are patched; CPU-side nodes are unaffected.
 
     "spec" names the VLM family explicitly (vlm_specs.FAMILIES); omitted, it
     is auto-detected from the bundle (vlm_specs.detect_family). Most
@@ -543,6 +548,7 @@ def _parse_vlm_slots(raw_cfg: dict,
             pipeline_script=s.get("pipeline_script") or None,
             node_configs=s.get("node_configs") or None,
             static_tensors=s.get("static_tensors") or None,
+            poll=_parse_poll(s.get("poll", raw_cfg.get("POLL"))),
         )
         for i, s in enumerate(raw)
     )

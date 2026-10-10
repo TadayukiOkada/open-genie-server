@@ -738,3 +738,37 @@ def test_vlm_slot_reads_its_sampler_defaults(monkeypatch, tmp_path):
     # The AI Hub fixture's text-generator config has no sampler section, so
     # every default comes from the SDK: nothing is read, nothing invented.
     assert slot.sampler_defaults == {}
+
+
+@pytest.mark.parametrize("global_poll", [False, True, None])
+def test_vlm_poll_reaches_nodes_and_slots_are_independent(monkeypatch, tmp_path, global_poll):
+    import shutil
+    from genie_server import vlm, genie_node
+    from genie_server.config import ServerConfig, _parse_vlm_slots
+
+    _patch_genie_node(monkeypatch)
+    monkeypatch.setattr(genie_node, "attach", lambda _: None)
+    bundle = tmp_path / "bundle"
+    shutil.copytree(FIXTURES / "ai_hub", bundle)
+    for filename in ("text-generator.json", "img-enc-htp.json"):
+        path = bundle / filename
+        cfg = json.loads(path.read_text())
+        node = next(iter(cfg.values()))
+        node["engine"]["backend"] = {"QnnHtp": {"poll": True}}
+        path.write_text(json.dumps(cfg))
+    before = {p: p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    cfg = ServerConfig(sdk_root="/nonexistent", prefix_cache_dir=str(tmp_path / "cache"),
+        vlm_slots=_parse_vlm_slots({"POLL": global_poll, "VLM_SLOTS": [
+            {"name": "inherited", "model_root": str(bundle)},
+            {"name": "override", "model_root": str(bundle), "poll": True},
+            {"name": "bundle", "model_root": str(bundle), "poll": None}]}))
+    slots = vlm.create_vlm_slots(cfg, object())
+    expected = [True if global_poll is None else global_poll, True, True]
+    for slot, poll in zip(slots, expected):
+        for node in (slot.text_generator, slot.image_encoder):
+            body = next(iter(node.config.values()))
+            assert body["engine"]["backend"]["QnnHtp"]["poll"] is poll
+        assert "engine" not in slot.text_encoder.config["text-encoder"]
+    assert {p: p.read_bytes() for p in before} == before
+    for slot in slots:
+        slot.free()

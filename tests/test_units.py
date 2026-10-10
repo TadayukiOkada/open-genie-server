@@ -3176,3 +3176,76 @@ def test_cli_passes_explicit_host_and_port_through(monkeypatch, argv,
         run=lambda app, host, port: ran.update(host=host, port=port)))
     cli.main()
     assert (ran["host"], ran["port"]) == expected
+
+
+# ------------------------------------------------------------ VLM HTP polling
+
+@pytest.mark.parametrize("global_value, slot_value, expected", [
+    ({}, {}, None),
+    ({"POLL": False}, {}, False),
+    ({"POLL": True}, {}, True),
+    ({"POLL": False}, {"poll": True}, True),
+    ({"POLL": True}, {"poll": False}, False),
+    ({"POLL": False}, {"poll": None}, None),
+])
+def test_vlm_poll_matches_text_precedence(global_value, slot_value, expected):
+    entry = {"model_root": "/models/vision", **slot_value}
+    raw = {**global_value, "VLM_SLOTS": [entry], "TEXT_SLOTS": [entry]}
+    assert _vlm_slots(raw)[0].poll is expected
+    assert _slots(raw)[0].poll is expected
+
+
+@pytest.mark.parametrize("value", ["false", "yes", 0, 1, [], {}])
+@pytest.mark.parametrize("per_slot", [False, True])
+def test_vlm_poll_rejects_non_boolean(value, per_slot):
+    raw = {"VLM_SLOTS": [{"model_root": "/models/vision"}]}
+    if per_slot:
+        raw["VLM_SLOTS"][0]["poll"] = value
+    else:
+        raw["POLL"] = value
+    with pytest.raises(ValueError, match="poll must be true or false"):
+        _vlm_slots(raw)
+
+
+@pytest.mark.parametrize("kind", ["text-generator", "image-encoder"])
+@pytest.mark.parametrize("original, override", [
+    ({"poll": True}, False), ({"poll": False}, True),
+    ({}, False), ({"poll": True}, None), ({}, None),
+    ({"poll": False}, False),
+])
+def test_vlm_poll_only_changes_loaded_htp_config(tmp_path, caplog, kind, original, override):
+    from genie_server.vlm import _load_vlm_node_config
+    path = tmp_path / "node.json"
+    source = {kind: {"engine": {"backend": {"QnnHtp": original}}}}
+    path.write_text(json.dumps(source))
+    before = path.read_bytes()
+    with caplog.at_level("INFO"):
+        loaded = _load_vlm_node_config(path, None, "vision", kind, tmp_path,
+                                       poll=override)
+    htp = loaded[kind]["engine"]["backend"]["QnnHtp"]
+    expected = original if override is None else {**original, "poll": override}
+    assert htp == expected
+    assert path.read_bytes() == before
+    changed = override is not None and original.get("poll") != override
+    assert ("overridden by config" in caplog.text) is changed
+    if changed:
+        assert "[vision]" in caplog.text and kind in caplog.text
+
+
+@pytest.mark.parametrize("cfg", [{}, {"engine": {}},
+    {"engine": {"backend": {"OtherBackend": {}}}}])
+def test_vlm_poll_does_not_add_htp_to_cpu_nodes(tmp_path, cfg):
+    from genie_server.vlm import _load_vlm_node_config
+    source = {"text-encoder": cfg}
+    path = tmp_path / "node.json"
+    path.write_text(json.dumps(source))
+    assert _load_vlm_node_config(path, None, "vision", "text_encoder", tmp_path,
+                                 poll=False) == source
+
+
+def test_vlm_only_load_config_inherits_poll(tmp_path):
+    from genie_server.config import load_config
+    cfg = load_config(_write_config(tmp_path, POLL=False,
+        VLM_SLOTS=[{"model_root": "/models/vision"}]))
+    assert not cfg.text_slots
+    assert cfg.vlm_slots[0].poll is False
