@@ -1,0 +1,49 @@
+log create appLogger error appLog.txt
+version
+#Profiling
+profile create profileGenieApp
+pipeline config create pipelineConfig
+pipeline config bind log pipelineConfig appLogger
+pipeline config bind profile pipelineConfig profileGenieApp
+pipeline create GeniePipeline pipelineConfig
+#Logging
+log create imageEncoderLog error log.genie.imageEncoder.txt
+log create lutEncoderLog error log.genie.lutEncoder.txt
+log create textGeneratorLog error log.genie.textGenerator.txt
+#Image Encoder
+node config create imageEncoderConfig image_encoder.json
+node config bind profile imageEncoderConfig profileGenieApp
+node config bind log imageEncoderConfig imageEncoderLog
+node create imageEncoder imageEncoderConfig
+#LUT Encoder
+node config create lutEncoderConfig text_encoder.json
+node config bind profile lutEncoderConfig profileGenieApp
+node config bind log lutEncoderConfig lutEncoderLog
+node create lutEncoder lutEncoderConfig
+#Text Generator
+node config create textGeneratorConfig text_decoder.json
+node config bind profile textGeneratorConfig profileGenieApp
+node config bind log textGeneratorConfig textGeneratorLog
+node create textGenerator textGeneratorConfig
+node set textCallback textGenerator GENIE_NODE_TEXT_GENERATOR_TEXT_OUTPUT
+#Pipeline add and connect calls
+pipeline add GeniePipeline imageEncoder
+pipeline add GeniePipeline lutEncoder
+pipeline add GeniePipeline textGenerator
+pipeline connect GeniePipeline imageEncoder GENIE_NODE_IMAGE_ENCODER_EMBEDDING_OUTPUT textGenerator GENIE_NODE_TEXT_GENERATOR_EMBEDDING_INPUT
+pipeline connect GeniePipeline lutEncoder GENIE_NODE_TEXT_ENCODER_EMBEDDING_OUTPUT textGenerator GENIE_NODE_TEXT_GENERATOR_EMBEDDING_INPUT
+node set textFile lutEncoder GENIE_NODE_TEXT_ENCODER_TEXT_INPUT inputs/prompt.prefix.txt
+node set image imageEncoder GENIE_NODE_IMAGE_ENCODER_IMAGE_INPUT inputs/pixel_values.raw
+node set textFile lutEncoder GENIE_NODE_TEXT_ENCODER_TEXT_INPUT inputs/prompt.suffix.txt
+pipeline execute GeniePipeline
+profile save profileGenieApp log.vlm.profile.json
+node free imageEncoder
+node free lutEncoder
+node free textGenerator
+log free appLogger
+log free imageEncoderLog
+log free lutEncoderLog
+log free textGeneratorLog
+profile free profileGenieApp
+pipeline free GeniePipeline
+exit

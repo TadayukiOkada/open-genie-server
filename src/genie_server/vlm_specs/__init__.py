@@ -10,10 +10,12 @@ model needs no code change at all — see vlm_layout.py's module docstring.
 """
 from .base import VLMFamily, VLMSpec, resolve, template
 from .gemma4 import GEMMA4_FAMILY
+from .qwen3_5_vl import QWEN3_5_VL_FAMILY
 from .qwen3_vl import QWEN3_VL_FAMILY
 
 FAMILIES = {
     "qwen3_vl": QWEN3_VL_FAMILY,
+    "qwen3_5_vl": QWEN3_5_VL_FAMILY,
     "gemma4": GEMMA4_FAMILY,
 }
 

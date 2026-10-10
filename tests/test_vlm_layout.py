@@ -135,6 +135,53 @@ def test_2b_resolves_resolution_from_vision_param():
     assert (spec.image_width, spec.image_height) == (40 * 16, 30 * 16)
 
 
+# ---------------------------------------------------------------- Qwen3.5 LMM bundle (script path)
+
+def test_qwen35_layout_comes_from_the_named_script():
+    """The Automotive Qwen3.5-4B tutorial's own LMMScript (loggers, a
+    profile, inputs/ paths) reads like the 2B one."""
+    layout = vlm_layout.read_layout(FIXTURES / "qwen35_vl")
+    assert layout.source == "script LMMScript"
+    assert layout.node_config_files == {
+        "image_encoder": "image_encoder.json",
+        "text_encoder": "text_encoder.json",
+        "text_generator": "text_decoder.json",
+    }
+    assert layout.static_tensor_files == {}
+
+
+def test_qwen35_family_auto_detects_by_linear_attention():
+    """Same vision markers as Qwen3-VL; the text-generator's linear-attention
+    is what makes it Qwen3.5 rather than an ambiguous match."""
+    model_root = FIXTURES / "qwen35_vl"
+    layout = vlm_layout.read_layout(model_root)
+    node_cfgs = _load_node_cfgs(model_root, layout.node_config_files)
+    family = vlm_specs.detect_family(_tokenizer_json(model_root), node_cfgs)
+    assert family.name == "qwen3_5_vl"
+    assert family.chat_template == "qwen3_5"
+
+
+def test_qwen35_resolves_the_qwen3_vl_vision_parameters():
+    model_root = FIXTURES / "qwen35_vl"
+    layout = vlm_layout.read_layout(model_root)
+    node_cfgs = _load_node_cfgs(model_root, layout.node_config_files)
+    spec = vlm_specs.resolve(vlm_specs.get_family("qwen3_5_vl"), layout, node_cfgs)
+    assert (spec.image_width, spec.image_height) == (512, 512)
+    assert spec.temporal_patch_size == 2
+    assert spec.vision_tokens_per_step == 256
+    assert spec.chat_template == "qwen3_5"
+
+
+def test_qwen3_vl_bundles_still_detect_as_qwen3_vl():
+    for name in ("ai_hub", "deepstack", "qwen3vl_2b"):
+        model_root = FIXTURES / name
+        layout = vlm_layout.read_layout(model_root)
+        node_cfgs = _load_node_cfgs(model_root, layout.node_config_files)
+        family = vlm_specs.detect_family(_tokenizer_json(model_root), node_cfgs)
+        assert family.name == "qwen3_vl", name
+        assert family.chat_template == ""
+
+
 # ---------------------------------------------------------------- Gemma 4 E2B (script path)
 
 def test_gemma4_layout_comes_from_the_named_script():
@@ -578,6 +625,20 @@ def test_vlm_slot_builds_from_the_gemma4_layout_with_auto_detected_family(monkey
     assert len(slot.pipeline.connections) == 2
     assert slot.static_tensors == {}
     assert (slot.spec.image_height, slot.spec.image_width) == (39 * 16, 60 * 16)
+
+
+def test_vlm_slot_builds_from_the_qwen35_layout_with_auto_detected_family(monkeypatch, tmp_path):
+    _patch_genie_node(monkeypatch)
+    from genie_server import vlm
+
+    slot = vlm.VLMSlot(name="vlm0", device_id=None, model_root=FIXTURES / "qwen35_vl",
+                       spec_name=None, htp_ext_cache_dir=tmp_path / "htpcache")
+
+    assert slot.spec.name == "qwen3_5_vl"
+    assert slot.spec.chat_template == "qwen3_5"
+    assert slot.layout.source == "script LMMScript"
+    assert len(slot.pipeline.connections) == 2
+    assert slot.static_tensors == {}
 
 
 def test_vlm_generation_runs_end_to_end_on_the_ai_hub_layout(monkeypatch, tmp_path):

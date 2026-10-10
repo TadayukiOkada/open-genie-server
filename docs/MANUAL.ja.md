@@ -1260,7 +1260,7 @@ genie-appスクリプト(エクスポートが`metadata.json`を持つならそ�
 `device_id`が指定されている場合、`Slot`と同じ仕組み(`slots.pin_htp_device`)で各ノードのHTP拡張設定を
 書き換えてNSPピン留めする。
 
-`spec`はVLMファミリーを明示指定するキー(`vlm_specs.FAMILIES`: `"qwen3_vl"`か`"gemma4"`)。
+`spec`はVLMファミリーを明示指定するキー(`vlm_specs.FAMILIES`: `"qwen3_vl"`・`"qwen3_5_vl"`・`"gemma4"`のいずれか)。
 **省略すると、バンドル自身の`tokenizer.json`とノード設定から自動判定される**
 (`vlm_specs.detect_family`)— 大抵の構成ではこれだけで足りる。ファミリー判定が曖昧なトークナイザの
 バンドルや、強制したい場合だけ明示する。新しいモデルに対応するには`genie_server/vlm_specs/`配下に
@@ -1286,6 +1286,12 @@ genie-appスクリプト(エクスポートが`metadata.json`を持つならそ�
 自身のトップレベルキー**で決まる — 役割が足りない、または重複している場合は起動時エラー。`dialog`設定だけで
 ノード設定が無いバンドル(GenieXのpipeline形式)は、その理由付きで起動時に拒否される。理由は
 [Platform Notes](./PLATFORM_NOTES.ja.md#geniex-vlmバンドルは対象外)参照。
+
+**`"qwen3_5_vl"`**は画像入力つきの Qwen3.5。ビジョン側は Qwen3-VL と同じ(前処理もマーカーも同じ)で、
+text-generator の設定が`engine.model."linear-attention"`を立てているバンドルは`qwen3_vl`ではなくこのファミリーと判定される。
+プロンプトの末尾は Qwen3.5 自身のチャットテンプレートどおり — 空の think ブロック、`enable_thinking: true`なら`<think>\n` —
+で、既定値と応答の先頭は[`qwen3_5`のテキストスロット](#チャットテンプレートの選択ルール)と同じ。system テキストとユーザーのターンは
+そのテンプレートと同じく前後の空白を落とす。実機で確かめた内容は[Platform Notes](./PLATFORM_NOTES.ja.md#画像入力)を参照。
 
 **`"gemma4"`**はレイアウトが指す image-encoder 設定の`vision-param`からパッチ格子を読む。エンコーダの
 位置IDとプーリングのインデックスは、その`vision-param`からデバイス側で作られる。この設定はノード生成時に
