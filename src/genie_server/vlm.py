@@ -65,7 +65,8 @@ def _load_vlm_node_config(config_path: Path, device_id: int | None,
     that device, mirroring slots.pin_htp_device. Not every node type has an
     engine.backend.extensions field (text-encoder is a pure CPU-side LUT —
     no HTP device to pin). If poll is given, only existing QnnHtp backends
-    are overridden in memory; the bundle files stay untouched."""
+    on text-generator nodes are overridden in memory; embedding nodes do not
+    accept this option. The bundle files stay untouched."""
     with open(config_path) as f:
         node_cfg = json.load(f)
     base = config_path.parent
@@ -100,7 +101,7 @@ def _load_vlm_node_config(config_path: Path, device_id: int | None,
     # htp_backend_ext_config.json (image-encoder, text-generator)
     backend = engine.get("backend", {})
     htp = backend.get("QnnHtp")
-    if poll is not None and isinstance(htp, dict):
+    if poll is not None and top_key == "text-generator" and isinstance(htp, dict):
         if htp.get("poll") != poll:
             logger.info(
                 f"[{slot_name}] node '{node_key}': QnnHtp.poll "

@@ -767,7 +767,8 @@ def test_vlm_poll_reaches_nodes_and_slots_are_independent(monkeypatch, tmp_path,
     for slot, poll in zip(slots, expected):
         for node in (slot.text_generator, slot.image_encoder):
             body = next(iter(node.config.values()))
-            assert body["engine"]["backend"]["QnnHtp"]["poll"] is poll
+            assert body["engine"]["backend"]["QnnHtp"]["poll"] is (
+                poll if node is slot.text_generator else True)
         assert "engine" not in slot.text_encoder.config["text-encoder"]
     assert {p: p.read_bytes() for p in before} == before
     for slot in slots:

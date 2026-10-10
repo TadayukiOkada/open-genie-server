@@ -527,7 +527,8 @@ def _parse_vlm_slots(raw_cfg: dict,
     model_root follows the same MODELS_BASE_DIR rule as TEXT_SLOTS.
     poll follows TEXT_SLOTS too: a slot value overrides POLL, absent inherits
     it, and explicit null leaves the bundle alone. Only existing QnnHtp
-    backends are patched; CPU-side nodes are unaffected.
+    backends on text-generator nodes are patched; encoder nodes do not
+    accept poll and are unaffected.
 
     "spec" names the VLM family explicitly (vlm_specs.FAMILIES); omitted, it
     is auto-detected from the bundle (vlm_specs.detect_family). Most

@@ -3223,10 +3223,12 @@ def test_vlm_poll_only_changes_loaded_htp_config(tmp_path, caplog, kind, origina
         loaded = _load_vlm_node_config(path, None, "vision", kind, tmp_path,
                                        poll=override)
     htp = loaded[kind]["engine"]["backend"]["QnnHtp"]
-    expected = original if override is None else {**original, "poll": override}
+    expected = (original if override is None or kind != "text-generator"
+                else {**original, "poll": override})
     assert htp == expected
     assert path.read_bytes() == before
-    changed = override is not None and original.get("poll") != override
+    changed = (kind == "text-generator" and override is not None
+               and original.get("poll") != override)
     assert ("overridden by config" in caplog.text) is changed
     if changed:
         assert "[vision]" in caplog.text and kind in caplog.text
