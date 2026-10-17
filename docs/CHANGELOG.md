@@ -8,7 +8,10 @@
   A slot value takes precedence over `POLL`; explicit `"poll": null` keeps
   the bundle setting. Overrides apply in memory to existing text-generator
   `QnnHtp` backends; encoder configs and bundle files remain unchanged.
-  Leaving both options unset preserves the previous behavior. See
+  Leaving both options unset preserves the previous behavior. **On
+  upgrading**, a config that sets `POLL` for its text slots now applies it to
+  its VLM slots too; add `"poll": null` to a VLM slot to keep that slot's
+  bundle setting. See
   [MANUAL § QnnHtp.poll](MANUAL.md#qnnhtppoll-costs-260-cpu-and-buys-nothing-here).
 
 - **A Qwen3.5 bundle with an image encoder answered nothing under greedy

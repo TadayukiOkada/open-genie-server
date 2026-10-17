@@ -401,9 +401,9 @@ QAIRT 2.51.0, one slot on `device_id` 0, a Qwen3.5-4B bundle with a 4096-token c
 | `enable_thinking: true` | the reply starts with `<think>\n`, closes it and answers |
 
 The same bundle run with `genie-app` and a prompt ending at the bare `<|im_start|>assistant\n`
-stopped after two tokens under greedy decoding, and answered when the prompt ended with
-`<think>\n` or the empty think block, so it is the prompt and not the server that made the
-difference. Video input goes through the same path as Qwen3-VL's and has not been checked on a
+stopped after two tokens under greedy decoding, and kept generating when the prompt ended
+with `<think>\n` (reasoning) or the empty think block (an answer), so it is the prompt and not
+the server that made the difference. Video input goes through the same path as Qwen3-VL's and has not been checked on a
 device.
 
 Thinking is off by default, as on a `qwen3_5` text slot. That is the default of Qwen3.5-2B's

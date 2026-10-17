@@ -2274,6 +2274,21 @@ def test_qwen35_vl_prompt_follows_its_chat_template():
                                     "<think>\n")
 
 
+def test_qwen35_vl_trims_a_run_of_text_parts_as_one():
+    """The template trims the joined content, so whitespace-only parts at
+    either end do not shield the text next to them."""
+    from genie_server import vlm_specs
+    spec = vlm_specs.get_spec("qwen3_5_vl")
+    parts = [("text", " "), ("text", "  hi "), ("image", 0),
+             ("text", " end "), ("text", "  ")]
+    segs = spec.build_prompt_segments("", parts, {}, spec)
+    assert segs[0] == ("text", "<|im_start|>user\nhi <|vision_start|>")
+    assert segs[-1] == ("text", "<|vision_end|> end<|im_end|>\n<|im_start|>assistant\n"
+                                "<think>\n\n</think>\n\n")
+    text_only = spec.build_prompt_segments("", [("text", "  "), ("text", " a ")], {}, spec)
+    assert text_only[-1][1].startswith("<|im_start|>user\na<|im_end|>")
+
+
 def test_qwen35_vl_thinking_follows_the_qwen3_5_text_template():
     """The same default and reply prefix a qwen3_5 text slot has."""
     from genie_server import templates, vlm_specs
