@@ -3320,3 +3320,46 @@ def test_vlm_only_load_config_inherits_poll(tmp_path):
         VLM_SLOTS=[{"model_root": "/models/vision"}]))
     assert not cfg.text_slots
     assert cfg.vlm_slots[0].poll is False
+
+
+# ------------------------------------------- BFCL subset ids pick the right file
+
+def _bfcl_subset_ids():
+    """examples/bfcl is not a package; subset_ids.py imports bfcl_eval only
+    inside dataset_dir(), so the file lookup can run without it."""
+    import importlib.util
+
+    path = (Path(__file__).resolve().parent.parent / "examples" / "bfcl"
+            / "subset_ids.py")
+    spec = importlib.util.spec_from_file_location("bfcl_subset_ids", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("category,expected", [
+    ("irrelevance", "BFCL_v4_irrelevance.json"),
+    ("multiple", "BFCL_v4_multiple.json"),
+    ("parallel", "BFCL_v4_parallel.json"),
+    ("live_irrelevance", "BFCL_v4_live_irrelevance.json"),
+    ("simple_python", "BFCL_v4_simple_python.json"),
+])
+def test_bfcl_subset_ids_match_the_category_file_exactly(tmp_path, category, expected):
+    """A glob of BFCL_v*_irrelevance.json also matched
+    BFCL_v4_live_irrelevance.json, which sorted last and won."""
+    for name in ("irrelevance", "live_irrelevance", "multiple", "live_multiple",
+                 "parallel_multiple", "live_parallel_multiple", "parallel",
+                 "live_parallel", "simple_python"):
+        (tmp_path / f"BFCL_v4_{name}.json").write_text(
+            json.dumps({"id": f"{name}_0"}) + "\n")
+    mod = _bfcl_subset_ids()
+
+    assert mod.dataset_file(category, tmp_path).name == expected
+    assert mod.ids_for(category, 1, tmp_path) == [f"{category}_0"]
+
+
+def test_bfcl_subset_ids_take_the_newest_version(tmp_path):
+    for v in (3, 4, 10):
+        (tmp_path / f"BFCL_v{v}_simple_python.json").write_text("")
+    assert _bfcl_subset_ids().dataset_file(
+        "simple_python", tmp_path).name == "BFCL_v10_simple_python.json"
