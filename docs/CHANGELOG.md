@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — Qwen3.5 image input
+
+A Qwen3.5 bundle with an image encoder can be served from `VLM_SLOTS` (#55,
+#56), and VLM slots honor `POLL` (#54). Checked on an SA8255P with QAIRT 2.51.0
+and a Qwen3.5-4B bundle with a 4096-token context — see
+[PLATFORM_NOTES § Image input](PLATFORM_NOTES.md#image-input). Video input on a
+`qwen3_5_vl` slot has not been checked on a device.
 
 ### Fixed
 
@@ -19,12 +25,12 @@
   the bare assistant header, where Qwen3.5's template writes a think block;
   the model wrote its own `<think>` and, greedily, stopped there
   (`<think>\n</think>\n\n` on every request, checked on an SA8255P with a
-  Qwen3.5-4B bundle). See
+  Qwen3.5-4B bundle) (#55). See
   [PLATFORM_NOTES § Image input](PLATFORM_NOTES.md#image-input).
 
 ### Added
 
-- **A `qwen3_5_vl` VLM family**, auto-detected when the text-generator
+- **A `qwen3_5_vl` VLM family** (#55), auto-detected when the text-generator
   config sets `engine.model."linear-attention"`: Qwen3-VL's vision side and
   Qwen3.5's chat template — the empty think block by default, `<think>\n`
   with `enable_thinking: true`, and the reply prefixed as on a `qwen3_5` text
