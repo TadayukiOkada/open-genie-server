@@ -25,14 +25,25 @@ from .qwen3_vl import (QWEN3_VL_FAMILY, _qwen_vision_markers, is_linear_attentio
 
 
 def _trim_turn(parts: list) -> list:
-    """`|trim` on the rendered user content: leading whitespace off the first
-    part and trailing off the last, when those are text. A part in between,
-    or text next to an image, keeps its own."""
+    """`|trim` on the rendered user content: leading whitespace off the text
+    before the first image, trailing off the text after the last. The
+    template trims the joined string, so a run of text parts at either end
+    is trimmed as one: a part left empty passes the whitespace on to the
+    next. Text between two images keeps its own."""
     parts = list(parts)
-    if parts and parts[0][0] == "text":
-        parts[0] = ("text", parts[0][1].lstrip())
-    if parts and parts[-1][0] == "text":
-        parts[-1] = ("text", parts[-1][1].rstrip())
+    for i, (kind, value) in enumerate(parts):
+        if kind != "text":
+            break
+        parts[i] = ("text", value.lstrip())
+        if parts[i][1]:
+            break
+    for i in range(len(parts) - 1, -1, -1):
+        kind, value = parts[i]
+        if kind != "text":
+            break
+        parts[i] = ("text", value.rstrip())
+        if parts[i][1]:
+            break
     return parts
 
 
