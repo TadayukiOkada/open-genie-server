@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`examples/bfcl/subset_ids.py` took the ids from the wrong dataset for
+  some categories.** It looked the file up with `BFCL_v*_<category>.json`,
+  which also matches the `live_` and `parallel_` files, and used the last
+  match: `irrelevance` got `live_irrelevance`'s ids and `multiple` got
+  `parallel_multiple`'s. Only `run_bfcl.sh --subset N` uses it; full runs
+  were not affected. The file name now has to match exactly.
+
 ## 1.8.0 — Qwen3.5 image input
 
 A Qwen3.5 bundle with an image encoder can be served from `VLM_SLOTS` (#55,

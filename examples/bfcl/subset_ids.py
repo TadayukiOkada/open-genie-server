@@ -10,6 +10,7 @@ replaces --test-category entirely rather than adding to it.
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,15 +26,28 @@ def dataset_dir() -> Path:
     return d
 
 
+def dataset_file(category: str, data: Path) -> Path:
+    """The newest BFCL_v<N>_<category>.json. The name has to match exactly: a
+    glob like BFCL_v*_irrelevance.json also matches BFCL_v4_live_irrelevance.json
+    (and *_multiple.json matches live_multiple and parallel_multiple)."""
+    name = re.compile(r"BFCL_v(\d+)_" + re.escape(category) + r"\.json")
+    versions = {}
+    for p in data.glob("BFCL_v*.json"):
+        m = name.fullmatch(p.name)
+        if m:
+            versions[int(m.group(1))] = p
+    if not versions:
+        sys.exit(f"No dataset file for category {category!r} under {data}")
+    return versions[max(versions)]
+
+
 def ids_for(category: str, n: int, data: Path) -> list:
     """Entry ids for one category, in file order. The prefix is not always the
     category name (v4 files carry their own ids), so read them rather than
     synthesising them."""
-    matches = sorted(data.glob(f"BFCL_v*_{category}.json"))
-    if not matches:
-        sys.exit(f"No dataset file for category {category!r} under {data}")
+    path = dataset_file(category, data)
     ids = []
-    with open(matches[-1]) as f:
+    with open(path) as f:
         for line in f:
             line = line.strip()
             if not line:
