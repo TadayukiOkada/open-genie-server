@@ -11,8 +11,9 @@
   to load on one core in the bundle's own order: all three contexts were placed
   in one protection domain, and the text-generator's I/O could not be registered
   there afterwards. In the server's order, the image encoder's weights moved to
-  the next domain and the load succeeded. That page also says which error lines
-  such a load leaves behind. No behavior change.
+  the next domain and the load succeeded; checked through the server as well,
+  with an image request answered. That page also says which error lines such a
+  load leaves behind. No behavior change.
 
 ### Fixed
 

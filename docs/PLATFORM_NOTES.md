@@ -325,7 +325,8 @@ that succeeded:
 ```
 
 Do not read them as a failed load. Whether it recovered is what follows them:
-`QnnContext_createFromBinary done successfully` with `pdId 2` in between.
+`Context 3 failed on pd 0`, a line naming `pdId=2`, then
+`QnnContext_createFromBinary done successfully`.
 
 **A smaller bundle can be the one that fails.** Another build of the same model
 keeps its LM head as constants in each of the second part's two graphs instead
@@ -345,9 +346,12 @@ mapped in pd 0 was less than the budget allowed.
 
 What this means for a deployment:
 
-- **The server already uses the order that loaded.** Nothing needs setting.
-  This bundle was measured with `genie-app` in that order, not yet through the
-  server.
+- **The server already uses the order that loaded**, and nothing needs
+  setting. Checked through the server with this bundle as the only slot (a VLM
+  slot with no `device_id`, which the SDK put on device 0, and
+  `GENIE_LOG_LEVEL: "info"`): the slot was ready in 4 s, the image encoder's
+  weights moved from pd 0 to pd 2 as above, and a greedy image request was
+  answered correctly (30 tokens, `stop`).
 - **Text slots in the same process charge the same budget.** A text slot
   created before the VLM slot (`SLOT_LOAD_ORDER: "text-first"`) can change
   where the VLM slot's contexts go. That combination has not been measured with this
