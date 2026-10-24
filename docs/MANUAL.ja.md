@@ -1320,6 +1320,11 @@ Gemma 4 のチャット形式どおり`<bos>`を1つにしたいなら、そこ�
 | `"vlm-first"`(既定) | VLMスロットを生成してからテキストスロットをロード |
 | `"text-first"` | テキストスロットをロードし、**バリデータフラグをリセットしてから**VLMスロットを生成 |
 
+各VLMスロットの中の順は固定で、バンドルのスクリプトの順に関係なく、text-generatorノードを
+エンコーダより先に作る。逆の順は2.49で失敗し、保護ドメイン1つを埋めるバンドルでは2.51.0でも失敗する。
+`info`のログでは、成功したロードにもエラーの行が残る。
+[プラットフォームノート](./PLATFORM_NOTES.ja.md#vlmスロット内のノードの生成順)を参照。
+
 **リセットが必要な理由**: `pos-id-dim`/`rope-theta`を使うテキストモデルの`GenieDialog`を
 生成すると、libGenie内部の**プロセスグローバルな**staticフラグ2つが立つ。
 `pipeline::TextGenerator`は`GenieDialogConfig_createFromJson`を経由せず

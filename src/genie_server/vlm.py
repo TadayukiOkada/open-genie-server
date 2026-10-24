@@ -258,9 +258,15 @@ class VLMSlot:
         # it works on both 2.48 and 2.49. Reproduced with the stock
         # genie-app on the SDK's own genie-app-script.txt, so this is a
         # backend-level constraint, not something this server introduces.
-        # 2.50.0.260828 does not need this -- genie-app runs that same script
-        # in its own order there -- but which layer fixed it was not
-        # established, and every 2.49.x still needs it, so it stays.
+        # 2.50.0.260828 runs that same script in its own order, but 2.51.0
+        # needs this order for a different reason: a bundle whose three
+        # contexts fit one protection domain's budget is placed there whole
+        # when the image encoder comes first, and the text-generator's I/O
+        # buffer then cannot be registered in that domain -- a failed I/O
+        # registration is not retried elsewhere, a failed weights mapping is.
+        # Created first, the text-generator gets its I/O, and the encoder's
+        # weights move to the next domain. See PLATFORM_NOTES, "Node creation
+        # order inside a VLM slot".
         # Pipeline add/connect order still follows the layout.
         node_keys = sorted(self.layout.node_config_files,
                            key=lambda k: k != "text_generator")

@@ -273,6 +273,89 @@ are *mapping* budgets — page tables and the DSP's address space — they follo
 how much is mapped rather than how many contexts there are, and they are not
 visible from the guest. Where to look on your own platform is Qualcomm's to answer.
 
+## Node creation order inside a VLM slot
+
+A VLM slot creates its **text-generator node first**, then the image encoder and
+the text encoder, whatever order the bundle's own genie-app script uses (the
+pipeline is still wired as the script says). There is no setting for it,
+because the other order has failed on two SDK versions for two different
+reasons, and nothing has been found that the script's order does better.
+
+**QAIRT 2.49.** With the image encoder created first, creating the
+text-generator fails with `Could not create context from binary for context
+index = 2 : err 1002`. This reproduces with the stock `genie-app` running the
+SDK's own `genie-app-script.txt`, so it is not something this server
+introduces. 2.50.0 runs that script in its own order.
+
+**QAIRT 2.51.0: the order still decides whether a large bundle loads on one
+core.** Measured on a QCS9075 evaluation kit (Ubuntu, no hypervisor),
+QAIRT 2.51.0 `aarch64-oe-linux-gcc11.2`, with `genie-app`, an `info` log and a
+Qwen3.5-4B bundle with an image encoder and an 8192-token context, all on
+`device_id` 0. The bundle has three context binaries: the image encoder and the
+language model in two parts.
+
+- **Image encoder first: the load fails.** The three contexts are charged about
+  392, 2,569 and 415 MB, about 3.38 GB together. That is under the budget of
+  one protection domain (see [the section above](#where-the-err-1002-budget-actually-lives)),
+  so all three go to pd 0, and creating them succeeds. Then the text-generator
+  registers its 242 MB I/O buffer (the KV cache and the linear-attention state)
+  in pd 0, and that fails:
+
+  ```
+  <E> fastrpc memory map for fd: 63 with length: 242123016 failed with error: 0x1
+  <E> Mod 4 failed for fd: 63, size: 242123016, pd: 0, with error 8003
+  <E> Failed to register memHandles for conext 2 on pdId 0, coreId 0, device 0. Current PD has ~2859.37 MB in use
+  ```
+
+  A failed **I/O registration is not retried in another domain**, so the
+  text-generator node is not created (`memRegister ERROR(8003)`, then
+  `Failed to create the Genie Node`).
+- **Text-generator first: the load succeeds.** The language model's two
+  contexts go to pd 0 and register their I/O there. The image encoder's 337 MB
+  weights then fail to map in pd 0, and the context is created again in pd 2,
+  successfully: a failed **weights mapping is retried in the next domain**. An
+  image request on this order ran to the end with no error at the console.
+
+So the second order leaves error lines in an `info` or `error` log on a load
+that succeeded:
+
+```
+<E> Failed to map weights buffer on host, err 3
+<E> Context create from binary failed for deviceId 0 coreId 0 pdId 0 for context 3, err 1002
+```
+
+Do not read them as a failed load. Whether it recovered is what follows them:
+`QnnContext_createFromBinary done successfully` with `pdId 2` in between.
+
+**A smaller bundle can be the one that fails.** Another build of the same model
+keeps its LM head as constants in each of the second part's two graphs instead
+of as weights the graphs share, so that part is charged 730 MB instead of
+415 MB. It no longer fits in pd 0 beside the other two, goes to pd 2, and
+leaves pd 0 room for the I/O. That build loaded with the image encoder first.
+Placement follows the budget, so the build that needs less is the one that
+shares a domain with the image encoder.
+
+For these bundles the charge has to include the graphs' constant data as
+well: the image encoder's weights are constants, not shared weights. Counted
+that way, the budget predicted where every context went in all four
+combinations measured, mixing the two builds' parts. Counted without it,
+every context would have gone to pd 0. The budget also lets the SDK place a
+context in a domain where its I/O later cannot be registered: what actually
+mapped in pd 0 was less than the budget allowed.
+
+What this means for a deployment:
+
+- **The server already uses the order that loaded.** Nothing needs setting.
+  This bundle was measured with `genie-app` in that order, not yet through the
+  server.
+- **Text slots in the same process charge the same budget.** A text slot
+  created before the VLM slot (`SLOT_LOAD_ORDER: "text-first"`) can change
+  where the VLM slot's contexts go. That combination has not been measured with this
+  bundle.
+- **This has not been checked on the SA8255P bench.** The budget and the
+  fallback are the SDK's, but what fits in a domain is a property of the
+  platform's mapping, as the section above describes.
+
 ## VLM bundle layouts
 
 `genie_server/vlm_layout.py` reads a VLM bundle's node configs, connections,

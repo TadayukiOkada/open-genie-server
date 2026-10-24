@@ -1368,6 +1368,12 @@ than a fixed choice:
 | `"vlm-first"` (default) | VLM slots are created, then text slots. |
 | `"text-first"` | Text slots are loaded, then VLM slots, with a validator-flag reset in between. |
 
+Inside each VLM slot the order is fixed: the text-generator node is created
+before the encoders, whatever order the bundle's script uses. The other order
+fails on 2.49 and, for a bundle that fills one protection domain, on 2.51.0 too.
+With an `info` log this leaves error lines on a load that succeeded. See
+[Platform Notes](./PLATFORM_NOTES.md#node-creation-order-inside-a-vlm-slot).
+
 Why the reset is needed: creating a `GenieDialog` for a text model whose backend
 config uses `pos-id-dim`/`rope-theta` sets two **process-global** flags inside
 libGenie. `pipeline::TextGenerator` calls `Dialog::validateDialogConfig()`
