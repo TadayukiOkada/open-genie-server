@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Documentation
+
+- **Why a VLM slot creates its text-generator node first, on QAIRT 2.51.0
+  too.** [PLATFORM_NOTES](PLATFORM_NOTES.md#node-creation-order-inside-a-vlm-slot)
+  now explains the order, which the server has always used. On a QCS9075
+  evaluation kit with 2.51.0, a Qwen3.5-4B bundle with an image encoder failed
+  to load on one core in the bundle's own order: all three contexts were placed
+  in one protection domain, and the text-generator's I/O could not be registered
+  there afterwards. In the server's order, the image encoder's weights moved to
+  the next domain and the load succeeded; checked through the server as well,
+  with an image request answered. That page also says which error lines such a
+  load leaves behind. No behavior change.
+
 ### Fixed
 
 - **`examples/bfcl/subset_ids.py` took the ids from the wrong dataset for
