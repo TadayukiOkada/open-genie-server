@@ -6,7 +6,8 @@
 
 - **QAIRT 2.52.0 (Genie API 1.22) support.** Each new call is looked up, not
   assumed, so 2.48 through 2.51 still load. Checked on an SA8255P with 2.52.0,
-  stock and rebuilt: the integration suite gives the same verdicts as on 2.51.0.
+  stock and rebuilt: each gives the integration suite's verdicts that the
+  matching 2.51.0 library gives.
   On a 2.52+ libGenie:
   - **Native logprobs.** Generated-token `logprobs` / `top_logprobs` come from
     `GenieSampler_registerLogprobsCallback`: the SDK samples exactly as it would
