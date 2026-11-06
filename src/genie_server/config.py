@@ -191,6 +191,29 @@ class ServerConfig:
     # POST /v1/server/prompt_logprobs. Default off: one scoring request
     # occupies its slot for len(prompt)/decode-rate seconds.
     prompt_logprobs: bool = False
+    # Which prefix cache a text slot uses (QAIRT 2.52.0 added one to the SDK):
+    #   "auto" (default) -- the SDK's in-memory system_prompt_cache where the
+    #       libGenie has it and the slot qualifies (see slots.sdk_prefix_cache_plan);
+    #       otherwise this server's own on-disk cache, which is deprecated.
+    #   "sdk"  -- the SDK's cache wherever the libGenie has it, also on a
+    #       sliding-window bundle (a source reading says its save path still
+    #       writes every cache group with the default group's length there).
+    #   "host" -- this server's own cache only, as before 2.52.
+    # The server's own cache (POST /v1/prefix/warmup) keeps working in every
+    # mode; on a 2.52+ libGenie it is deprecated.
+    prefix_cache_backend: str = "auto"
+    # The SDK cache's limits (system_prompt_cache keys). global_max_total_mb is
+    # mandatory for the SDK and process-wide; the others are per dialog.
+    sdk_prefix_cache_max_entries: int = 8
+    sdk_prefix_cache_global_mb: int = 512
+    sdk_prefix_cache_partition_mb: int = 0
+    sdk_prefix_cache_min_tokens: int = 128
+    # Host-side tokenizer (token counts, logprob token strings, token-id
+    # prompts): "auto" (default) = Python's `tokenizers` when installed, else
+    # libGenie's standalone tokenizer (QAIRT 2.52+); "hf" or "genie" forces one.
+    # They differ in one respect: HF's encode adds the tokenizer's special
+    # tokens, libGenie's never does (the SDK adds BOS itself).
+    tokenizer_backend: str = "auto"
     # Bind a GenieProfile to every text slot (SDK-side TTFT / prefill /
     # decode KPIs, read back via GET /v1/server/profile). Costs a model
     # reload to change, since the profiler binds to the dialog config.
@@ -615,6 +638,18 @@ def _parse_genie_log_level(raw: dict) -> str:
     return level
 
 
+PREFIX_CACHE_BACKENDS = ("auto", "sdk", "host")
+TOKENIZER_BACKENDS = ("auto", "hf", "genie")
+
+
+def _parse_positive_int(raw: dict, key: str, default: int) -> int:
+    """An integer >= 1 (the SDK refuses 0 for these keys)."""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{key} must be a positive integer, got {value!r}")
+    return value
+
+
 def _parse_bool(raw: dict, key: str, default: bool = False) -> bool:
     """A JSON true/false. bool() read the string "false" as True, which for
     TOOL_CALL_RECOVERY or VLM_VISION_BUDGET_GUARD silently turned on a
@@ -719,6 +754,18 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         genie_lib_path=raw.get("GENIE_LIB_PATH", ""),
         prompt_logprobs=_parse_bool(raw, "PROMPT_LOGPROBS"),
         genie_profile=_parse_bool(raw, "GENIE_PROFILE"),
+        prefix_cache_backend=(_parse_choice(
+            raw, "PREFIX_CACHE_BACKEND", PREFIX_CACHE_BACKENDS, "auto") or "auto"),
+        sdk_prefix_cache_max_entries=_parse_positive_int(
+            raw, "SDK_PREFIX_CACHE_MAX_ENTRIES", 8),
+        sdk_prefix_cache_global_mb=_parse_positive_int(
+            raw, "SDK_PREFIX_CACHE_GLOBAL_MB", 512),
+        sdk_prefix_cache_partition_mb=_parse_limit(
+            raw, "SDK_PREFIX_CACHE_PARTITION_MB", 0, int),
+        sdk_prefix_cache_min_tokens=_parse_limit(
+            raw, "SDK_PREFIX_CACHE_MIN_TOKENS", 128, int),
+        tokenizer_backend=(_parse_choice(
+            raw, "TOKENIZER_BACKEND", TOKENIZER_BACKENDS, "auto") or "auto"),
         genie_log_level=_parse_genie_log_level(raw),
         prompt_logprobs_max_tokens=int(raw.get("PROMPT_LOGPROBS_MAX_TOKENS", 4096)),
         tool_call_recovery=_parse_bool(raw, "TOOL_CALL_RECOVERY"),

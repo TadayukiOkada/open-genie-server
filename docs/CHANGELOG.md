@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Added
+
+- **QAIRT 2.52.0 (Genie API 1.22) support.** Each new call is looked up, not
+  assumed, so 2.48 through 2.51 still load. On a 2.52+ libGenie:
+  - **Native logprobs.** Generated-token `logprobs` / `top_logprobs` come from
+    `GenieSampler_registerLogprobsCallback`: the SDK samples exactly as it would
+    without logprobs (its own sampler, penalties included), and `numpy` is no
+    longer needed for them. Prompt scoring (`echo` + `logprobs`) still uses the
+    custom sampler, since it forces tokens.
+  - **The SDK's prefix cache is the default** (`system_prompt_cache`,
+    `PREFIX_CACHE_BACKEND: "auto"`). The server sets `prefix_boundary` from the
+    chat template and the SDK caches the system turn's KV in memory with no
+    warmup. Left off, with the reason logged, on templates without a system turn,
+    on linear-attention and `ssd-q1` bundles, and by default on sliding-window and
+    LoRA bundles (`"sdk"` forces it there; a LoRA change then flushes it). A model
+    switch and `DELETE /v1/prefix/cache?scope=all` flush it
+    (`GenieDialog_flushPrefixCache`). New keys `SDK_PREFIX_CACHE_MAX_ENTRIES`,
+    `SDK_PREFIX_CACHE_GLOBAL_MB`, `SDK_PREFIX_CACHE_PARTITION_MB`,
+    `SDK_PREFIX_CACHE_MIN_TOKENS`; `GET /v1/prefix/cache` lists the slots on it
+    under `sdk`.
+  - **The profile is cleared before each query** (`GenieProfile_clear`), so
+    `/v1/server/profile` reports that query alone and the profile no longer
+    grows for the life of a slot.
+  - **`TOKENIZER_BACKEND`** (`auto` | `hf` | `genie`): without Python's
+    `tokenizers`, `auto` now uses libGenie's standalone tokenizer
+    (`GenieTokenizer_create`) for token counts, logprob strings and token-id
+    prompts. Its logprob `bytes` are the token's exact bytes, also for a token
+    that is part of a character.
+
+### Deprecated
+
+- **A libGenie older than QAIRT 2.52.0.** It still works, through the paths
+  the server needed before 2.52, and the server logs one warning at startup.
+  On 2.52+ two of those paths are deprecated as well: generated-token logprobs
+  through the custom sampler (used only on an older libGenie; logged once), and
+  this server's own on-disk prefix cache — `POST /v1/prefix/warmup` keeps
+  working and says so in a `deprecated` field.
+
 ### Documentation
 
 - **Why a VLM slot creates its text-generator node first, on QAIRT 2.51.0

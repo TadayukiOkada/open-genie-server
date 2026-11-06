@@ -17,6 +17,23 @@ from .prefix_cache import PrefixCache
 logger = logging.getLogger(__name__)
 
 
+def warn_if_legacy_runtime(lib) -> bool:
+    """One startup warning when libGenie predates QAIRT 2.52.0 (Genie API
+    1.22): still supported, but deprecated. Says what the server falls back to,
+    so the cost is visible. Returns whether it warned."""
+    if not lib.legacy_runtime:
+        return False
+    from .capi import CURRENT_API
+    logger.warning(
+        f"Deprecated QAIRT runtime: Genie API {lib.api_version() or 'unknown'} is older "
+        f"than {CURRENT_API[0]}.{CURRENT_API[1]} (QAIRT 2.52.0). It still works, but "
+        "logprobs run through the custom sampler (sampling on the host), the "
+        "prefix cache is this server's own on-disk one only, and the host "
+        "tokenizer needs Python's tokenizers. Support for it may be removed in a "
+        "later release.")
+    return True
+
+
 def build_state(config_path: str = "env_config.json") -> ServerState:
     config: ServerConfig = load_config(config_path)
 
@@ -35,6 +52,7 @@ def build_state(config_path: str = "env_config.json") -> ServerState:
     logger.info(f"Genie API version: {lib.api_version() or 'unknown'}; "
                 "GenieDialog_setGrammar "
                 f"{'exported' if lib.has_set_grammar else 'not exported'}")
+    warn_if_legacy_runtime(lib)
 
     from . import vlm
     from .slots import SlotManager

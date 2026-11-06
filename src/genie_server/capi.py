@@ -9,7 +9,9 @@ import codecs
 import ctypes
 import json
 import logging
+import re
 import secrets
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,21 @@ DATATYPE_STRING = 30
 # rather than assumed, like GenieDialog_setGrammar.
 API_VERSION_FUNCTIONS = ("Genie_getApiMajorVersion", "Genie_getApiMinorVersion",
                          "Genie_getApiPatchVersion")
+
+# The Genie C API that QAIRT 2.52.0 ships (GENIE_API_VERSION 1.22.0). A library
+# older than this still works, but every path that exists only to make up for
+# what it lacks is deprecated (see GenieLib.legacy_runtime).
+CURRENT_API = (1, 22)
+
+# Added in QAIRT 2.52.0 (API 1.22.0). Each is looked up, not assumed, so a
+# 2.51 or older libGenie still loads; the GenieLib.has_* properties say which.
+NATIVE_LOGPROBS_FUNCTIONS = ("GenieSampler_registerLogprobsCallback",)
+PREFIX_CACHE_FLUSH_FUNCTIONS = ("GenieDialog_flushPrefixCache",)
+PROFILE_CLEAR_FUNCTIONS = ("GenieProfile_clear",)
+STANDALONE_TOKENIZER_FUNCTIONS = (
+    "GenieTokenizerConfig_createFromJson", "GenieTokenizerConfig_free",
+    "GenieTokenizer_create", "GenieTokenizer_free", "GenieTokenizer_encode",
+    "GenieTokenizer_decode", "GenieTokenizer_decodeToSubWords")
 
 # GenieDialog_Param_t (keys for GenieDialog_getValue)
 PARAM_CONTEXT_OCCUPANCY = 0     # -> DATATYPE_UINT_32
@@ -240,6 +257,14 @@ ALLOC_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_size_t,
 SAMPLER_CALLBACK = ctypes.CFUNCTYPE(
     None, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
     ctypes.POINTER(ctypes.c_int32), ctypes.c_void_p)
+# GenieSampler_LogprobsCallback_t (API 1.22): (tokenId, logprob, numTopLogprobs,
+# topTokenIds, topLogprobs, userData), once per accepted token of a basic
+# dialog query. logprob is the raw model distribution's (log-softmax at
+# temperature 1, before penalties), the same quantity logprobs.py computes from
+# the custom sampler's logits. The arrays are valid only during the call.
+LOGPROBS_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.c_uint32, ctypes.c_float, ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_float), ctypes.c_void_p)
 
 
 class GenieLib:
@@ -256,6 +281,8 @@ class GenieLib:
         # permanent in the SDK (a static name->callback map) — the ctypes
         # trampolines must stay alive for the process lifetime.
         self._sampler_callback_refs: dict[str, object] = {}
+        # Native logprobs callbacks, per sampler handle (register_logprobs_callback).
+        self._logprobs_callback_refs: dict[int, object] = {}
         self._bind_signatures()
 
     @classmethod
@@ -363,6 +390,39 @@ class GenieLib:
             bind(lib.Genie_getApiMajorVersion, [], ctypes.c_uint32)
             bind(lib.Genie_getApiMinorVersion, [], ctypes.c_uint32)
             bind(lib.Genie_getApiPatchVersion, [], ctypes.c_uint32)
+
+        # Added in QAIRT 2.52.0 (API 1.22.0); see the *_FUNCTIONS tuples.
+        self._has_native_logprobs = all(hasattr(lib, n) for n in NATIVE_LOGPROBS_FUNCTIONS)
+        if self._has_native_logprobs:
+            bind(lib.GenieSampler_registerLogprobsCallback,
+                 [ctypes.c_void_p, LOGPROBS_CALLBACK, ctypes.c_void_p], ctypes.c_int)
+        self._has_prefix_cache_flush = all(
+            hasattr(lib, n) for n in PREFIX_CACHE_FLUSH_FUNCTIONS)
+        if self._has_prefix_cache_flush:
+            bind(lib.GenieDialog_flushPrefixCache, [DialogHandle], ctypes.c_int)
+        self._has_profile_clear = all(hasattr(lib, n) for n in PROFILE_CLEAR_FUNCTIONS)
+        if self._has_profile_clear:
+            bind(lib.GenieProfile_clear, [ProfileHandle], ctypes.c_int)
+        self._has_standalone_tokenizer = all(
+            hasattr(lib, n) for n in STANDALONE_TOKENIZER_FUNCTIONS)
+        if self._has_standalone_tokenizer:
+            bind(lib.GenieTokenizerConfig_createFromJson,
+                 [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int)
+            bind(lib.GenieTokenizerConfig_free, [ctypes.c_void_p], ctypes.c_int)
+            bind(lib.GenieTokenizer_create,
+                 [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int)
+            bind(lib.GenieTokenizer_free, [ctypes.c_void_p], ctypes.c_int)
+            bind(lib.GenieTokenizer_encode,
+                 [ctypes.c_void_p, ctypes.c_char_p, ALLOC_CALLBACK,
+                  ctypes.POINTER(ctypes.POINTER(ctypes.c_int32)),
+                  ctypes.POINTER(ctypes.c_uint32)], ctypes.c_int)
+            bind(lib.GenieTokenizer_decode,
+                 [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_uint32,
+                  ALLOC_CALLBACK, ctypes.POINTER(ctypes.c_char_p)], ctypes.c_int)
+            bind(lib.GenieTokenizer_decodeToSubWords,
+                 [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_uint32,
+                  ALLOC_CALLBACK, ctypes.POINTER(ctypes.POINTER(ctypes.c_char_p))],
+                 ctypes.c_int)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -700,6 +760,125 @@ class GenieLib:
                 f"{self._lib.Genie_getApiMinorVersion()}."
                 f"{self._lib.Genie_getApiPatchVersion()}")
 
+    def api_version_tuple(self) -> tuple[int, int, int] | None:
+        """api_version() as (major, minor, patch), or None."""
+        version = self.api_version()
+        if version is None:
+            return None
+        major, minor, patch = (int(x) for x in version.split("."))
+        return major, minor, patch
+
+    @property
+    def legacy_runtime(self) -> bool:
+        """True for a libGenie older than CURRENT_API (QAIRT 2.51 and before).
+
+        Such a library is still supported, but deprecated: the server falls
+        back to the host-side paths it needed before 2.52 (logprobs through a
+        custom sampler, its own on-disk prefix cache as the only one, the host
+        tokenizer), and says so once at startup. A library that does not
+        report its version at all counts as legacy."""
+        version = self.api_version_tuple()
+        return version is None or version[:2] < CURRENT_API
+
+    # ------------------------------------------------------------ 2.52 additions
+
+    @property
+    def has_native_logprobs(self) -> bool:
+        """GenieSampler_registerLogprobsCallback (API 1.22): the SDK samples and
+        reports each accepted token's logprob, so a logprobs request no longer
+        needs the custom sampler. Prompt scoring (teacher forcing) still does."""
+        return self._has_native_logprobs
+
+    @property
+    def has_sdk_prefix_cache(self) -> bool:
+        """The dialog config's "system_prompt_cache" (API 1.22). Detected by
+        GenieDialog_flushPrefixCache, which ships with it: there is no symbol for
+        a JSON key, and an older libGenie rejects the key at create time."""
+        return self._has_prefix_cache_flush
+
+    @property
+    def has_profile_clear(self) -> bool:
+        return self._has_profile_clear
+
+    @property
+    def has_standalone_tokenizer(self) -> bool:
+        return self._has_standalone_tokenizer
+
+    def get_sampler(self, handle):
+        """GenieDialog_getSampler: the dialog-owned sampler handle, or None. The
+        handle is the dialog's and must not be freed."""
+        sampler_h = ctypes.c_void_p()
+        if self._lib.GenieDialog_getSampler(handle, ctypes.byref(sampler_h)) != STATUS_SUCCESS:
+            return None
+        return sampler_h
+
+    def register_logprobs_callback(self, sampler_h, on_logprobs) -> int:
+        """GenieSampler_registerLogprobsCallback on a dialog's sampler.
+
+        on_logprobs(token_id, logprob, top) gets the accepted token and a list
+        of (token_id, logprob) alternatives, highest first (empty unless the
+        sampler's "top-logprobs" is set). It runs on the SDK's inference thread
+        and must not raise. None unregisters. The ctypes trampoline is kept
+        alive per sampler handle until it is replaced or unregistered: the SDK
+        holds only the raw function pointer."""
+        if not self._has_native_logprobs:
+            raise RuntimeError("GenieSampler_registerLogprobsCallback is not in this libGenie")
+        key = sampler_h.value
+        if on_logprobs is None:
+            ret = self._lib.GenieSampler_registerLogprobsCallback(
+                sampler_h, ctypes.cast(None, LOGPROBS_CALLBACK), None)
+            if ret == STATUS_SUCCESS:
+                self._logprobs_callback_refs.pop(key, None)
+            return ret
+
+        def trampoline(token_id, logprob, n_top, top_ids, top_lps, _user):
+            try:
+                top = [(int(top_ids[i]), float(top_lps[i])) for i in range(n_top)] \
+                    if n_top and top_ids and top_lps else []
+                on_logprobs(int(token_id), float(logprob), top)
+            except Exception as e:  # never let an exception cross into C
+                logger.error(f"logprobs callback failed: {e}")
+
+        cb = LOGPROBS_CALLBACK(trampoline)
+        ret = self._lib.GenieSampler_registerLogprobsCallback(sampler_h, cb, None)
+        if ret == STATUS_SUCCESS:
+            self._logprobs_callback_refs[key] = cb
+        return ret
+
+    def flush_prefix_cache(self, handle) -> int:
+        """GenieDialog_flushPrefixCache: drops every entry of the SDK prefix
+        cache partition this dialog belongs to (shared with any dialog of the
+        same model geometry). A no-op when the dialog has none."""
+        if not self._has_prefix_cache_flush:
+            raise RuntimeError("GenieDialog_flushPrefixCache is not in this libGenie")
+        return self._lib.GenieDialog_flushPrefixCache(handle)
+
+    def clear_profile(self, profile: ProfileHandle) -> int:
+        """GenieProfile_clear: empties what a profile handle has collected."""
+        if not self._has_profile_clear:
+            raise RuntimeError("GenieProfile_clear is not in this libGenie")
+        return self._lib.GenieProfile_clear(profile)
+
+    def create_tokenizer(self, tokenizer_path: str) -> "GenieTokenizer":
+        """A standalone GenieTokenizer for a tokenizer.json (API 1.22). Raises
+        RuntimeError on failure."""
+        if not self._has_standalone_tokenizer:
+            raise RuntimeError("GenieTokenizer_create is not in this libGenie")
+        cfg_json = json.dumps({"standalone-tokenizer": {
+            "version": 1, "tokenizer": {"version": 1, "path": tokenizer_path}}})
+        cfg = ctypes.c_void_p()
+        ret = self._lib.GenieTokenizerConfig_createFromJson(cfg_json.encode(), ctypes.byref(cfg))
+        if ret != STATUS_SUCCESS or not cfg.value:
+            raise RuntimeError(f"GenieTokenizerConfig_createFromJson failed: {ret}")
+        try:
+            handle = ctypes.c_void_p()
+            ret = self._lib.GenieTokenizer_create(cfg, ctypes.byref(handle))
+            if ret != STATUS_SUCCESS or not handle.value:
+                raise RuntimeError(f"GenieTokenizer_create failed: {ret}")
+        finally:
+            self._lib.GenieTokenizerConfig_free(cfg)
+        return GenieTokenizer(self._lib, handle, tokenizer_path)
+
     # ------------------------------------------------------------ LoRA
 
     def apply_lora(self, handle, engine: str, adapter: str) -> int:
@@ -734,3 +913,147 @@ class GenieLib:
         if ret != STATUS_SUCCESS:
             return None
         return val.value
+
+
+# ---------------------------------------------------------------- tokenizer
+
+def _gpt2_unicode_to_byte() -> dict[str, int]:
+    """Inverse of GPT-2's bytes_to_unicode: the printable stand-in each byte
+    gets in a byte-level BPE vocabulary ("Ġ" for a space, ...)."""
+    bs = (list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1))
+          + list(range(ord("®"), ord("ÿ") + 1)))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {chr(c): b for b, c in zip(bs, cs)}
+
+
+_BYTE_FALLBACK = re.compile(r"^<0x([0-9A-Fa-f]{2})>$")
+
+
+class GenieTokenizer:
+    """A standalone GenieTokenizer (QAIRT 2.52+) behind the slice of the HF
+    `tokenizers.Tokenizer` interface this server uses: encode(text).ids and
+    decode(ids, skip_special_tokens=False).
+
+    encode is libGenie's own: it never adds special tokens (qualla adds BOS
+    itself, see Slot.sdk_bos_token), which is exactly what the SDK prefills.
+    HF's Tokenizer.encode adds them by default, so the two can differ by a
+    BOS on tokenizers whose post-processor inserts one.
+
+    decode does NOT use GenieTokenizer_decode: that call is stateful (it holds
+    back a token whose bytes end mid-character and returns "" until the next
+    call completes it), which would corrupt every later decode on a shared
+    handle. It maps GenieTokenizer_decodeToSubWords' vocabulary spellings back
+    to bytes instead -- byte-level BPE (GPT-2 stand-ins) or SentencePiece
+    ("▁", <0xNN> byte fallback), chosen from tokenizer.json's decoder -- and
+    decodes them as UTF-8 with replacement. A token that is only part of a
+    character therefore decodes to U+FFFD, as with HF."""
+
+    def __init__(self, cdll, handle, tokenizer_path: str):
+        self._lib = cdll
+        self._handle = handle
+        self._lock = threading.Lock()  # libGenie's tokenizer is not reentrant across calls
+        self._scheme = _subword_scheme(tokenizer_path)
+        self._byte_map = _gpt2_unicode_to_byte() if self._scheme == "byte_level" else None
+
+    class _Encoding:
+        __slots__ = ("ids",)
+
+        def __init__(self, ids):
+            self.ids = ids
+
+    def encode(self, text: str) -> "GenieTokenizer._Encoding":
+        held = []
+
+        def allocate(size, allocated):
+            buf = ctypes.create_string_buffer(max(int(size), 1))
+            held.append(buf)
+            allocated[0] = ctypes.cast(buf, ctypes.c_char_p)
+
+        cb = ALLOC_CALLBACK(allocate)
+        ids_ptr = ctypes.POINTER(ctypes.c_int32)()
+        n = ctypes.c_uint32()
+        with self._lock:
+            ret = self._lib.GenieTokenizer_encode(
+                self._handle, text.encode("utf-8"), cb, ctypes.byref(ids_ptr), ctypes.byref(n))
+        if ret != STATUS_SUCCESS:
+            raise RuntimeError(f"GenieTokenizer_encode failed: {ret}")
+        return self._Encoding([int(ids_ptr[i]) for i in range(n.value)])
+
+    def subwords(self, ids) -> list[str]:
+        """GenieTokenizer_decodeToSubWords: each id's vocabulary spelling."""
+        ids = list(ids)
+        if not ids:
+            return []
+        held = []
+
+        def allocate(size, allocated):
+            # One block for the pointer array and the strings: pointer-aligned.
+            buf = (ctypes.c_void_p * ((int(size) + 7) // 8 + 1))()
+            held.append(buf)
+            allocated[0] = ctypes.cast(buf, ctypes.c_char_p)
+
+        cb = ALLOC_CALLBACK(allocate)
+        arr = (ctypes.c_int32 * len(ids))(*ids)
+        out = ctypes.POINTER(ctypes.c_char_p)()
+        with self._lock:
+            ret = self._lib.GenieTokenizer_decodeToSubWords(
+                self._handle, arr, len(ids), cb, ctypes.byref(out))
+        if ret != STATUS_SUCCESS or not out:
+            raise RuntimeError(f"GenieTokenizer_decodeToSubWords failed: {ret}")
+        return [(out[i] or b"").decode("utf-8", "replace") for i in range(len(ids))]
+
+    def token_bytes(self, token_id: int) -> bytes:
+        """The bytes one token stands for (exact, even mid-character)."""
+        return self._subword_bytes(self.subwords([token_id])[0])
+
+    def _subword_bytes(self, word: str) -> bytes:
+        if self._byte_map is not None:
+            if all(ch in self._byte_map for ch in word):
+                return bytes(self._byte_map[ch] for ch in word)
+            return word.encode("utf-8")  # an added/special token, spelled as text
+        if self._scheme == "sentencepiece":
+            m = _BYTE_FALLBACK.match(word)
+            if m:
+                return bytes([int(m.group(1), 16)])
+            return word.replace("▁", " ").encode("utf-8")
+        return word.encode("utf-8")
+
+    def decode(self, ids, skip_special_tokens: bool = False) -> str:
+        # skip_special_tokens is accepted for interface parity; this server
+        # always passes False.
+        data = b"".join(self._subword_bytes(w) for w in self.subwords(ids))
+        return data.decode("utf-8", "replace")
+
+    def free(self) -> None:
+        if self._handle is not None and self._handle.value:
+            self._lib.GenieTokenizer_free(self._handle)
+            self._handle = None
+
+
+def _subword_scheme(tokenizer_path: str) -> str:
+    """"byte_level" | "sentencepiece" | "plain", from tokenizer.json's decoder."""
+    try:
+        with open(tokenizer_path, encoding="utf-8") as f:
+            decoder = json.load(f).get("decoder") or {}
+    except (OSError, ValueError):
+        return "plain"
+    kinds = set()
+
+    def walk(d):
+        if isinstance(d, dict):
+            kinds.add(d.get("type"))
+            for sub in d.get("decoders") or []:
+                walk(sub)
+
+    walk(decoder)
+    if "ByteLevel" in kinds:
+        return "byte_level"
+    if kinds & {"Metaspace", "ByteFallback", "Replace"}:
+        return "sentencepiece"
+    return "plain"

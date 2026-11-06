@@ -66,6 +66,15 @@ class FakeGenieLib:
         self.set_grammar_status = 0
         self.grammar_calls: list = []
         self.grammar: dict = {}          # handle -> (kind, content) in force
+        # The Genie API this fake reports. 1.21 = QAIRT 2.51 (the legacy,
+        # deprecated runtime); set api_minor = 22 to fake QAIRT 2.52, which
+        # turns on everything the 2.52-only properties below report.
+        self.api_minor = 21
+        self.dialog_configs: list = []     # parsed config JSON per create_dialog
+        self.logprobs_callbacks: dict = {}  # dialog handle value -> callback
+        self.flushed_prefix_caches: list = []
+        self.cleared_profiles: list = []
+        self.created_tokenizers: list = []
 
     @property
     def cdll(self):
@@ -79,6 +88,7 @@ class FakeGenieLib:
             raise RuntimeError("GenieDialog_create failed: -1")
         h = FakeHandle(self._next_handle)
         self._next_handle += 1
+        self.dialog_configs.append(json.loads(config_json))
         self.bound_profiles.append(profile)
         self.bound_loggers.append(log_handle)
         return h
@@ -154,6 +164,8 @@ class FakeGenieLib:
         if params.get("type") == "custom":
             return self._query_custom(handle, text,
                                       params["callback-name"], on_token)
+        if params.get("logprobs") == "true" and handle.value in self.logprobs_callbacks:
+            return self._query_native_logprobs(handle, text, params, on_token)
         response = self._response_for(text)
         # Split into ~word chunks like a real token stream.
         chunks = [w + " " for w in response.split(" ")]
@@ -182,6 +194,25 @@ class FakeGenieLib:
             logits[target] = self.PLANNED_BOOST
             ids = handler(ctypes.addressof(logits), self.N_VOCAB, 1)
             tok = int(ids[0])
+            piece = self.tokenizer.decode([tok])
+            on_token(piece + (" " if i < steps - 1 else ""), capi.SENTENCE_CONTINUE)
+        on_token("", capi.SENTENCE_END)
+        return 0
+
+    def _query_native_logprobs(self, handle, text: str, params: dict, on_token) -> int:
+        """QAIRT 2.52's basic sampler with the logprobs callback on: the SDK
+        picks each planned token itself and reports it (logprob -0.25, and
+        top-logprobs alternatives at -1, -2, ... after it) before the text."""
+        cb = self.logprobs_callbacks[handle.value]
+        planned = self.tokenizer.encode(self._response_for(text)).ids
+        limit = self.max_tokens.get(handle.value, capi.MAX_NUM_TOKENS_UNLIMITED)
+        n_top = int(params.get("top-logprobs", "0"))
+        steps = min(limit, len(planned))
+        for i in range(steps):
+            tok = planned[i]
+            # Out of order on purpose: the SDK's come out of a heap.
+            top = [((tok + k) % self.N_VOCAB, -float(k)) for k in range(n_top, 0, -1)]
+            cb(tok, -0.25, top)
             piece = self.tokenizer.decode([tok])
             on_token(piece + (" " if i < steps - 1 else ""), capi.SENTENCE_CONTINUE)
         on_token("", capi.SENTENCE_END)
@@ -239,7 +270,57 @@ class FakeGenieLib:
         return 0
 
     def api_version(self) -> str:
-        return "1.21.0"
+        return f"1.{self.api_minor}.0"
+
+    def api_version_tuple(self):
+        return (1, self.api_minor, 0)
+
+    @property
+    def legacy_runtime(self) -> bool:
+        return self.api_minor < 22
+
+    # ------------------------------------------------------------ 2.52 additions
+
+    @property
+    def has_native_logprobs(self) -> bool:
+        return not self.legacy_runtime
+
+    @property
+    def has_sdk_prefix_cache(self) -> bool:
+        return not self.legacy_runtime
+
+    @property
+    def has_profile_clear(self) -> bool:
+        return not self.legacy_runtime
+
+    @property
+    def has_standalone_tokenizer(self) -> bool:
+        return not self.legacy_runtime
+
+    def get_sampler(self, handle):
+        return FakeHandle(5000 + handle.value)
+
+    def register_logprobs_callback(self, sampler_h, on_logprobs) -> int:
+        dialog = sampler_h.value - 5000
+        if on_logprobs is None:
+            self.logprobs_callbacks.pop(dialog, None)
+        else:
+            self.logprobs_callbacks[dialog] = on_logprobs
+        return 0
+
+    def flush_prefix_cache(self, handle) -> int:
+        self.flushed_prefix_caches.append(handle.value)
+        return 0
+
+    def clear_profile(self, profile) -> int:
+        self.cleared_profiles.append(profile)
+        return 0
+
+    def create_tokenizer(self, tokenizer_path: str):
+        self.created_tokenizers.append(tokenizer_path)
+        if self.tokenizer is None:
+            raise RuntimeError("GenieTokenizer_create failed: -1")
+        return self.tokenizer
 
     # ------------------------------------------------------------ introspection
 

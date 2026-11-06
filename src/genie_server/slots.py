@@ -93,6 +93,7 @@ class ModelAssets:
     sampler_defaults: dict = field(default_factory=dict)
     grammar_support: grammar.GrammarSupport = field(
         default_factory=lambda: grammar.GrammarSupport(False, "not probed"))
+    sdk_prefix_cache: dict | None = None
 
     @property
     def context_size(self) -> int | None:
@@ -118,6 +119,9 @@ class Slot:
         self.lock = threading.Lock()
         self.handle = None
         self.tokenizer = None
+        # The dialog's "system_prompt_cache" (QAIRT 2.52+), or None when this
+        # slot is on the server's own prefix cache. See sdk_prefix_cache_plan.
+        self.sdk_prefix_cache: dict | None = None
         self.dialog_cfg: dict = {}
         self.chat_template = "chatml"
         # Which tool dialect this slot's model speaks — derived from the chat
@@ -174,6 +178,7 @@ class Slot:
         self.sampler_defaults = assets.sampler_defaults
         self.grammar_support = assets.grammar_support
         self.active_grammar = assets.grammar_support.baseline
+        self.sdk_prefix_cache = assets.sdk_prefix_cache
         self.model_root = assets.model_dir
         self.active_model_id = assets.model_dir.name
         self.active_lora_adapter = ""
@@ -219,11 +224,7 @@ class Slot:
         Not on a linear-attention bundle (engine.model."linear-attention",
         Qwen3.5): its conv / recurrent states are neither saved with the KV
         cache nor rewindable, so the prefix cache is off for it."""
-        engines = self.dialog_cfg.get("engine", {})
-        for engine in engines if isinstance(engines, list) else [engines]:
-            if isinstance(engine, dict) and (engine.get("model") or {}).get("linear-attention"):
-                return False
-        return True
+        return not has_linear_attention(self.dialog_cfg)
 
     def count_prompt_tokens(self, text: str) -> int:
         """What the SDK prefills for this prompt: count_tokens plus the BOS it
@@ -291,6 +292,86 @@ def lora_alpha_names(dialog_cfg: dict, engine_role: str) -> set[str] | None:
     return names
 
 
+def _engines(dialog_cfg: dict) -> list[dict]:
+    engines = dialog_cfg.get("engine", {})
+    return [e for e in (engines if isinstance(engines, list) else [engines])
+            if isinstance(e, dict)]
+
+
+def has_linear_attention(dialog_cfg: dict) -> bool:
+    """engine.model."linear-attention" (Qwen3.5): conv / recurrent state that
+    neither GenieDialog_save nor the SDK prefix cache captures."""
+    return any((e.get("model") or {}).get("linear-attention") for e in _engines(dialog_cfg))
+
+
+def has_sliding_window(dialog_cfg: dict) -> bool:
+    """A cache group (or the engine) whose longcontext type is sliding-window."""
+    def swa(lc) -> bool:
+        return isinstance(lc, dict) and lc.get("type") == "sliding-window"
+    for e in _engines(dialog_cfg):
+        if swa(e.get("longcontext")):
+            return True
+        for group in e.get("cache-groups") or []:
+            if isinstance(group, dict) and swa(group.get("longcontext")):
+                return True
+    return False
+
+
+def has_lora(dialog_cfg: dict) -> bool:
+    """engine.model.binary.lora: adapters a request can switch at runtime."""
+    return any(((e.get("model") or {}).get("binary") or {}).get("lora")
+               for e in _engines(dialog_cfg))
+
+
+# Dialog types the SDK refuses the prefix cache for (it disables it itself).
+SDK_PREFIX_CACHE_UNSUPPORTED_TYPES = ("multistream", "lhd-dec", "lade", "ssd-q1")
+
+
+def sdk_prefix_cache_plan(lib, config, dialog_cfg: dict, template: str,
+                          slot_name: str) -> dict | None:
+    """The dialog config's "system_prompt_cache" for this slot, or None when the
+    slot uses this server's own (deprecated on 2.52+) prefix cache instead.
+
+    QAIRT 2.52.0's cache works inside GenieDialog_query: it keys an in-memory
+    entry on the prompt up to the first prefix_boundary and restores it on a
+    later query that starts the same way. The server only has to say where
+    the system turn ends. Logged when "auto" leaves it off, so the reason is
+    visible."""
+    backend = config.prefix_cache_backend
+    if backend == "host" or not lib.has_sdk_prefix_cache:
+        return None
+
+    def off(reason: str) -> None:
+        logger.info(f"[{slot_name}] SDK prefix cache off: {reason}")
+        return None
+
+    boundary = templates.SDK_PREFIX_BOUNDARIES.get(template)
+    if not boundary:
+        return off(f"template '{template}' has no separate system turn")
+    if dialog_cfg.get("type", "basic") in SDK_PREFIX_CACHE_UNSUPPORTED_TYPES:
+        return off(f"dialog type '{dialog_cfg.get('type')}' is not supported by the SDK cache")
+    if has_linear_attention(dialog_cfg):
+        return off("linear-attention state is not captured with the KV cache")
+    if backend == "auto" and has_sliding_window(dialog_cfg):
+        return off("sliding-window cache group: the SDK's in-memory save writes every "
+                   "cache group with the default group's length (QAIRT 2.52.0 source). "
+                   "PREFIX_CACHE_BACKEND=sdk turns it on anyway")
+    if backend == "auto" and has_lora(dialog_cfg):
+        return off("LoRA adapters: the SDK's cache partition does not include the "
+                   "applied adapter. PREFIX_CACHE_BACKEND=sdk turns it on anyway "
+                   "(and flushes it on every LoRA change)")
+    plan = {
+        "enabled": True,
+        "prefix_boundary": boundary,
+        "max_entries": config.sdk_prefix_cache_max_entries,
+        "min_prefix_tokens": config.sdk_prefix_cache_min_tokens,
+        "global_max_total_mb": config.sdk_prefix_cache_global_mb,
+    }
+    if config.sdk_prefix_cache_partition_mb:
+        plan["partition_max_total_mb"] = config.sdk_prefix_cache_partition_mb
+    return plan
+
+
 def load_tokenizer_file(tok_path: str):
     """Best-effort HF tokenizer load from a tokenizer.json path; None on any
     failure. Shared with vlm.VLMSlot, whose tokenizer.json comes out of a
@@ -306,9 +387,51 @@ def load_tokenizer_file(tok_path: str):
         return None
 
 
-def _load_tokenizer(dialog_cfg: dict):
-    """Best-effort HF tokenizer load from a dialog config; None on any failure."""
-    return load_tokenizer_file(dialog_cfg.get("tokenizer", {}).get("path", ""))
+def _load_tokenizer(dialog_cfg: dict, lib=None, backend: str = "hf"):
+    """Best-effort host tokenizer for a dialog config; None on any failure.
+    See load_host_tokenizer."""
+    return load_host_tokenizer(dialog_cfg.get("tokenizer", {}).get("path", ""), lib, backend)
+
+
+def load_host_tokenizer(tok_path: str, lib=None, backend: str = "auto"):
+    """The tokenizer the server counts and decodes with (ServerConfig.tokenizer_backend):
+    "hf" = Python's `tokenizers`; "genie" = libGenie's standalone tokenizer
+    (QAIRT 2.52+, capi.GenieTokenizer); "auto" = HF when installed, else
+    libGenie's. Falls back to the other one, and finally to None (a
+    whitespace approximation), with a log line saying which it took."""
+    if not tok_path:
+        return None
+    genie_ok = lib is not None and getattr(lib, "has_standalone_tokenizer", False)
+
+    def genie():
+        try:
+            tok = lib.create_tokenizer(tok_path)
+            logger.info(f"libGenie standalone tokenizer loaded: {tok_path}")
+            return tok
+        except Exception as e:
+            logger.warning(f"libGenie standalone tokenizer load failed: {e}")
+            return None
+
+    if backend == "genie":
+        if genie_ok:
+            tok = genie()
+            if tok is not None:
+                return tok
+        else:
+            logger.warning("TOKENIZER_BACKEND=genie but this libGenie has no standalone "
+                           "tokenizer (QAIRT 2.52.0+); using Python's tokenizers")
+        return load_tokenizer_file(tok_path)
+    tok = load_tokenizer_file(tok_path)
+    if tok is None and backend == "auto" and genie_ok:
+        tok = genie()
+    return tok
+
+
+def free_host_tokenizer(tok) -> None:
+    """Frees a capi.GenieTokenizer; an HF tokenizer needs nothing."""
+    free = getattr(tok, "free", None)
+    if callable(free):
+        free()
 
 
 def pin_htp_device(extensions_path: str, device_id: int, slot_name: str,
@@ -336,7 +459,8 @@ def pin_htp_device(extensions_path: str, device_id: int, slot_name: str,
 def load_dialog_config(model_dir: Path, device_id: int | None, slot_name: str,
                        htp_ext_cache_dir: Path,
                        poll: bool | None = None,
-                       config_file: str = DEFAULT_DIALOG_CONFIG) -> tuple[bytes, dict]:
+                       config_file: str = DEFAULT_DIALOG_CONFIG,
+                       system_prompt_cache=None) -> tuple[bytes, dict]:
     """Reads the dialog config under model_dir and resolves all relative
     asset paths (tokenizer, backend extensions, ctx-bins, grammar file)
     against model_dir. If device_id is given, also pins the HTP backend to
@@ -429,7 +553,24 @@ def load_dialog_config(model_dir: Path, device_id: int | None, slot_name: str,
         ssd["forecast-prefix-name"] = resolve_and_verify(
             ssd["forecast-prefix-name"], model_dir)
 
+    # The SDK prefix cache (QAIRT 2.52+). A callable decides from the loaded
+    # dialog config; an older libGenie rejects the key, so it is only ever set
+    # when the caller says so.
+    if callable(system_prompt_cache):
+        system_prompt_cache = system_prompt_cache(dcfg)
+    if system_prompt_cache:
+        dcfg["system_prompt_cache"] = system_prompt_cache
+
     return json.dumps(genie_config_data).encode("utf-8"), dcfg
+
+
+def _prefix_cache_summary(slot: Slot) -> str:
+    """For the slot-ready log line: which prefix cache the slot uses."""
+    if slot.sdk_prefix_cache:
+        return f"sdk (boundary {slot.sdk_prefix_cache['prefix_boundary']!r})"
+    if not slot.saves_state:
+        return "off (linear-attention state)"
+    return "host (on-disk, POST /v1/prefix/warmup)"
 
 
 def _grammar_summary(slot: Slot) -> str:
@@ -482,9 +623,13 @@ class SlotManager:
         """Fully loads a Genie model in isolation: config + dialog handle +
         tokenizer. Does NOT touch any Slot's state — the caller decides
         whether/when to adopt the result via Slot.adopt()."""
+        template = templates.detect_template(
+            self.config.chat_template_override or model_dir.name)
         config_json, dcfg = load_dialog_config(
             model_dir, device_id, slot_name, self._htp_ext_cache_dir, poll,
-            config_file)
+            config_file,
+            system_prompt_cache=lambda d: sdk_prefix_cache_plan(
+                self.lib, self.config, d, template, slot_name))
         handle = self.lib.create_dialog(config_json, profile, self.log_handle)
         try:
             grammar_support = grammar.probe_support(self.lib, handle, dcfg, slot_name)
@@ -492,19 +637,18 @@ class SlotManager:
             self.lib.free_dialog(handle)
             raise
         sampler_cfg = dcfg.get("sampler", {}) or {}
-        template = templates.detect_template(
-            self.config.chat_template_override or model_dir.name)
         return ModelAssets(
             handle=handle,
             config_json=config_json,
             dialog_cfg=dcfg,
-            tokenizer=_load_tokenizer(dcfg),
+            tokenizer=_load_tokenizer(dcfg, self.lib, self.config.tokenizer_backend),
             template=template,
             tool_format=tool_formats.get(
                 self.config.tool_format_override or tool_formats.detect(template)),
             model_dir=model_dir,
             sampler_defaults=capi.sampler_defaults_from(sampler_cfg),
             grammar_support=grammar_support,
+            sdk_prefix_cache=dcfg.get("system_prompt_cache"),
         )
 
     def load_all(self) -> None:
@@ -528,8 +672,8 @@ class SlotManager:
                 f"device_id={slot.device_id if slot.device_id is not None else '(unpinned)'} "
                 f"template={slot.chat_template} "
                 f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token} "
-                f"grammar={_grammar_summary(slot)}"
-                + ("" if slot.saves_state else " prefix-cache=off (linear-attention state)"))
+                f"grammar={_grammar_summary(slot)} "
+                f"prefix-cache={_prefix_cache_summary(slot)}")
         self._by_name = {s.name: s for s in self.slots}
         self.reindex()
 
@@ -581,6 +725,8 @@ class SlotManager:
                     if s.handle is not None:
                         self.lib.free_dialog(s.handle)
                         s.handle = None
+                    free_host_tokenizer(s.tokenizer)
+                    s.tokenizer = None
                     if s.profile is not None:
                         self.lib.free_profile(s.profile)
                         s.profile = None
@@ -715,6 +861,28 @@ class SlotManager:
             return vslot
         return self.select_vlm(model_name)
 
+    # ------------------------------------------------------------ SDK prefix cache
+
+    def flush_sdk_prefix_cache(self, slot: Slot, handle=None) -> bool:
+        """GenieDialog_flushPrefixCache for a slot on the SDK prefix cache
+        (QAIRT 2.52+); False when it has none. Caller holds slot.lock. The
+        flush empties the whole partition, which every dialog of the same
+        model geometry shares, so a sibling slot on the same model loses its
+        entries too (they are rebuilt on the next query; nothing goes stale)."""
+        if not slot.sdk_prefix_cache:
+            return False
+        return self._flush(slot.name, handle if handle is not None else slot.handle)
+
+    def _flush(self, slot_name: str, handle) -> bool:
+        if handle is None or not getattr(self.lib, "has_sdk_prefix_cache", False):
+            return False
+        ret = self.lib.flush_prefix_cache(handle)
+        if ret != capi.STATUS_SUCCESS:
+            logger.warning(f"[{slot_name}] GenieDialog_flushPrefixCache failed: {ret}")
+            return False
+        logger.info(f"[{slot_name}] SDK prefix cache flushed")
+        return True
+
     # ------------------------------------------------------------ hot-swap
 
     def switch_model(self, slot: Slot, model_dir: Path, unload_first: bool) -> None:
@@ -736,6 +904,7 @@ class SlotManager:
         if unload_first:
             old_handle, slot.handle = slot.handle, None
             slot.epoch += 1
+            self.flush_sdk_prefix_cache(slot, old_handle)
             self.lib.free_dialog(old_handle)
             logger.info(f"[{slot.name}] Freed previous model before loading "
                         "(unload_first=true)")
@@ -751,9 +920,15 @@ class SlotManager:
             raise
 
         old_handle_to_free = None if unload_first else slot.handle
+        old_sdk_cache = slot.sdk_prefix_cache
+        old_tokenizer = slot.tokenizer
         slot.adopt(assets)
         self.reindex()
+        if old_handle_to_free is not None and old_sdk_cache:
+            self._flush(slot.name, old_handle_to_free)
         self.lib.free_dialog(old_handle_to_free)
+        if old_tokenizer is not slot.tokenizer:
+            free_host_tokenizer(old_tokenizer)
         logger.info(f"[{slot.name}] Model switched: model={slot.active_model_id} "
                     f"template={slot.chat_template} "
                     f"sdk-bos={'none' if slot.sdk_bos_token is None else slot.sdk_bos_token} "

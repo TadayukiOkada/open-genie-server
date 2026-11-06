@@ -21,18 +21,19 @@ model, read this page first.
 - [What 2.49.1 changed](#what-2491-changed)
 - [What 2.50.0 changed](#what-2500-changed)
 - [What 2.51.0 changed](#what-2510-changed)
+- [What 2.52.0 changed](#what-2520-changed)
 - [What we have and have not tested](#what-we-have-and-have-not-tested)
 
 ## At a glance
 
-| | 2.48.40.260702 | 2.49.40.260810 | 2.49.1.260821 | 2.50.0.260828 | 2.51.0.260929 |
-|---|---|---|---|---|---|
-| **D1** slot wedge — KV occupancy is never rewound | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (measured) |
-| **D2** reset does not rewind the KV position allocator | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (measured) |
-| **D3** a rebuilt library has no grammar backend | **present** | **present** | **present** (measured) | **present** (source-identical) | **present** (measured) |
-| **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested | **present** (measured) | **present** (measured) |
-| **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (source argument) |
-| **D6** save/restore breaks a sliding-window cache group | not tested | **present** (measured) | not tested | **present** (source-identical) | **present** (measured) |
+| | 2.48.40.260702 | 2.49.40.260810 | 2.49.1.260821 | 2.50.0.260828 | 2.51.0.260929 | 2.52.0.261104 |
+|---|---|---|---|---|---|---|
+| **D1** slot wedge — KV occupancy is never rewound | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (measured) | fixed (2.51.0) |
+| **D2** reset does not rewind the KV position allocator | not reproduced | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (measured) | fixed (2.51.0) |
+| **D3** a rebuilt library has no grammar backend | **present** | **present** | **present** (measured) | **present** (source-identical) | **present** (measured) | **present** (source) |
+| **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested | **present** (measured) | **present** (measured) | **present** (source) |
+| **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (source argument) | fixed (2.51.0) |
+| **D6** save/restore breaks a sliding-window cache group | not tested | **present** (measured) | not tested | **present** (source-identical) | **present** (measured) | fixed (source argument) |
 
 > [!WARNING]
 > **`2.49.1.260821` is newer than `2.49.40.260810`, despite the smaller number.**
@@ -610,6 +611,57 @@ directories 2.50.0's did, plus five that are new in 2.51.0 (the config manager,
 the JSON schema validator and three engine directories). Add the same set
 `make/Android.mk` lists. The library links without them, because the shared
 object is not linked with `--no-undefined`, and fails at `dlopen` on the board.
+
+## What 2.52.0 changed
+
+**This column rests on the shipped sources, not on hardware.** Nothing about
+2.52.0.261104 here has been measured on a board yet; each entry says what in the
+sources it rests on.
+
+**It fixes D6.** `GenieDialog_save` now writes, per cache group, its own count,
+its graph variant and, for a sliding-window group, the ring's slot order, and
+`GenieDialog_restore` puts all of it back. That is the same repair the
+rebuilt-library option used to make, written by the SDK.
+
+**It also fixes the extra BOS on a LUT-embedding bundle's prefix-cache hit**
+(see [MANUAL § Prefix KV Cache](./MANUAL.md#the-servers-own-prefix-cache)): the
+LUT encoder now adds BOS only on `SENTENCE_COMPLETE`, `BEGIN` and `REWIND`, as
+the token path always did. And the continuous-batching scheduler no longer
+treats a concat-format sliding-window cache group as a scatter one (the release
+notes' "windowed-path for concat format SWA cache groups").
+
+**What it does not fix:** D3 (the source drop still declares the grammar backend
+without defining it, and no build file enables it) and D4 (the basic dialog still
+hands the grammar's terminating token to the token callback). The swallowed
+graph-variant error (change 2 of
+[Option 1](#option-1--run-a-fixed-libgenieso-recommended-on-249x--250x-unless-you-need-grammar))
+and a value-buffer mix-up in the SmartMask KV move are also unchanged.
+
+**It is a drop-in swap for this server**, and this server uses what it adds.
+Genie's C API moves from 1.21.0 to 1.22.0: functions are only added, and the
+stock library's `Genie*` exports go from 128 to 137. On a 2.52+ libGenie:
+
+- generated-token **logprobs come from the SDK** (`GenieSampler_registerLogprobsCallback`):
+  the SDK samples as it would without logprobs; see [MANUAL § Logprobs](./MANUAL.md#logprobs);
+- the **SDK's own prefix cache** (`system_prompt_cache`) is the default; see
+  [MANUAL § The SDK's prefix cache](./MANUAL.md#the-sdks-prefix-cache-qairt-252).
+  Read from the sources, its in-memory save still writes every cache group with the
+  default group's length — what D6 was — so it stays off by default on a
+  sliding-window bundle;
+- the profile is cleared before each query (`GenieProfile_clear`);
+- `TOKENIZER_BACKEND` can use libGenie's standalone tokenizer (`GenieTokenizer_create`).
+
+**An older libGenie is deprecated.** Everything still works on 2.48 through 2.51,
+through the paths the server needed before 2.52 (logprobs through the custom
+sampler, its own on-disk prefix cache only), and the server logs one warning at
+startup saying so.
+
+**If you rebuild the library**: the OE makefile now lists every source directory
+the library needs, but it misses the `src/qualla/engines` include path, so the
+stock tree does not build at all (`inference-types.hpp: No such file or
+directory`). Append `-I$(SRC_DIR_GENIE_ENGINES)` to `INCLUDES` — at the end: put
+the encoder directories before the dialogs one and `Accuracy.cpp` picks up the
+wrong `basic.hpp`.
 
 ## What we have and have not tested
 

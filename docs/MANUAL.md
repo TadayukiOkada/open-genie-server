@@ -759,6 +759,9 @@ An `env_config.json` is required in the server's startup (current) directory. Th
 | `SLOT_LOAD_ORDER` | optional | `"vlm-first"` | Which slot kind is created first when both `TEXT_SLOTS` and `VLM_SLOTS` are set: `"vlm-first"` or `"text-first"`. See [Slot creation order](#slot-creation-order-slot_load_order) and [Loading Two Models at Once](#loading-two-models-at-once). Any other value is rejected at startup. |
 | `VLM_SLOTS` | optional | (unset) | A separate, parallel multimodal (`GenieNode`/`GeniePipeline`) slot configuration alongside `TEXT_SLOTS`. `[{"name","device_id","model_root","spec","max_tokens","poll","pipeline_script","node_configs","static_tensors"}, ...]`. Only `model_root` is required — the bundle layout is read from the bundle itself and `spec` (the VLM family) is auto-detected when omitted; the last three are an escape hatch for a layout `vlm_layout.py` cannot read on its own. Can be set independently of `TEXT_SLOTS` (see [VLM (Multimodal) Support](#vlm-multimodal-support)). `max_tokens` caps generation for that slot (default `1024`, `0` = uncapped) — see [Limiting generation length](#limiting-generation-length). |
 | `PREFIX_CACHE_DIR` | optional | `"./prefix_cache"` | Directory for the prefix KV cache and HTP extension config copies (`.htp_ext_cache/`). A relative value is resolved against the server's working directory, so an absolute path is worth setting if the server may be started from anywhere but its own directory. |
+| `PREFIX_CACHE_BACKEND` | optional | `"auto"` | Which prefix cache a text slot uses. `"auto"`: the SDK's own in-memory cache on a QAIRT 2.52+ libGenie where the slot qualifies, else this server's on-disk cache (see [The SDK's prefix cache](#the-sdks-prefix-cache-qairt-252)). `"sdk"`: the SDK's cache also on a sliding-window or LoRA bundle. `"host"`: this server's cache only, as before 2.52. Needs a restart (or a model switch) to change. |
+| `SDK_PREFIX_CACHE_MAX_ENTRIES` / `SDK_PREFIX_CACHE_GLOBAL_MB` / `SDK_PREFIX_CACHE_PARTITION_MB` / `SDK_PREFIX_CACHE_MIN_TOKENS` | optional | `8` / `512` / `0` / `128` | The SDK prefix cache's `max_entries`, `global_max_total_mb` (process-wide host memory for all entries; the SDK requires it), `partition_max_total_mb` (per model; `0` = no limit) and `min_prefix_tokens` (a shorter system turn is not cached). QAIRT 2.52+ only. |
+| `TOKENIZER_BACKEND` | optional | `"auto"` | The host-side tokenizer for token counts, logprob token strings and token-id prompts: `"auto"` = Python's `tokenizers` when installed, else libGenie's standalone tokenizer (QAIRT 2.52+); `"hf"` / `"genie"` force one. They differ in one way: `tokenizers` adds the tokenizer's special tokens on encode, libGenie's never does (the SDK adds BOS itself), so token counts and the tokens prompt scoring forces can differ by a BOS. |
 | `MODELS_BASE_DIR` | optional | (unset) | Base directory every **relative** model path resolves against: `TEXT_SLOTS`/`VLM_SLOTS` `model_root` at startup, and `POST /v1/models/switch`'s `model_dir`. An **absolute** path ignores it and is used as given. Unset, a relative path is resolved against the server's working directory. Set this and a config can name each model by bare directory name. Note it is a base, not a sandbox — an absolute `model_dir` still loads from outside the tree. |
 | `CHAT_TEMPLATE` | optional | (unset = auto-detect) | Pins the chat template to `"llama3"` / `"llama2"` / `"chatml"` / `"qwen3_5"` / `"gemma"` / `"gemma4"`. Overrides for every slot. If unset, each slot auto-detects it from its model directory name (see [the relevant section](#chat-template-selection-rules)). |
 | `TOOL_FORMAT` | optional | (unset) | Which tool-call dialect the models speak: `hermes` (JSON in `<tool_call>` tags — Qwen3 and everything else we have) or `gemma4` (`<\|tool_call>call:NAME{...}<tool_call\|>`, values in gemma4's own notation rather than JSON) or `qwen3_xml` (Qwen3.5: `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`). Unset derives it per slot from that slot's chat template, which is what you want unless a bundle's name misleads the template detection. A dialect decides how declarations are rendered into the system turn, how a call is parsed out of the reply, and how an assistant turn's `tool_calls` are rendered back for the follow-up. |
@@ -1115,6 +1118,47 @@ Prompt format per template:
 
 ## Prefix KV Cache
 
+### The SDK's prefix cache (QAIRT 2.52+)
+
+QAIRT 2.52.0 added a prefix cache to libGenie itself (`system_prompt_cache` in the
+dialog config). On such a libGenie a text slot uses it by default
+(`PREFIX_CACHE_BACKEND: "auto"`): the server adds `system_prompt_cache` to the
+dialog config with `prefix_boundary` set to the string that closes the system
+turn in the slot's template (`<|im_end|>\n` for chatml and qwen3_5, `<|eot_id|>`
+for llama3, `<turn|>\n` for gemma4), and the SDK does the rest inside every
+query: it caches the KV of the prompt up to the first boundary in host memory
+and restores it when a later prompt starts the same way. No warmup is needed,
+the first request with a given system prompt fills the entry, and nothing is
+written to disk. The slot-ready log line says `prefix-cache=sdk (...)`, and
+`GET /v1/prefix/cache` lists the slots on it under `sdk`.
+
+`"auto"` leaves a slot on this server's own cache, and logs why, when:
+
+- the template has no separate system turn (llama2, gemma);
+- the bundle has linear-attention state (Qwen3.5), which the SDK cache does not
+  save either; or its dialog type is one the SDK refuses (`ssd-q1`, `lhd-dec`,
+  `multistream`). `"sdk"` does not override these;
+- the bundle has a sliding-window cache group (Gemma 4). Read from the 2.52.0
+  sources, the SDK's in-memory save writes every cache group with the default
+  group's length, the pattern that broke `GenieDialog_save` on such bundles before
+  2.52 (see below); this has not been measured. `"sdk"` turns it on anyway;
+- the bundle has LoRA adapters: the SDK keys its cache by model and config, not by
+  the adapter applied at the moment. With `"sdk"`, the server flushes the cache
+  (`GenieDialog_flushPrefixCache`) on every LoRA apply, strength change and
+  release.
+
+The cache is shared by every dialog of the same model geometry, so two slots on
+the same model share entries, and a flush on one empties both. A model switch
+flushes the old model's entries; `DELETE /v1/prefix/cache?scope=all` flushes
+every slot's. The SDK exposes no list of its entries.
+
+The rest of this section is the server's own cache: the only one on a libGenie
+older than 2.52, and **deprecated** on 2.52+, where it still works and
+`POST /v1/prefix/warmup` says so in a `deprecated` field. An entry it holds still
+takes precedence over the SDK's.
+
+### The server's own prefix cache
+
 When `messages` includes a `system` role and the template supports splitting (llama3/chatml/gemma4), the system prompt portion is saved and restored as a separate KV cache entry.
 
 **Not on a linear-attention bundle.** A bundle whose `genie_config.json` sets `dialog.engine.model.linear-attention` (Qwen3.5) keeps per-layer recurrent and convolution state besides its KV cache, and `GenieDialog_save` / `GenieDialog_restore` do not carry that state: a restored prefix would continue from the state of whatever ran last. Such a slot runs every prompt whole, the startup log says `prefix-cache=off (linear-attention state)`, and `POST /v1/prefix/warmup` answers `422`. See [PLATFORM_NOTES](./PLATFORM_NOTES.md#qwen35-linear-attention-bundles).
@@ -1296,6 +1340,10 @@ curl "$base_url/v1/server/profile?slot=chat"
   "profile": { "header": {...}, "components": [ ... ] }
 }
 ```
+
+On a QAIRT 2.52+ libGenie the server clears the profile (`GenieProfile_clear`)
+before each query, so it holds that query alone instead of growing for the life of
+the slot; on an older one it accumulates and `summary` reads the latest values.
 
 `summary` is the handful of dialog KPIs flattened into familiar units;
 `profile` is the SDK's JSON verbatim (it also carries `GenieDialog_create`
@@ -1634,6 +1682,8 @@ So `tokenizers` is optional only in the sense that the server starts without it.
 The Genie SDK exposes no logits through `GenieDialog` — logprobs are implemented via the SDK's **custom sampler** hook (`GenieSampler_registerUserDataCallback` + sampler config `{"type": "custom"}`), which hands the server the full dequantized float32 logits vector at every generation step and lets it choose the emitted token (`genie_server/logprobs.py`).
 
 **Generated-token logprobs** (when the QAIRT runtime provides logits): `logprobs` on `/v1/completions` (int) or `logprobs`/`top_logprobs` on `/v1/chat/completions` (bool/int) record each generated token's logprob and top-N alternatives. Sampling moves into the server for these requests (greedy / temperature / top-k / top-p over the same logits — `temperature=0` matches the SDK's greedy exactly). Parameters the request leaves out take the model's `genie_config.json` defaults, exactly as they do without logprobs, so asking for logprobs does not change what gets sampled; the SDK's basic sampler with the model's defaults is restored afterwards. Overhead is one log-softmax over the vocab per token (~1-2 ms) versus tens of ms of NPU decode — and exactly zero for requests that don't ask for logprobs. Requires `numpy` and the model tokenizer. Not supported with `stream: true` or on VLM slots. With a grammar the values are those after the grammar's mask: a token the grammar forbids never appears, and a token it forces reports 0.
+
+**On QAIRT 2.52+, generated-token logprobs are native.** libGenie 2.52.0 can report each accepted token's logprob itself (`GenieSampler_registerLogprobsCallback` with the sampler's `logprobs` / `top-logprobs`), so on such a library the SDK samples exactly as it would without logprobs — its own sampler, penalties included — and the server only records what the callback reports, with no `numpy` needed. The values are the same quantity as before: log-softmax of the raw logits at temperature 1. The custom-sampler path above remains for prompt scoring, which has to force tokens, and for generated-token logprobs on a libGenie older than 2.52, where it is **deprecated** (logged once). Whether the SDK's values reflect a grammar's mask has not been measured.
 
 Some runtimes accept the custom sampler setting but never invoke its logits callback. On Ubuntu with the QCS9075 QAIRT 2.46 packages, this was measured with a Qwen3-0.6B bundle. If the first generated token arrives without a logits callback, the server stops that query and returns HTTP 400 with `error.code: "logprobs_not_supported"` for generated-token logprobs and prompt scoring, rather than returning empty or misleading scores. The slot remembers the result, so later logprobs requests get the same 400 at once instead of running a generation first. Prompt scoring also checks that it got one score per prompt token and returns HTTP 500 if the callback stopped partway, since a short list would shift every score. QAIRT 2.50.40 invoked the callback with the same bundle, but its unpatched reset path failed after longer generation; see [QAIRT Version Issues](./QAIRT_VERSIONS.md).
 
