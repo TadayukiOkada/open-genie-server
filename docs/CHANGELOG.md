@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 — QAIRT 2.52.0
+
+QAIRT 2.52.0 (Genie API 1.22) is supported; a libGenie from 2.48 through 2.51
+still works and is deprecated (#60). Checked on an SA8255P with 2.52.0, stock
+and rebuilt — see [QAIRT_VERSIONS § What 2.52.0 changed](QAIRT_VERSIONS.md#what-2520-changed).
+**Upgrade the server before moving to a 2.52 libGenie:** on one, 1.8.0 and
+older answer logprobs and prompt-scoring requests with HTTP 400
+`logprobs_not_supported`, because 2.52 refuses their key-by-key switch to the
+custom sampler. The SDK's own prefix cache is available but off by default,
+since on 2.52.0 it does not work as it stands.
 
 ### Added
 
