@@ -1340,20 +1340,6 @@ def create_app(state: ServerState) -> FastAPI:
                  "max_entries": s.sdk_prefix_cache["max_entries"]}
                 for s in manager.slots if s.sdk_prefix_cache]
 
-    def _warmup_deprecation(slot) -> dict:
-        """The server's own (on-disk) prefix cache is deprecated wherever the
-        libGenie has the SDK's (QAIRT 2.52+). It still works."""
-        if state.lib.legacy_runtime:
-            return {}
-        note = ("POST /v1/prefix/warmup and the on-disk prefix cache are deprecated "
-                "on QAIRT 2.52+: " + (
-                    f"slot '{slot.name}' already caches system prompts in the SDK "
-                    "(no warmup needed)." if slot.sdk_prefix_cache else
-                    f"slot '{slot.name}' is not on the SDK prefix cache (see the "
-                    "slot-ready log line for why); this cache keeps working for it."))
-        logger.warning(note)
-        return {"deprecated": note}
-
     @app.get("/v1/prefix/cache")
     async def list_prefix_cache():
         return {"entries": state.prefix_cache.list_entries(
@@ -1450,7 +1436,7 @@ def create_app(state: ServerState) -> FastAPI:
         if state.prefix_cache.exists(cache_key):
             state.prefix_cache.note_namespace(cache_key, slot.cache_namespace)
             return {"status": "already_cached", "key": cache_key, "slot": slot.name,
-                    "enable_thinking": enable_thinking, **_warmup_deprecation(slot)}
+                    "enable_thinking": enable_thinking}
 
         error_msg = ""
 
@@ -1481,7 +1467,7 @@ def create_app(state: ServerState) -> FastAPI:
 
         if state.prefix_cache.exists(cache_key):
             return {"status": "cached", "key": cache_key, "slot": slot.name,
-                    "enable_thinking": enable_thinking, **_warmup_deprecation(slot)}
+                    "enable_thinking": enable_thinking}
         if t.is_alive():
             logger.warning(f"[{slot.name}] Warmup still running after "
                            f"{cfg.warmup_join_timeout_s}s  key={cache_key}")
@@ -1597,8 +1583,6 @@ def create_app(state: ServerState) -> FastAPI:
                                     detail=f"GenieDialog_applyLora failed: {ret}")
             # Read back from the SDK rather than trust the request blindly.
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
-            # The SDK prefix cache's partition does not include the adapter.
-            manager.flush_sdk_prefix_cache(slot)
             # lora_strengths is NOT cleared here: measured on the board, applying
             # another adapter keeps the alphas set earlier (alpha0/alpha1 belong
             # to the dialog, and the two adapters share the names). Only a
@@ -1654,6 +1638,8 @@ def create_app(state: ServerState) -> FastAPI:
             # produce the same namespace.
             key = f"{canonical_engine_role(engine_role)}/{tensor_name}"
             slot.lora_strengths[key] = float(alpha)
+            # The SDK prefix cache keys an entry by the applied adapter's name
+            # (sysCacheBuildKey), not by its strength.
             manager.flush_sdk_prefix_cache(slot)
             slot.epoch += 1
 
@@ -1677,7 +1663,6 @@ def create_app(state: ServerState) -> FastAPI:
                     detail=f"GenieDialog_releaseLoraMemory failed: {ret}")
             slot.active_lora_adapter = state.lib.get_applied_lora(slot.handle)
             slot.lora_strengths = {}
-            manager.flush_sdk_prefix_cache(slot)
             slot.epoch += 1
 
         await _admin_with_slot_lock(request, slot, _release, cfg.inference_timeout_s)

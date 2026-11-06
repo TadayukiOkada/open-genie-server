@@ -693,8 +693,8 @@ DSP側のskelライブラリ検索パスは、実際に使われている `devic
 | `SLOT_LOAD_ORDER` | 任意 | `"vlm-first"` | `TEXT_SLOTS`と`VLM_SLOTS`の両方を設定した場合に、どちらを先に生成するか: `"vlm-first"` または `"text-first"`。[スロット生成順](#スロット生成順slot_load_order)および[2つのモデルを同時にロードする](#2つのモデルを同時にロードする)を参照。それ以外の値は起動時にエラー。 |
 | `VLM_SLOTS` | 任意 | (未設定) | `TEXT_SLOTS`とは別系統・並列のマルチモーダル(`GenieNode`/`GeniePipeline`)スロット構成。`[{"name","device_id","model_root","spec","max_tokens","poll","pipeline_script","node_configs","static_tensors"}, ...]`。必須なのは`model_root`だけで、バンドルのレイアウトはバンドル自身から読み、`spec`(VLMファミリー)は省略すると自動判定される。最後の3つは`vlm_layout.py`が自力で読めないレイアウトのための逃げ道。`TEXT_SLOTS`の有無に関わらず独立して設定可能([VLM(マルチモーダル)対応](#vlmマルチモーダル対応)参照)。`max_tokens`はそのスロットの生成上限(既定`1024`、`0`で上限なし) — [生成トークン数の上限](#生成トークン数の上限)を参照。 |
 | `PREFIX_CACHE_DIR` | 任意 | `"./prefix_cache"` | prefix KVキャッシュ、およびHTP拡張設定コピー(`.htp_ext_cache/`)の保存先ディレクトリ。相対パスはサーバの作業ディレクトリ基準で解決されるため、起動ディレクトリが一定しない運用では絶対パスを設定しておくのが無難です。 |
-| `PREFIX_CACHE_BACKEND` | 任意 | `"auto"` | テキストスロットが使う prefix キャッシュ。`"auto"`: QAIRT 2.52 以降の libGenie で条件を満たすスロットは SDK 自身のメモリ上のキャッシュ、それ以外はこのサーバのディスク上のキャッシュ([SDK の prefix キャッシュ](#sdk-の-prefix-キャッシュqairt-252-以降)参照)。`"sdk"`: スライディングウィンドウや LoRA のバンドルでも SDK のキャッシュを使う。`"host"`: 2.52 より前と同じく、このサーバのキャッシュだけを使う。変更には再起動(またはモデル切替)が必要。 |
-| `SDK_PREFIX_CACHE_MAX_ENTRIES` / `SDK_PREFIX_CACHE_GLOBAL_MB` / `SDK_PREFIX_CACHE_PARTITION_MB` / `SDK_PREFIX_CACHE_MIN_TOKENS` | 任意 | `8` / `512` / `0` / `128` | SDK の prefix キャッシュの `max_entries`、`global_max_total_mb`(全エントリが使うホストメモリのプロセス全体の上限。SDK が必須とする)、`partition_max_total_mb`(モデルごと。`0` は上限なし)、`min_prefix_tokens`(これより短い system ターンはキャッシュしない)。QAIRT 2.52 以降のみ。 |
+| `PREFIX_CACHE_BACKEND` | 任意 | `"host"` | テキストスロットが使う prefix キャッシュ。`"host"` はこのサーバのディスク上のキャッシュ([Prefix KVキャッシュ](#prefix-kvキャッシュ)参照)、`"sdk"` は QAIRT 2.52 以降の libGenie の SDK 自身のメモリ上のキャッシュ。2.52.0 のものはそのままでは使えない([SDK の prefix キャッシュ](#sdk-の-prefix-キャッシュqairt-252-以降)参照)。変更には再起動(またはモデル切替)が必要。 |
+| `SDK_PREFIX_CACHE_MAX_ENTRIES` / `SDK_PREFIX_CACHE_GLOBAL_MB` / `SDK_PREFIX_CACHE_PARTITION_MB` / `SDK_PREFIX_CACHE_MIN_TOKENS` | 任意 | `8` / `512` / `0` / `128` | `PREFIX_CACHE_BACKEND: "sdk"` のとき、SDK の prefix キャッシュの `max_entries`、`global_max_total_mb`(全エントリが使うホストメモリのプロセス全体の上限。SDK が必須とする)、`partition_max_total_mb`(モデルごと。`0` は上限なし)、`min_prefix_tokens`(これより短い system ターンはキャッシュしない)。 |
 | `TOKENIZER_BACKEND` | 任意 | `"auto"` | トークン数・logprobs のトークン文字列・トークン ID のプロンプトに使うホスト側のトークナイザ。`"auto"` は Python の `tokenizers` が入っていればそれ、無ければ libGenie の単体トークナイザ(QAIRT 2.52 以降)。`"hf"` / `"genie"` でどちらかに固定。違いは 1 点で、`tokenizers` は encode でトークナイザの special token を足し、libGenie のものは足さない(BOS は SDK が自分で足す)。そのためトークン数とプロンプトスコアリングが強制するトークン列が BOS 1 個分ずれることがある。 |
 | `MODELS_BASE_DIR` | 任意 | (未設定) | **相対パス**で書かれたモデルパス全ての基準ディレクトリ。起動時の `TEXT_SLOTS`/`VLM_SLOTS` の `model_root` と、`POST /v1/models/switch` の `model_dir` の両方に適用される。**絶対パス**の場合はこの値を無視してそのまま使う。未設定時、相対パスはサーバの作業ディレクトリ基準で解決される。これを設定しておけば、設定ファイル中の各モデルをディレクトリ名だけで書ける。なお基準であって閉じ込め(sandbox)ではない — 絶対パスの `model_dir` は依然として配下の外からロードできる。 |
 | `CHAT_TEMPLATE` | 任意 | (未設定=自動判定) | チャットテンプレートを `"llama3"` / `"llama2"` / `"chatml"` / `"qwen3_5"` / `"gemma"` / `"gemma4"` のいずれかに固定。全スロット共通の上書き。未設定時はスロットごとにモデルディレクトリ名から自動判定([該当節](#チャットテンプレートの選択ルール)参照)。 |
@@ -1034,34 +1034,36 @@ NDKとmaturinで `aarch64-linux-android` 向けに `pydantic-core` をクロス�
 ### SDK の prefix キャッシュ(QAIRT 2.52 以降)
 
 QAIRT 2.52.0 で libGenie 自身に prefix キャッシュが入りました(dialog の設定の
-`system_prompt_cache`)。そうした libGenie では、テキストスロットは既定でこれを使います
-(`PREFIX_CACHE_BACKEND: "auto"`)。サーバは dialog の設定に `system_prompt_cache` を足し、
+`system_prompt_cache`)。**`PREFIX_CACHE_BACKEND: "sdk"` を設定しない限り使いません。**
+2.52.0 のものはそのままでは使えないためです。次の 2 点は、このサーバを使わず SDK 同梱の
+`genie-app` だけで、SA8255P 上の Qwen3-0.6B のバンドルで再現しました。
+
+- **dialog の context に `bos-token` があるバンドルでは一度もヒットしません。** SDK は
+  system ターンの終わりを、BOS を前置する前のトークン列で探し、見つけたものを前置した後の
+  トークン列と照合するので、必ず食い違います。手元のバンドルはすべて `bos-token` を持っています。
+- **ヒットする場合(`bos-token` -1)は、ヒットすると出力が変わります。** 同じプロンプトを
+  greedy で、リセットを挟んで 3 回送ると、キャッシュなしでは 3 回とも同じ正しい答えでしたが、
+  キャッシュありでは 2 回のヒットが 1 回目(ミス)と違う答えを返しました。取り込みを同期にしても
+  変わりませんでした。
+
+`"sdk"` にすると、サーバは dialog の設定に `system_prompt_cache` を足し、
 `prefix_boundary` にスロットのテンプレートで system ターンを閉じる文字列(chatml と qwen3_5 は
 `<|im_end|>\n`、llama3 は `<|eot_id|>`、gemma4 は `<turn|>\n`)を入れます。あとは SDK が毎回の
 query の中で処理します。プロンプトの最初の境界までの KV をホストメモリに保存し、後のプロンプトが
-同じ始まり方をすれば復元します。warmup は不要で、ある system プロンプトの最初のリクエストがエントリを作り、
-ディスクには何も書きません。スロット準備完了のログには `prefix-cache=sdk (...)` と出て、
-`GET /v1/prefix/cache` の `sdk` にこのキャッシュを使うスロットが並びます。
+同じ始まり方をすれば復元します。warmup は使わず、ディスクには何も書きません。スロット準備完了のログには
+`prefix-cache=sdk (...)` と出て、`GET /v1/prefix/cache` の `sdk` にこのキャッシュを使うスロットが並びます。
+サーバは、上の欠陥のうちそのスロットに当てはまるものを WARNING でログに出します。スライディングウィンドウの
+バンドルについては、2.52.0 のソースから読んだ 3 つ目(メモリ上の保存がすべての cache group を既定グループの
+長さで書き出す。実測はしていない)も出します。
 
-`"auto"` は次の場合、スロットをこのサーバのキャッシュのままにし、理由をログに出します。
-
-- テンプレートに独立した system ターンが無い(llama2、gemma)
-- バンドルが線形アテンションの状態を持つ(Qwen3.5。SDK のキャッシュもこれを保存しない)、または
-  dialog の type が SDK の対象外(`ssd-q1`、`lhd-dec`、`multistream`)。`"sdk"` でも変わらない
-- バンドルにスライディングウィンドウの cache group がある(Gemma 4)。2.52.0 のソースを読むと、
-  SDK のメモリ上の保存はすべての cache group を既定グループの長さで書き出す。これは 2.52 より前に
-  そうしたバンドルで `GenieDialog_save` を壊していたのと同じ形(下記)。実測はしていない。`"sdk"` で有効にできる
-- バンドルに LoRA アダプタがある。SDK はキャッシュをモデルと設定で区別し、その時点で当たっている
-  アダプタでは区別しない。`"sdk"` にすると、サーバは LoRA の apply・強さの変更・release のたびに
-  キャッシュを掃き出す(`GenieDialog_flushPrefixCache`)
-
-キャッシュは同じ形のモデルの dialog すべてで共有されるため、同じモデルを載せた 2 つのスロットは
-エントリを共有し、片方の掃き出しで両方が空になります。モデル切替は古いモデルのエントリを掃き出し、
-`DELETE /v1/prefix/cache?scope=all` は全スロットのものを掃き出します。SDK にはエントリの一覧を返す API がありません。
-
-この節の残りはこのサーバ自身のキャッシュの説明です。2.52 より前の libGenie では唯一のキャッシュで、
-2.52 以降では **deprecated** です(動作は続き、`POST /v1/prefix/warmup` は `deprecated` フィールドでそう伝えます)。
-このキャッシュにエントリがあれば、SDK のものより優先されます。
+独立した system ターンが無いテンプレート(llama2、gemma)、線形アテンションのバンドル(Qwen3.5。
+その状態も保存されない)、SDK が対象外とする dialog の type(`ssd-q1`、`lhd-dec`、`multistream`)では、
+WARNING を出して使いません。SDK はエントリを system のテキストと適用中の LoRA アダプタの名前で
+区別しますが、強さでは区別しないので、サーバは強さを変えたときにキャッシュを掃き出します
+(`GenieDialog_flushPrefixCache`)。キャッシュは同じ形のモデルの dialog すべてで共有されるため、
+片方のスロットでの掃き出しで、同じモデルを載せたもう片方も空になります。モデル切替は古いモデルの
+エントリを掃き出し、`DELETE /v1/prefix/cache?scope=all` は全スロットのものを掃き出します。
+SDK にはエントリの一覧を返す API がありません。このサーバ自身のキャッシュにエントリがあれば、そちらが優先されます。
 
 ### サーバ自身の prefix キャッシュ
 
@@ -1090,11 +1092,14 @@ HIT:  GenieDialog_reset → GenieDialog_restore → query(remaining, SENTENCE_EN
 > 続きが `[2, 105, 2364, …]` でした。埋め込みを context binary の中に持つバンドルではこうならず、
 > SDK が BOS を足すのは `SENTENCE_COMPLETE` / `BEGIN` / `REWIND` のときだけです。SDK の挙動なので
 > サーバはそのまま見えるようにしており、HIT のときの `usage.prompt_tokens` はこの2個目を数えません。
+> **QAIRT 2.52.0 で直りました**(Gemma 4 E2B で SDK の再現プログラムにより実測)。
 >
 > **スライディングウィンドウのバンドル(Gemma 4)では、stock の SDK(2.49.40〜2.51.0)は約 640 トークンを超える prefix を
 > 復元できません**。HIT の出力が崩れ、さらに長いとプロセスが落ちることがあります。ウォームアップする system prompt は
 > 約 600 トークン未満にするか、そのモデルはウォームアップしないでください。詳細と実測は
 > [プラットフォームノート](./PLATFORM_NOTES.ja.md#スライディングウィンドウのバンドルgemma-4での-prefix-cache)。
+> **これも QAIRT 2.52.0 で直りました**。Gemma 4 E2B で 1,540 トークンの prefix を復元しても、復元しない dialog と
+> 同じ logits になります。
 > これらの欠陥を直したパッチ版の SDK では、上の2個目の BOS もなくなります。
 
 ### コストと損益分岐

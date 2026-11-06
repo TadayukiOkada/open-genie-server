@@ -27,10 +27,9 @@ def warn_if_legacy_runtime(lib) -> bool:
     logger.warning(
         f"Deprecated QAIRT runtime: Genie API {lib.api_version() or 'unknown'} is older "
         f"than {CURRENT_API[0]}.{CURRENT_API[1]} (QAIRT 2.52.0). It still works, but "
-        "logprobs run through the custom sampler (sampling on the host), the "
-        "prefix cache is this server's own on-disk one only, and the host "
-        "tokenizer needs Python's tokenizers. Support for it may be removed in a "
-        "later release.")
+        "logprobs run through the custom sampler (sampling on the host) and the "
+        "host tokenizer needs Python's tokenizers. Support for it may be removed "
+        "in a later release.")
     return True
 
 

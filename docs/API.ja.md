@@ -340,7 +340,7 @@ env_config.json の `GENIE_PROFILE: true` が必要。無効時は `409` を返�
  "sdk": [{"slot": "chat", "prefix_boundary": "<|im_end|>\n", "max_entries": 8}]}
 ```
 
-`entries` はこのサーバ自身の(ディスク上の)キャッシュ。`sdk` は代わりに SDK のメモリ上の prefix キャッシュを使うスロットの一覧です(QAIRT 2.52 以降。[MANUAL](./MANUAL.ja.md#sdk-の-prefix-キャッシュqairt-252-以降)参照)。SDK にはエントリの一覧を返す API が無いため、スロットと設定だけを示します。古い libGenie では空です。
+`entries` はこのサーバ自身の(ディスク上の)キャッシュ。`sdk` は代わりに SDK のメモリ上の prefix キャッシュを使うスロットの一覧です(QAIRT 2.52 以降で `PREFIX_CACHE_BACKEND: "sdk"` のとき。[MANUAL](./MANUAL.ja.md#sdk-の-prefix-キャッシュqairt-252-以降)参照)。SDK にはエントリの一覧を返す API が無いため、スロットと設定だけを示します。古い libGenie では空です。
 
 ### DELETE /v1/prefix/cache?scope=unreachable|all
 
@@ -375,7 +375,6 @@ curl -X POST $base_url/v1/prefix/warmup \
 - テンプレートがllama2/mistral(分割不可)の場合は `422`。
 - 既にキャッシュ済みなら即座に `{"status": "already_cached", "slot": "...", ...}`。
 - ウォームアップに `WARMUP_JOIN_TIMEOUT`(既定600秒)以上かかる場合、`202` を返してバックグラウンド続行(`/v1/prefix/cache` でポーリング)。他スロットはブロックされません。
-- **QAIRT 2.52 以降の libGenie では deprecated**(SDK 自身のキャッシュは warmup が要らない)。動作は続き、`200` の応答はそれを伝える `deprecated` フィールドを持ちます(そのスロットが SDK のキャッシュを使っているかも書きます)。
 
 > [!NOTE]
 > **実機で確認済み**(LoRAアダプタを持つバンドル)。適用すると生成が変わり

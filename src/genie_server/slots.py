@@ -317,12 +317,6 @@ def has_sliding_window(dialog_cfg: dict) -> bool:
     return False
 
 
-def has_lora(dialog_cfg: dict) -> bool:
-    """engine.model.binary.lora: adapters a request can switch at runtime."""
-    return any(((e.get("model") or {}).get("binary") or {}).get("lora")
-               for e in _engines(dialog_cfg))
-
-
 # Dialog types the SDK refuses the prefix cache for (it disables it itself).
 SDK_PREFIX_CACHE_UNSUPPORTED_TYPES = ("multistream", "lhd-dec", "lade", "ssd-q1")
 
@@ -330,19 +324,29 @@ SDK_PREFIX_CACHE_UNSUPPORTED_TYPES = ("multistream", "lhd-dec", "lade", "ssd-q1"
 def sdk_prefix_cache_plan(lib, config, dialog_cfg: dict, template: str,
                           slot_name: str) -> dict | None:
     """The dialog config's "system_prompt_cache" for this slot, or None when the
-    slot uses this server's own (deprecated on 2.52+) prefix cache instead.
+    slot uses this server's own prefix cache (the default, PREFIX_CACHE_BACKEND
+    "host").
 
     QAIRT 2.52.0's cache works inside GenieDialog_query: it keys an in-memory
     entry on the prompt up to the first prefix_boundary and restores it on a
     later query that starts the same way. The server only has to say where
-    the system turn ends. Logged when "auto" leaves it off, so the reason is
-    visible."""
-    backend = config.prefix_cache_backend
-    if backend == "host" or not lib.has_sdk_prefix_cache:
+    the system turn ends. It is opt-in (PREFIX_CACHE_BACKEND "sdk") because
+    2.52.0's is not usable as it stands, measured with genie-app alone:
+
+    - on a bundle whose dialog context has a bos-token it never hits: the SDK
+      looks for the boundary in the tokens before it prepends BOS, then
+      compares them with the tokens after;
+    - where it does hit (bos-token -1), the greedy output of a hit differs
+      from the uncached one.
+
+    Each of those is logged at WARNING for a slot it applies to, rather than
+    switching the cache off behind the setting."""
+    if config.prefix_cache_backend != "sdk" or not lib.has_sdk_prefix_cache:
         return None
 
     def off(reason: str) -> None:
-        logger.info(f"[{slot_name}] SDK prefix cache off: {reason}")
+        logger.warning(f"[{slot_name}] PREFIX_CACHE_BACKEND=sdk, but the SDK prefix cache "
+                       f"stays off: {reason}")
         return None
 
     boundary = templates.SDK_PREFIX_BOUNDARIES.get(template)
@@ -352,14 +356,17 @@ def sdk_prefix_cache_plan(lib, config, dialog_cfg: dict, template: str,
         return off(f"dialog type '{dialog_cfg.get('type')}' is not supported by the SDK cache")
     if has_linear_attention(dialog_cfg):
         return off("linear-attention state is not captured with the KV cache")
-    if backend == "auto" and has_sliding_window(dialog_cfg):
-        return off("sliding-window cache group: the SDK's in-memory save writes every "
-                   "cache group with the default group's length (QAIRT 2.52.0 source). "
-                   "PREFIX_CACHE_BACKEND=sdk turns it on anyway")
-    if backend == "auto" and has_lora(dialog_cfg):
-        return off("LoRA adapters: the SDK's cache partition does not include the "
-                   "applied adapter. PREFIX_CACHE_BACKEND=sdk turns it on anyway "
-                   "(and flushes it on every LoRA change)")
+    bos = (dialog_cfg.get("context") or {}).get("bos-token")
+    if isinstance(bos, int) and bos >= 0:
+        logger.warning(f"[{slot_name}] SDK prefix cache: this bundle has bos-token {bos}; "
+                       "QAIRT 2.52.0 then never hits (it matches the cached prefix "
+                       "against the tokens before it prepends BOS)")
+    if has_sliding_window(dialog_cfg):
+        logger.warning(f"[{slot_name}] SDK prefix cache on a sliding-window bundle: read "
+                       "from the 2.52.0 sources, its in-memory save writes every cache "
+                       "group with the default group's length (not measured)")
+    logger.warning(f"[{slot_name}] SDK prefix cache on: on QAIRT 2.52.0 a hit was "
+                   "measured to change the greedy output")
     plan = {
         "enabled": True,
         "prefix_boundary": boundary,

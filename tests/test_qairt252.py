@@ -140,6 +140,10 @@ def _cfg(**kw) -> ServerConfig:
     return ServerConfig(sdk_root="/x", **kw)
 
 
+def _sdk(**kw) -> ServerConfig:
+    return _cfg(prefix_cache_backend="sdk", **kw)
+
+
 def _lib(api_minor: int = 22):
     return SimpleNamespace(has_sdk_prefix_cache=api_minor >= 22)
 
@@ -150,45 +154,55 @@ SWA_DCFG = {"engine": {"cache-groups": [
                                        "sliding-window": {"window-size": 512}}}]}}
 
 
+def test_sdk_prefix_cache_is_opt_in():
+    """2.52.0's cache does not work as it stands, so the default is the server's own."""
+    assert ServerConfig(sdk_root="/x").prefix_cache_backend == "host"
+    assert slots.sdk_prefix_cache_plan(_lib(), _cfg(), {}, "chatml", "s") is None
+
+
 @pytest.mark.parametrize("template,boundary", [
     ("chatml", "<|im_end|>\n"), ("qwen3_5", "<|im_end|>\n"),
     ("llama3", "<|eot_id|>"), ("gemma4", "<turn|>\n")])
 def test_sdk_prefix_cache_plan_boundaries(template, boundary):
-    plan = slots.sdk_prefix_cache_plan(_lib(), _cfg(), {}, template, "s")
+    plan = slots.sdk_prefix_cache_plan(_lib(), _sdk(), {}, template, "s")
     assert plan == {"enabled": True, "prefix_boundary": boundary, "max_entries": 8,
                     "min_prefix_tokens": 128, "global_max_total_mb": 512}
 
 
 @pytest.mark.parametrize("template", ["llama2", "gemma"])
 def test_sdk_prefix_cache_off_without_system_turn(template):
-    assert slots.sdk_prefix_cache_plan(_lib(), _cfg(), {}, template, "s") is None
+    assert slots.sdk_prefix_cache_plan(_lib(), _sdk(), {}, template, "s") is None
 
 
-def test_sdk_prefix_cache_off_on_legacy_or_host():
-    assert slots.sdk_prefix_cache_plan(_lib(21), _cfg(), {}, "chatml", "s") is None
-    assert slots.sdk_prefix_cache_plan(
-        _lib(), _cfg(prefix_cache_backend="host"), {}, "chatml", "s") is None
+def test_sdk_prefix_cache_off_on_legacy():
+    assert slots.sdk_prefix_cache_plan(_lib(21), _sdk(), {}, "chatml", "s") is None
 
 
-def test_sdk_prefix_cache_auto_skips_swa_and_lora_but_sdk_forces():
-    lora = {"engine": {"model": {"binary": {"lora": {"adapters": []}}}}}
-    for dcfg in (SWA_DCFG, lora):
-        assert slots.sdk_prefix_cache_plan(_lib(), _cfg(), dcfg, "chatml", "s") is None
-        forced = slots.sdk_prefix_cache_plan(
-            _lib(), _cfg(prefix_cache_backend="sdk"), dcfg, "chatml", "s")
-        assert forced and forced["enabled"]
+def test_sdk_prefix_cache_warns_about_measured_defects(caplog):
+    dcfg = {**SWA_DCFG, "context": {"bos-token": 2}}
+    with caplog.at_level(logging.WARNING, logger="genie_server.slots"):
+        plan = slots.sdk_prefix_cache_plan(_lib(), _sdk(), dcfg, "gemma4", "s")
+    assert plan and plan["enabled"]
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "bos-token 2" in text and "never hits" in text
+    assert "sliding-window" in text and "change the greedy output" in text
+
+
+def test_sdk_prefix_cache_no_bos_warning_without_bos(caplog):
+    with caplog.at_level(logging.WARNING, logger="genie_server.slots"):
+        slots.sdk_prefix_cache_plan(_lib(), _sdk(), {"context": {"bos-token": -1}},
+                                    "chatml", "s")
+    assert "never hits" not in " ".join(r.getMessage() for r in caplog.records)
 
 
 def test_sdk_prefix_cache_never_with_linear_attention_or_ssd():
     lin = {"engine": {"model": {"linear-attention": {"conv": 4}}}}
     for dcfg in (lin, {"type": "ssd-q1"}):
-        for backend in ("auto", "sdk"):
-            assert slots.sdk_prefix_cache_plan(
-                _lib(), _cfg(prefix_cache_backend=backend), dcfg, "chatml", "s") is None
+        assert slots.sdk_prefix_cache_plan(_lib(), _sdk(), dcfg, "chatml", "s") is None
 
 
 def test_sdk_prefix_cache_limits_from_config():
-    plan = slots.sdk_prefix_cache_plan(_lib(), _cfg(
+    plan = slots.sdk_prefix_cache_plan(_lib(), _sdk(
         sdk_prefix_cache_max_entries=3, sdk_prefix_cache_global_mb=64,
         sdk_prefix_cache_partition_mb=32, sdk_prefix_cache_min_tokens=0),
         {}, "chatml", "s")
@@ -206,8 +220,15 @@ def _bundle(tmp_path: Path, name: str, dialog: dict) -> Path:
     return model_dir
 
 
+def _on_sdk(state):
+    import dataclasses
+    state.config = dataclasses.replace(state.config, prefix_cache_backend="sdk")
+    state.manager.config = state.config
+    return state
+
+
 def test_load_model_injects_system_prompt_cache(state252, tmp_path):
-    manager = state252.manager
+    manager = _on_sdk(state252).manager
     model_dir = _bundle(tmp_path, "qwen3-1.7b", {})
     assets = manager.load_model(model_dir, None, "default")
     sent = state252.lib.dialog_configs[-1]["dialog"]["system_prompt_cache"]
@@ -215,15 +236,21 @@ def test_load_model_injects_system_prompt_cache(state252, tmp_path):
     assert assets.sdk_prefix_cache == sent
 
 
+def test_load_model_default_sends_no_system_prompt_cache(state252, tmp_path):
+    assets = state252.manager.load_model(_bundle(tmp_path, "qwen3-1.7b", {}), None, "default")
+    assert "system_prompt_cache" not in state252.lib.dialog_configs[-1]["dialog"]
+    assert assets.sdk_prefix_cache is None
+
+
 def test_load_model_leaves_legacy_config_alone(state, tmp_path):
     model_dir = _bundle(tmp_path, "qwen3-1.7b", {})
-    assets = state.manager.load_model(model_dir, None, "default")
+    assets = _on_sdk(state).manager.load_model(model_dir, None, "default")
     assert "system_prompt_cache" not in state.lib.dialog_configs[-1]["dialog"]
     assert assets.sdk_prefix_cache is None
 
 
 def test_switch_model_flushes_old_partition(state252, tmp_path):
-    manager = state252.manager
+    manager = _on_sdk(state252).manager
     slot = manager.slots[0]
     slot.sdk_prefix_cache = {"prefix_boundary": "<|im_end|>\n", "max_entries": 8}
     old = slot.handle.value
@@ -233,11 +260,16 @@ def test_switch_model_flushes_old_partition(state252, tmp_path):
     assert slot.sdk_prefix_cache  # the new dialog is on it too
 
 
-def test_lora_change_flushes_sdk_prefix_cache(state252):
+def test_lora_strength_flushes_sdk_prefix_cache_but_apply_does_not(state252):
+    """The SDK keys an entry by the applied adapter's name, not by its strength."""
     slot = state252.manager.slots[0]
     slot.sdk_prefix_cache = {"prefix_boundary": "<|im_end|>\n", "max_entries": 8}
     client = TestClient(create_app(state252))
-    response = client.post("/v1/lora/apply", json={"lora_adapter_name": "a1"})
+    assert client.post("/v1/lora/apply", json={"lora_adapter_name": "a1"}).status_code == 200
+    assert state252.lib.flushed_prefix_caches == []
+    slot.dialog_cfg = {"engine": {"model": {"binary": {"lora": {"alphas": ["alpha"],
+                       "adapters": [{"name": "a1", "alphas": ["alpha"]}]}}}}}
+    response = client.post("/v1/lora/strength", json={"tensor_name": "alpha", "alpha": 0.5})
     assert response.status_code == 200, response.text
     assert state252.lib.flushed_prefix_caches == [slot.handle.value]
 
@@ -254,15 +286,8 @@ def test_prefix_cache_endpoints_report_and_flush_sdk(state252):
     assert state252.lib.flushed_prefix_caches == [slot.handle.value]
 
 
-def test_warmup_is_deprecated_on_252(state252):
+def test_warmup_is_not_deprecated(state252):
     client = TestClient(create_app(state252))
-    response = client.post("/v1/prefix/warmup", json={"system_prompt": "You are terse."})
-    assert response.status_code == 200, response.text
-    assert "deprecated" in response.json()
-
-
-def test_warmup_not_deprecated_on_legacy(state):
-    client = TestClient(create_app(state))
     response = client.post("/v1/prefix/warmup", json={"system_prompt": "You are terse."})
     assert response.status_code == 200, response.text
     assert "deprecated" not in response.json()
@@ -370,7 +395,7 @@ def test_config_new_keys(tmp_path):
     base = {"TEXT_SLOTS": [{"model_root": str(tmp_path)}]}
     path.write_text(json.dumps(base))
     cfg = load_config(str(path))
-    assert cfg.prefix_cache_backend == "auto" and cfg.tokenizer_backend == "auto"
+    assert cfg.prefix_cache_backend == "host" and cfg.tokenizer_backend == "auto"
     assert cfg.sdk_prefix_cache_global_mb == 512
     path.write_text(json.dumps({**base, "PREFIX_CACHE_BACKEND": "SDK",
                                 "TOKENIZER_BACKEND": "genie",
@@ -378,7 +403,7 @@ def test_config_new_keys(tmp_path):
     cfg = load_config(str(path))
     assert (cfg.prefix_cache_backend, cfg.tokenizer_backend,
             cfg.sdk_prefix_cache_global_mb) == ("sdk", "genie", 64)
-    for bad in ({"PREFIX_CACHE_BACKEND": "disk"}, {"SDK_PREFIX_CACHE_GLOBAL_MB": 0},
+    for bad in ({"PREFIX_CACHE_BACKEND": "disk"}, {"PREFIX_CACHE_BACKEND": "auto"}, {"SDK_PREFIX_CACHE_GLOBAL_MB": 0},
                 {"SDK_PREFIX_CACHE_MAX_ENTRIES": True}):
         path.write_text(json.dumps({**base, **bad}))
         with pytest.raises(ValueError):

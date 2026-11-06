@@ -191,17 +191,11 @@ class ServerConfig:
     # POST /v1/server/prompt_logprobs. Default off: one scoring request
     # occupies its slot for len(prompt)/decode-rate seconds.
     prompt_logprobs: bool = False
-    # Which prefix cache a text slot uses (QAIRT 2.52.0 added one to the SDK):
-    #   "auto" (default) -- the SDK's in-memory system_prompt_cache where the
-    #       libGenie has it and the slot qualifies (see slots.sdk_prefix_cache_plan);
-    #       otherwise this server's own on-disk cache, which is deprecated.
-    #   "sdk"  -- the SDK's cache wherever the libGenie has it, also on a
-    #       sliding-window bundle (a source reading says its save path still
-    #       writes every cache group with the default group's length there).
-    #   "host" -- this server's own cache only, as before 2.52.
-    # The server's own cache (POST /v1/prefix/warmup) keeps working in every
-    # mode; on a 2.52+ libGenie it is deprecated.
-    prefix_cache_backend: str = "auto"
+    # Which prefix cache a text slot uses: "host" (default) is this server's own
+    # on-disk cache (POST /v1/prefix/warmup); "sdk" is QAIRT 2.52.0's in-memory
+    # system_prompt_cache, opt-in because 2.52.0's does not work as it stands
+    # (see slots.sdk_prefix_cache_plan). "sdk" on an older libGenie is "host".
+    prefix_cache_backend: str = "host"
     # The SDK cache's limits (system_prompt_cache keys). global_max_total_mb is
     # mandatory for the SDK and process-wide; the others are per dialog.
     sdk_prefix_cache_max_entries: int = 8
@@ -638,7 +632,7 @@ def _parse_genie_log_level(raw: dict) -> str:
     return level
 
 
-PREFIX_CACHE_BACKENDS = ("auto", "sdk", "host")
+PREFIX_CACHE_BACKENDS = ("host", "sdk")
 TOKENIZER_BACKENDS = ("auto", "hf", "genie")
 
 
@@ -755,7 +749,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> ServerConfig:
         prompt_logprobs=_parse_bool(raw, "PROMPT_LOGPROBS"),
         genie_profile=_parse_bool(raw, "GENIE_PROFILE"),
         prefix_cache_backend=(_parse_choice(
-            raw, "PREFIX_CACHE_BACKEND", PREFIX_CACHE_BACKENDS, "auto") or "auto"),
+            raw, "PREFIX_CACHE_BACKEND", PREFIX_CACHE_BACKENDS, "host") or "host"),
         sdk_prefix_cache_max_entries=_parse_positive_int(
             raw, "SDK_PREFIX_CACHE_MAX_ENTRIES", 8),
         sdk_prefix_cache_global_mb=_parse_positive_int(

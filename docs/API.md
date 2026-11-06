@@ -342,7 +342,7 @@ Lists saved prefix KV cache entries (a directory shared by every slot, logically
  "sdk": [{"slot": "chat", "prefix_boundary": "<|im_end|>\n", "max_entries": 8}]}
 ```
 
-`entries` are this server's own (on-disk) cache. `sdk` lists the slots that use the SDK's in-memory prefix cache instead (QAIRT 2.52+, see [MANUAL](./MANUAL.md#the-sdks-prefix-cache-qairt-252)); the SDK has no call that lists its entries, so only the slot and its settings are shown. Empty on an older libGenie.
+`entries` are this server's own (on-disk) cache. `sdk` lists the slots that use the SDK's in-memory prefix cache instead (`PREFIX_CACHE_BACKEND: "sdk"` on QAIRT 2.52+, see [MANUAL](./MANUAL.md#the-sdks-prefix-cache-qairt-252)); the SDK has no call that lists its entries, so only the slot and its settings are shown. Empty on an older libGenie.
 
 ### DELETE /v1/prefix/cache?scope=unreachable|all
 
@@ -377,7 +377,6 @@ curl -X POST $base_url/v1/prefix/warmup \
 - Returns `422` if the template is llama2/mistral (not splittable).
 - Returns `{"status": "already_cached", "slot": "...", ...}` immediately if already cached.
 - If warmup takes longer than `WARMUP_JOIN_TIMEOUT` (600s by default), returns `202` and continues in the background (poll `/v1/prefix/cache`). Other slots are never blocked.
-- **Deprecated on a QAIRT 2.52+ libGenie**, where the SDK's own cache needs no warmup. It still works, and the `200` responses carry a `deprecated` field saying so (whether that slot is on the SDK cache).
 
 > [!NOTE]
 > **Verified on hardware** against a bundle carrying LoRA adapters: applying
