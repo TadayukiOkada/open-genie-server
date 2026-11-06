@@ -392,3 +392,71 @@ def test_sdk_prefix_boundaries_match_the_split():
         prefix, rest, ok = templates.split_prompt_for_prefix_cache(messages, template, bos=False)
         assert ok and prefix.endswith(boundary), template
         assert boundary not in prefix[:-len(boundary)], template
+
+
+# ---------------------------------------------------------------- sampler updates
+
+class _RecordingCdll:
+    """Just enough of libGenie for GenieLib.apply_sampler_params_to_handle."""
+
+    def __init__(self, minor: int):
+        self.minor = minor
+        self.set_param_calls = []
+
+    def Genie_getApiMajorVersion(self):
+        return 1
+
+    def Genie_getApiMinorVersion(self):
+        return self.minor
+
+    def Genie_getApiPatchVersion(self):
+        return 0
+
+    def GenieSamplerConfig_createFromJson(self, payload, out):
+        return 0
+
+    def GenieSamplerConfig_setParam(self, cfg, key, value):
+        self.set_param_calls.append((key, value))
+        return 0
+
+    def GenieSampler_applyConfig(self, sampler, cfg):
+        return 0
+
+    def GenieSamplerConfig_free(self, cfg):
+        return None
+
+
+def _lib_over(cdll):
+    lib = capi.GenieLib.__new__(capi.GenieLib)
+    lib._lib = cdll
+    lib._has_api_version = True
+    return lib
+
+
+def test_sampler_update_is_one_json_on_252():
+    """QAIRT 2.52 validates after every single-key setParam, so a switch to the
+    custom sampler key by key is refused both ways round (measured on x86)."""
+    cdll = _RecordingCdll(22)
+    _lib_over(cdll).apply_sampler_params_to_handle(
+        None, {"type": "custom", "callback-name": "cb"})
+    assert len(cdll.set_param_calls) == 1
+    key, value = cdll.set_param_calls[0]
+    assert key == b""
+    assert json.loads(value) == {"sampler": {"version": 1, "type": "custom",
+                                             "callback-name": "cb"}}
+
+
+def test_sampler_update_is_key_by_key_on_legacy():
+    """2.51's JSON form needs every numeric field present (measured: rc -13)."""
+    cdll = _RecordingCdll(21)
+    _lib_over(cdll).apply_sampler_params_to_handle(None, {"type": "basic", "temp": "0.5"})
+    assert cdll.set_param_calls == [(b"type", b"basic"), (b"temp", b"0.5")]
+
+
+def test_sampler_json_values_types():
+    values = capi.sampler_json_values({
+        **capi.make_sampler_params({}, 0.7, 0.9, 40, 7), **engine.native_logprobs_params(3)})
+    assert values == {"type": "basic", "temp": 0.7, "top-k": 40, "top-p": 0.9, "seed": 7,
+                      "logprobs": True, "top-logprobs": 3}
+    assert capi.sampler_json_values(engine.native_logprobs_params(None)) == {
+        "logprobs": False, "top-logprobs": 0}

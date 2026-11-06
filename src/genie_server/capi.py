@@ -186,6 +186,29 @@ def make_sampler_params(defaults: dict, temperature=None, top_p=None, top_k=None
             "seed": str(secrets.randbits(31) if seed is None else int(seed))}
 
 
+# The JSON type of each SDK sampler key (QAIRT 2.52's sampler schema), for
+# GenieLib.apply_sampler_params_to_handle's one-shot JSON update. Values arrive as
+# the strings the single-key setParam takes.
+_SAMPLER_KEY_TYPES = {"temp": float, "top-p": float, "top-k": int, "seed": int,
+                      "top-logprobs": int, "logprobs": bool,
+                      "type": str, "callback-name": str}
+
+
+def sampler_json_values(params: dict[str, str]) -> dict:
+    """{sdk_key: value_string} (make_sampler_params' form) as typed JSON values.
+    An unknown key is passed through as a string, for the SDK to judge."""
+    out = {}
+    for key, value in params.items():
+        kind = _SAMPLER_KEY_TYPES.get(key, str)
+        if kind is bool:
+            out[key] = str(value).lower() == "true"
+        elif kind is int:
+            out[key] = int(float(value))
+        else:
+            out[key] = kind(value)
+    return out
+
+
 def resolve_sampler_values(defaults: dict, temperature=None, top_p=None,
                            top_k=None) -> tuple[float, int, float]:
     """(temp, top-k, top-p) a request actually samples with: its own value,
@@ -643,10 +666,22 @@ class GenieLib:
             logger.warning("GenieSamplerConfig_createFromJson failed")
             return
         try:
-            for k, v in params.items():
-                ret = self._lib.GenieSamplerConfig_setParam(cfg_h, k.encode(), v.encode())
+            if self.legacy_runtime:
+                for k, v in params.items():
+                    ret = self._lib.GenieSamplerConfig_setParam(cfg_h, k.encode(), v.encode())
+                    if ret != STATUS_SUCCESS:
+                        logger.warning(f"GenieSamplerConfig_setParam({k}={v}) failed: {ret}")
+            else:
+                # QAIRT 2.52 validates the whole sampler config after every
+                # single-key setParam and rolls the key back if it fails. So
+                # "type": "custom" without "callback-name" is refused, and so is
+                # "callback-name" while the type is still "basic": key by key,
+                # a switch to the custom sampler can never happen. The JSON form
+                # (an empty key) is validated once, as a whole.
+                payload = json.dumps({"sampler": {"version": 1, **sampler_json_values(params)}})
+                ret = self._lib.GenieSamplerConfig_setParam(cfg_h, b"", payload.encode())
                 if ret != STATUS_SUCCESS:
-                    logger.warning(f"GenieSamplerConfig_setParam({k}={v}) failed: {ret}")
+                    logger.warning(f"GenieSamplerConfig_setParam({payload}) failed: {ret}")
             ret = self._lib.GenieSampler_applyConfig(sampler_h, cfg_h)
             if ret != STATUS_SUCCESS:
                 logger.warning(f"GenieSampler_applyConfig failed: {ret}")
