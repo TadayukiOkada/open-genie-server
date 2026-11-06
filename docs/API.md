@@ -338,8 +338,11 @@ Lists saved prefix KV cache entries (a directory shared by every slot, logically
 
 ```json
 {"entries": [{"key": "...", "path": "...", "kind": "file", "size_bytes": 12345, "mtime": 1700000000,
-              "namespace": "chat|qwen3-4b|", "reachable": true}]}
+              "namespace": "chat|qwen3-4b|", "reachable": true}],
+ "sdk": [{"slot": "chat", "prefix_boundary": "<|im_end|>\n", "max_entries": 8}]}
 ```
+
+`entries` are this server's own (on-disk) cache. `sdk` lists the slots that use the SDK's in-memory prefix cache instead (`PREFIX_CACHE_BACKEND: "sdk"` on QAIRT 2.52+, see [MANUAL](./MANUAL.md#the-sdks-prefix-cache-qairt-252)); the SDK has no call that lists its entries, so only the slot and its settings are shown. Empty on an older libGenie.
 
 ### DELETE /v1/prefix/cache?scope=unreachable|all
 
@@ -348,10 +351,13 @@ A model switch or a LoRA change leaves the old entries on disk where no slot can
 An entry saved before namespaces were recorded gets its namespace the next time a slot reaches it, by a warmup (`already_cached`) or a cache HIT, so after an upgrade `unreachable` can sort out the old entries too. An entry that a warmup is still saving, or a request is restoring, is kept and listed in `kept_in_use`. Deleting it mid-write would leave a half-written entry. A namespace record whose entry is gone (removed by hand) is swept as well.
 
 ```json
-{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": [], "kept_in_use": []}
+{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": [], "kept_in_use": [],
+ "sdk_flushed": ["chat"]}
 ```
 
-**Nothing is ever deleted on its own.** There is no size limit and no LRU. The cache fills only on an explicit warmup, and it empties only on an explicit call, so a TTFT measurement never changes behind the caller's back.
+`scope=all` also flushes the SDK prefix cache of every slot that uses it (`GenieDialog_flushPrefixCache`, QAIRT 2.52+) and lists those slots in `sdk_flushed`; a slot busy for longer than `INFERENCE_TIMEOUT` is skipped and logged. `scope=unreachable` leaves the SDK cache alone.
+
+**Nothing in this server's cache is ever deleted on its own.** There is no size limit and no LRU. The cache fills only on an explicit warmup, and it empties only on an explicit call, so a TTFT measurement never changes behind the caller's back.
 
 ### DELETE /v1/prefix/cache/{key}
 

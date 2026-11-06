@@ -313,6 +313,9 @@ def test_sampler_params_go_through_a_config_that_is_always_freed(stub, lib):
     stub.install("GenieSamplerConfig_setParam", lambda cfg, k, v: 0)
     stub.install("GenieSampler_applyConfig", lambda s, cfg: -1)
     stub.install("GenieSamplerConfig_free", lambda cfg: 0)
+    # Key by key is the pre-2.52 path (see test_qairt252 for the 2.52 one).
+    for name, value in zip(capi.API_VERSION_FUNCTIONS, (1, 21, 0)):
+        stub.install(name, lambda value=value: value)
     lib.apply_sampler_params(capi.DialogHandle(1), {"temp": "0.7", "top-k": "5"})
     assert [a[1:] for a in stub.called("GenieSamplerConfig_setParam")] == [
         (b"temp", b"0.7"), (b"top-k", b"5")]

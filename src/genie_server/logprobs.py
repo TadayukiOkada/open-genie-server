@@ -37,23 +37,53 @@ except ImportError:
 
 
 class LogprobsCollector:
-    """Per-request logprobs state; on_logits() runs inside the SDK's custom
-    sampler callback (inference thread). One collector per generation, wired
-    up by the engine under the slot lock."""
+    """Per-request logprobs state. One collector per generation, wired up by
+    the engine under the slot lock.
+
+    Two ways to fill it, both on the SDK's inference thread:
+
+    - native (QAIRT 2.52+, sample mode only): the SDK's own sampler picks the
+      token and GenieSampler_registerLogprobsCallback reports it through
+      on_native(). Nothing is sampled here, so the request keeps the SDK's
+      sampling exactly as a request without logprobs would (penalties, grammar
+      and all), and numpy is not needed.
+    - custom sampler (on_logits): the SDK hands over the logits and this class
+      chooses the token. Prompt scoring (forced_tokens) always works this
+      way. For sample mode it is the pre-2.52 fallback, deprecated."""
 
     def __init__(self, top_n: int = 0, temperature=None, top_p=None, top_k=None,
                  seed=None, forced_tokens: list[int] | None = None,
-                 status_entry: dict | None = None):
+                 status_entry: dict | None = None, native: bool = False):
+        if native and forced_tokens is not None:
+            raise ValueError("native logprobs cannot force tokens; prompt scoring "
+                             "needs the custom sampler")
         self.top_n = int(top_n)
         self.forced_tokens = forced_tokens  # None => sample mode
+        self.native = native
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
-        self._rng = np.random.default_rng(seed)
+        self._rng = None if native else np.random.default_rng(seed)
         self.step = 0
         # Per step: (token_id, logprob, [(alt_id, alt_logprob), ...])
         self.results: list[tuple[int, float, list[tuple[int, float]]]] = []
         self._status_entry = status_entry
+
+    # -------------------------------------------------------- native hook
+
+    def on_native(self, token_id: int, logprob: float,
+                  top: list[tuple[int, float]]) -> None:
+        """GenieSampler_LogprobsCallback_t, through GenieLib.register_logprobs_callback.
+        The SDK's values are the raw distribution's (log-softmax at
+        temperature 1, before penalties), the same quantity on_logits records.
+        The alternatives come out of a heap, so they are ordered here, and cut
+        to the request's top_n in case the sampler still has a larger setting."""
+        alts = sorted(top, key=lambda t: t[1], reverse=True)[:self.top_n] \
+            if self.top_n > 0 else []
+        self.results.append((int(token_id), float(logprob), alts))
+        self.step += 1
+        if self._status_entry is not None and self.step % 16 == 0:
+            self._status_entry["detail"] = f"{self.step} tokens scored"
 
     # -------------------------------------------------------- sampler hook
 
@@ -130,6 +160,16 @@ def _token_str(tokenizer, token_id: int) -> str:
         return tokenizer.decode([token_id])
 
 
+def _token_bytes(tokenizer, token_id: int) -> list[int]:
+    """OpenAI's `bytes`: exact when the tokenizer can say what a token stands
+    for (capi.GenieTokenizer.token_bytes, which keeps a partial UTF-8
+    sequence), else the UTF-8 of its decoded text."""
+    exact = getattr(tokenizer, "token_bytes", None)
+    if exact is not None:
+        return list(exact(token_id))
+    return list(_token_str(tokenizer, token_id).encode("utf-8"))
+
+
 def completions_logprobs(tokenizer, results, first_token_id: int | None = None) -> dict:
     """OpenAI text_completion `logprobs` object. In echo/force mode,
     `first_token_id` prepends one entry with a null logprob (the first
@@ -168,11 +208,11 @@ def chat_logprobs(tokenizer, results) -> dict:
         content.append({
             "token": text,
             "logprob": round(lp, 8),
-            "bytes": list(text.encode("utf-8")),
+            "bytes": _token_bytes(tokenizer, token_id),
             "top_logprobs": [
                 {"token": _token_str(tokenizer, i),
                  "logprob": round(v, 8),
-                 "bytes": list(_token_str(tokenizer, i).encode("utf-8"))}
+                 "bytes": _token_bytes(tokenizer, i)}
                 for i, v in top
             ],
         })

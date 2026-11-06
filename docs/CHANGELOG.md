@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Added
+
+- **QAIRT 2.52.0 (Genie API 1.22) support.** Each new call is looked up, not
+  assumed, so 2.48 through 2.51 still load. Checked on an SA8255P with 2.52.0,
+  stock and rebuilt: each gives the integration suite's verdicts that the
+  matching 2.51.0 library gives.
+  On a 2.52+ libGenie:
+  - **Native logprobs.** Generated-token `logprobs` / `top_logprobs` come from
+    `GenieSampler_registerLogprobsCallback`: the SDK samples exactly as it would
+    without logprobs (its own sampler, penalties included), and `numpy` is no
+    longer needed for them. Prompt scoring (`echo` + `logprobs`) still uses the
+    custom sampler, since it forces tokens.
+  - **The profile is cleared before each query** (`GenieProfile_clear`), so
+    `/v1/server/profile` reports that query alone and the profile no longer
+    grows for the life of a slot.
+  - **`TOKENIZER_BACKEND`** (`auto` | `hf` | `genie`): without Python's
+    `tokenizers`, `auto` now uses libGenie's standalone tokenizer
+    (`GenieTokenizer_create`) for token counts, logprob strings and token-id
+    prompts. Its logprob `bytes` are the token's exact bytes, also for a token
+    that is part of a character.
+  - **`PREFIX_CACHE_BACKEND: "sdk"`** puts a slot on the SDK's own in-memory
+    prefix cache (`system_prompt_cache`), with `prefix_boundary` taken from the
+    chat template and limits from the new `SDK_PREFIX_CACHE_*` keys. **Off by
+    default** (`"host"`, this server's own cache, as before): on 2.52.0 it never
+    hits on a bundle with a `bos-token`, and where it hits, a hit changes the
+    greedy output; both reproduced with `genie-app` alone. A model switch, a LoRA
+    strength change and `DELETE /v1/prefix/cache?scope=all` flush it;
+    `GET /v1/prefix/cache` lists the slots on it under `sdk`.
+
+### Changed
+
+- **Sampler settings go to a 2.52+ libGenie as one JSON update.** 2.52 validates
+  the whole sampler config after each single-key `GenieSamplerConfig_setParam`,
+  so a key-by-key switch to the custom sampler is refused both ways round, and
+  prompt scoring would have run on the SDK's own sampler. Older libraries, whose
+  JSON form rejects even a plain update, keep the key-by-key path.
+
+### Deprecated
+
+- **A libGenie older than QAIRT 2.52.0.** It still works, through the paths
+  the server needed before 2.52, and the server logs one warning at startup.
+  Generated-token logprobs through the custom sampler, used only on such a
+  library, log once that they are deprecated.
+
 ### Documentation
 
 - **Why a VLM slot creates its text-generator node first, on QAIRT 2.51.0

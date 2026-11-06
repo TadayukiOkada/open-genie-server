@@ -336,8 +336,11 @@ env_config.json の `GENIE_PROFILE: true` が必要。無効時は `409` を返�
 
 ```json
 {"entries": [{"key": "...", "path": "...", "kind": "file", "size_bytes": 12345, "mtime": 1700000000,
-              "namespace": "chat|qwen3-4b|", "reachable": true}]}
+              "namespace": "chat|qwen3-4b|", "reachable": true}],
+ "sdk": [{"slot": "chat", "prefix_boundary": "<|im_end|>\n", "max_entries": 8}]}
 ```
+
+`entries` はこのサーバ自身の(ディスク上の)キャッシュ。`sdk` は代わりに SDK のメモリ上の prefix キャッシュを使うスロットの一覧です(QAIRT 2.52 以降で `PREFIX_CACHE_BACKEND: "sdk"` のとき。[MANUAL](./MANUAL.ja.md#sdk-の-prefix-キャッシュqairt-252-以降)参照)。SDK にはエントリの一覧を返す API が無いため、スロットと設定だけを示します。古い libGenie では空です。
 
 ### DELETE /v1/prefix/cache?scope=unreachable|all
 
@@ -346,10 +349,13 @@ env_config.json の `GENIE_PROFILE: true` が必要。無効時は `409` を返�
 namespace を記録する前に保存したエントリは、次にスロットがそれに届いたとき(warmup の `already_cached` か、キャッシュの HIT)に namespace が記録されます。そのため、アップグレード後も古いエントリを `unreachable` で整理できます。warmup が保存中、またはリクエストが復元中のエントリは残し、`kept_in_use` に並べます。書き込み途中で消すと、書きかけのエントリが残るためです。エントリが(手で消されるなどして)無くなった namespace の記録も、あわせて削除します。
 
 ```json
-{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": [], "kept_in_use": []}
+{"deleted": ["..."], "freed_bytes": 123456789, "kept_unknown": [], "kept_in_use": [],
+ "sdk_flushed": ["chat"]}
 ```
 
-**勝手に消えることはありません。** サイズの上限も LRU もありません。キャッシュが埋まるのは明示の warmup だけ、空になるのは明示の呼び出しだけなので、TTFT の計測値が呼び出し側の知らないところで変わることはありません。
+`scope=all` は、SDK の prefix キャッシュを使う全スロットのキャッシュも掃き出し(`GenieDialog_flushPrefixCache`、QAIRT 2.52 以降)、そのスロットを `sdk_flushed` に並べます。`INFERENCE_TIMEOUT` より長く使用中のスロットは飛ばしてログに出します。`scope=unreachable` は SDK のキャッシュに触れません。
+
+**このサーバのキャッシュが勝手に消えることはありません。** サイズの上限も LRU もありません。キャッシュが埋まるのは明示の warmup だけ、空になるのは明示の呼び出しだけなので、TTFT の計測値が呼び出し側の知らないところで変わることはありません。
 
 ### DELETE /v1/prefix/cache/{key}
 

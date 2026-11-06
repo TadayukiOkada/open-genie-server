@@ -66,6 +66,20 @@ def ensure_logprobs_sampler(lib: GenieLib, slot: Slot) -> None:
     slot.logprobs_registered = True
 
 
+def native_logprobs_params(top_n: int | None) -> dict[str, str]:
+    """The sampler keys that switch the SDK's logprobs callback on, with top_n
+    (>= 0) alternatives per token, or off (None). QAIRT 2.52+. Sampler state
+    persists across requests on a dialog, so a request that turned them on
+    turns them off again."""
+    if top_n is None:
+        return {"logprobs": "false", "top-logprobs": "0"}
+    return {"logprobs": "true", "top-logprobs": str(max(int(top_n), 0))}
+
+
+# Set once the deprecated custom-sampler logprobs path has been used (warn once).
+legacy_logprobs_warned = threading.Event()
+
+
 class SlotChangedError(RuntimeError):
     """The slot's model, LoRA adapter or handle changed while the request
     waited for the slot lock; what it was planned against is gone (HTTP 409)."""
@@ -258,7 +272,15 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
     """The actual SDK sequence, with slot.lock held."""
     watchdog = threading.Timer(inference_timeout_s, generation.abort_on_timeout)
     watchdog.start()
+    native_sampler = None
     try:
+        if getattr(slot, "profile", None) is not None and lib.has_profile_clear:
+            # QAIRT 2.52+: the profile then holds this query alone, which is
+            # what /v1/server/profile reports, instead of growing for the
+            # life of the slot.
+            ret = lib.clear_profile(slot.profile)
+            if ret != capi.STATUS_SUCCESS:
+                logger.warning(f"GenieProfile_clear failed [{generation.request_id}]: {ret}")
         lib.reset(slot.handle)
         lib.set_max_tokens(slot.handle, params.max_tokens)
         lib.set_stop_sequences(slot.handle, params.stop or None)
@@ -271,10 +293,37 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
                 generation.grammar_error = params.grammar.param
             generation.error = grammar_failure
             return
-        if collector is not None:
-            # Logprobs request: sampling moves into the collector (custom
-            # sampler). temperature/top_p/top_k/seed are honored by the
-            # collector itself, not the SDK sampler.
+        if collector is not None and collector.native:
+            # Logprobs request on QAIRT 2.52+: the SDK samples exactly as it
+            # would without logprobs, and its logprobs callback records each
+            # accepted token. _restore_sampler turns both off again.
+            sampler_h = lib.get_sampler(slot.handle)
+            if sampler_h is None:
+                generation.error = "GenieDialog_getSampler failed; logprobs unavailable"
+                generation.logprobs_unsupported = True
+                return
+            native_sampler = sampler_h
+            lib.apply_sampler_params(slot.handle, {
+                **make_sampler_params(slot.sampler_defaults, params.temperature,
+                                      params.top_p, params.top_k, params.seed),
+                **native_logprobs_params(collector.top_n)})
+            ret = lib.register_logprobs_callback(sampler_h, collector.on_native)
+            if ret != capi.STATUS_SUCCESS:
+                generation.error = f"GenieSampler_registerLogprobsCallback failed: {ret}"
+                generation.logprobs_unsupported = True
+                return
+        elif collector is not None:
+            # Logprobs request on a pre-2.52 libGenie, or prompt scoring:
+            # sampling moves into the collector (custom sampler).
+            # temperature/top_p/top_k/seed are honored by the collector
+            # itself, not the SDK sampler.
+            if not collector.forced_tokens and not legacy_logprobs_warned.is_set():
+                legacy_logprobs_warned.set()
+                logger.warning(
+                    "logprobs through the custom sampler are deprecated: this "
+                    "libGenie predates the native logprobs callback (QAIRT "
+                    "2.52.0). Sampling runs on the host, without the SDK's "
+                    "penalties.")
             ensure_logprobs_sampler(lib, slot)
             slot.active_collector = collector
             lib.apply_sampler_params(slot.handle, {
@@ -286,8 +335,12 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
                 slot.sampler_defaults, params.temperature, params.top_p,
                 params.top_k, params.seed))
 
-        # Prefix cache routing
+        # Prefix cache routing. A slot on the SDK prefix cache (QAIRT 2.52+)
+        # needs nothing here: the SDK finds the system turn in the full
+        # prompt itself. An entry the server's own cache holds still wins.
         actual, sentence_code = plan.full_prompt, capi.SENTENCE_COMPLETE
+        if getattr(slot, "sdk_prefix_cache", None):
+            generation.cache_state = "SDK"
         if plan.cacheable and plan.cache_key and prefix_cache is not None:
             if prefix_cache.exists(plan.cache_key) and \
                     prefix_cache.restore(lib, slot.handle, plan.cache_key):
@@ -353,7 +406,16 @@ def _locked_query(lib: GenieLib, slot: Slot, plan: QueryPlan, params: GenParams,
                     and generation.completion_tokens >= params.max_tokens):
                 generation.finish_reason = "length"
     finally:
-        if collector is not None:
+        if native_sampler is not None:
+            # Before anyone else can touch this dialog (still under
+            # slot.lock): the callback points into this request's collector.
+            ret = lib.register_logprobs_callback(native_sampler, None)
+            if ret != capi.STATUS_SUCCESS:
+                logger.warning(f"unregistering the logprobs callback failed: {ret}")
+            lib.apply_sampler_params(slot.handle, {
+                **make_sampler_params(slot.sampler_defaults),
+                **native_logprobs_params(None)})
+        elif collector is not None:
             # Restore the basic sampler with model defaults before anyone
             # else can touch this dialog (still under slot.lock).
             slot.active_collector = None

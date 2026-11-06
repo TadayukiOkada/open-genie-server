@@ -241,8 +241,11 @@ def _require_positive_max_tokens(params: GenParams) -> None:
             "use max_tokens >= 1 to generate.", "max_tokens")
 
 
-def _require_logprobs_support(slot) -> None:
-    if not logprobs_mod.LOGPROBS_AVAILABLE:
+def _require_logprobs_support(slot, needs_numpy: bool = True) -> None:
+    """needs_numpy: the custom-sampler path (prompt scoring always; sampling
+    on a pre-2.52 libGenie) computes the log-softmax on the host. Native
+    logprobs (QAIRT 2.52+) get it from the SDK."""
+    if needs_numpy and not logprobs_mod.LOGPROBS_AVAILABLE:
         raise InvalidRequestError(
             "logprobs require numpy on the server (pip install numpy).",
             "logprobs")
@@ -258,16 +261,24 @@ def _require_logprobs_support(slot) -> None:
 def _logprobs_unsupported_error() -> InvalidRequestError:
     return InvalidRequestError(
         "logprobs are not supported by this QAIRT runtime: the logits "
-        "callback was not invoked during generation.",
+        "callback (on QAIRT 2.52+, the logprobs callback) was not invoked "
+        "during generation.",
         "logprobs", code="logprobs_not_supported")
 
 
-def _sampling_collector(top_n: int, params: GenParams, slot) -> LogprobsCollector:
-    """A collector for a request that samples (not prompt scoring), with the
-    sampler values the request would get without logprobs: the model's
-    defaults fill what the request leaves out, as make_sampler_params does.
-    It used to fall back to temperature 1.0 with no top-k or top-p, so adding
+def _sampling_collector(top_n: int, params: GenParams, slot,
+                        native: bool) -> LogprobsCollector:
+    """A collector for a request that samples (not prompt scoring).
+
+    native (QAIRT 2.52+): the SDK samples, with the same sampler settings a
+    request without logprobs gets, and reports each token's logprob.
+    Otherwise (deprecated, pre-2.52) the collector samples on the host with
+    the values the request would get without logprobs: the model's defaults
+    fill what the request leaves out, as make_sampler_params does. It used to
+    fall back to temperature 1.0 with no top-k or top-p, so adding
     logprobs: true changed the output distribution."""
+    if native:
+        return LogprobsCollector(top_n=top_n, native=True)
     temp, top_k, top_p = resolve_sampler_values(
         slot.sampler_defaults, params.temperature, params.top_p, params.top_k)
     return LogprobsCollector(top_n=top_n, temperature=temp, top_p=top_p,
@@ -877,7 +888,8 @@ def create_app(state: ServerState) -> FastAPI:
         prompts = _normalize_prompts(body.get("prompt", ""), slot)
 
         if top_n is not None:
-            _require_logprobs_support(slot)
+            _require_logprobs_support(
+                slot, needs_numpy=echo or not state.lib.has_native_logprobs)
             if stream:
                 raise InvalidRequestError(
                     "logprobs are not supported with stream=true on this "
@@ -966,7 +978,8 @@ def create_app(state: ServerState) -> FastAPI:
                 slot, prompt, params.max_tokens, cfg.default_max_tokens_cap))
             collector = None
             if top_n is not None:
-                collector = _sampling_collector(top_n, params, slot)
+                collector = _sampling_collector(
+                    top_n, params, slot, state.lib.has_native_logprobs)
             gen = Generation(f"{request_id}-{index}", slot, state.lib, epoch=epoch)
             engine.start_generation(
                 state.lib, slot, QueryPlan(full_prompt=prompt), req_params, gen,
@@ -1144,12 +1157,14 @@ def create_app(state: ServerState) -> FastAPI:
         top_n = _chat_top_n(body)
         collector = None
         if top_n is not None:
-            _require_logprobs_support(slot)
+            _require_logprobs_support(
+                slot, needs_numpy=not state.lib.has_native_logprobs)
             if stream:
                 raise InvalidRequestError(
                     "logprobs are not supported with stream=true on this "
                     "server", "logprobs")
-            collector = _sampling_collector(top_n, params, slot)
+            collector = _sampling_collector(
+                top_n, params, slot, state.lib.has_native_logprobs)
 
         # Template comes from the SELECTED SLOT's actually-loaded model —
         # never from the client-supplied model_name (lm_eval sends a fixed
@@ -1318,10 +1333,17 @@ def create_app(state: ServerState) -> FastAPI:
     def _current_namespaces() -> set[str]:
         return {s.cache_namespace for s in manager.slots}
 
+    def _sdk_prefix_caches() -> list[dict]:
+        """Which slots run on the SDK's in-memory prefix cache (QAIRT 2.52+).
+        Its entries are not listable: the SDK has no call for that."""
+        return [{"slot": s.name, "prefix_boundary": s.sdk_prefix_cache["prefix_boundary"],
+                 "max_entries": s.sdk_prefix_cache["max_entries"]}
+                for s in manager.slots if s.sdk_prefix_cache]
+
     @app.get("/v1/prefix/cache")
     async def list_prefix_cache():
         return {"entries": state.prefix_cache.list_entries(
-            _current_namespaces())}
+            _current_namespaces()), "sdk": _sdk_prefix_caches()}
 
     @app.delete("/v1/prefix/cache")
     async def prune_prefix_cache(request: Request):
@@ -1336,8 +1358,20 @@ def create_app(state: ServerState) -> FastAPI:
             raise InvalidRequestError(
                 "scope must be 'unreachable' or 'all'", "scope")
         if scope == "all":
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 state.prefix_cache.prune, set(), include_unknown=True)
+            flushed = []
+            for s in manager.slots:
+                if not s.sdk_prefix_cache:
+                    continue
+                try:
+                    if await run_with_slot_lock(
+                            s, lambda s=s: manager.flush_sdk_prefix_cache(s),
+                            timeout=cfg.inference_timeout_s):
+                        flushed.append(s.name)
+                except SlotBusyError:
+                    logger.warning(f"[{s.name}] busy; SDK prefix cache not flushed")
+            return {**result, "sdk_flushed": flushed}
         return await asyncio.to_thread(
             state.prefix_cache.prune, _current_namespaces())
 
@@ -1604,6 +1638,9 @@ def create_app(state: ServerState) -> FastAPI:
             # produce the same namespace.
             key = f"{canonical_engine_role(engine_role)}/{tensor_name}"
             slot.lora_strengths[key] = float(alpha)
+            # The SDK prefix cache keys an entry by the applied adapter's name
+            # (sysCacheBuildKey), not by its strength.
+            manager.flush_sdk_prefix_cache(slot)
             slot.epoch += 1
 
         await _admin_with_slot_lock(request, slot, _set, cfg.inference_timeout_s)

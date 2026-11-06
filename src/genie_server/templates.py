@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 TEMPLATE_FAMILIES = ("chatml", "qwen3_5", "llama3", "llama2", "gemma", "gemma4")
 
 
+# What closes the system turn in each family, for the SDK prefix cache's
+# "prefix_boundary" (QAIRT 2.52+): the SDK caches the KV of everything up to and
+# including the first occurrence in the prompt. The same split as
+# split_prompt_for_prefix_cache. Llama2/Mistral and Gemma 2/3 fuse the system
+# prompt into the first user turn, so they have none.
+SDK_PREFIX_BOUNDARIES = {
+    "chatml": "<|im_end|>\n",
+    "qwen3_5": "<|im_end|>\n",
+    "llama3": "<|eot_id|>",
+    "gemma4": "<turn|>\n",
+}
+
+
 class UnrenderableMessageError(ValueError):
     """A message the slot's chat template has no form for. Raised instead of
     dropping it: a turn that silently vanishes from the prompt is a wrong
