@@ -119,6 +119,11 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 > [QAIRT Version Issues](./QAIRT_VERSIONS.md).** Read that page before you pick
 > an SDK build or decide how to export a model. In short:
 >
+> - **2.52.0.261104 is the build we recommend**, with this server's 1.9.0 or
+>   later. On top of what 2.51.0 fixes, it saves and restores a long prefix on a
+>   sliding-window bundle (Gemma 4) correctly. It still leaks grammar's terminal
+>   token, and a concat-format sliding-window group (LFM3-style bundles) still
+>   goes wrong past that group's context length.
 > - **2.51.0.260929 fixes the slot wedge and the other two reset defects.** A
 >   stock 2.51.0 library is a reasonable default, and it has grammar, including
 >   the new per-request grammar. It still leaks grammar's terminal token, and
@@ -141,14 +146,15 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 >   suite says nothing about the wedge.
 
 **Verified against:** QAIRT **2.49.40.260810**, **2.49.1.260821**,
-**2.50.0.260828** and **2.51.0.260929**,
+**2.50.0.260828**, **2.51.0.260929** and **2.52.0.261104**,
 `aarch64-oe-linux-gcc11.2`, on an SA8255P board, with Qwen3 w4a16 context
 binaries (`qwen3_0_6b`, `qwen3_4b_instruct_2507`); and **2.48.40.260702**,
 `aarch64-android`, on the Android guest of the same board
 ([Running on Android](#running-on-android)). **2.48 and 2.51.0 carry none of the
 three reset defects** — they arrived with 2.49's scheduler and were fixed in
 2.51.0 — so those are the builds here on which a stock library is not a
-liability. Bundles exported with 2.49.40 run on the 2.51.0 runtime unchanged.
+liability. Bundles exported with 2.49.40 run on the 2.51.0 runtime unchanged,
+and bundles exported with 2.51.0 on the 2.52.0 runtime.
 
 The rest of this section is about an export choice that is *not* a defect: how
 many context lengths to compile into a bundle.
@@ -1134,6 +1140,16 @@ bundle on an SA8255P:
   prompt at greedy, three times with a reset between: without the cache all three
   answers were the same and correct; with it, the two hits gave a different
   answer from the first (miss) one. Capturing synchronously made no difference.
+  **The restore is exact**: a hit gives bit-identical logits to sending the same
+  prompt without the cache as a `SENTENCE_BEGIN` system turn followed by a
+  `SENTENCE_END` remainder, and the restored KV matches the miss's byte for byte.
+  What changes the output is that the SDK keeps the whole system turn rather than
+  a multiple of the prefill chunk (AR, 128 tokens on that bundle), so the
+  remainder starts a new chunk where a miss would not, and that bundle's output
+  depends on where chunks start: splitting the prompt at 700 or 823 tokens changes
+  the answer even without a cache, at 640 or 768 it does not. With a system turn
+  of exactly 768 tokens, a hit, a miss and no cache gave bit-identical logits.
+  The captured length is the SDK's choice; neither the config nor the API sets it.
 
 With `"sdk"`, the server adds `system_prompt_cache` to the dialog config with
 `prefix_boundary` set to the string that closes the system turn in the slot's
@@ -1150,8 +1166,8 @@ cache group with the default group's length; not measured).
 It stays off, with a WARNING, for a template without a separate system turn
 (llama2, gemma), a linear-attention bundle (Qwen3.5: that state is not saved
 either), and a dialog type the SDK refuses (`ssd-q1`, `lhd-dec`, `multistream`).
-The SDK keys an entry by the system text and the applied LoRA adapter's name, but
-not by its strength, so the server flushes the cache
+The SDK keys an entry by the system text and the applied LoRA adapter's name and
+strengths (read from the 2.52.0 sources); the server also flushes the cache
 (`GenieDialog_flushPrefixCache`) when a strength changes. The cache is shared by
 every dialog of the same model geometry, so a flush on one slot empties a sibling
 slot on the same model too. A model switch flushes the old model's entries;
@@ -1196,6 +1212,17 @@ A normal `/v1/chat/completions`/`/v1/completions` MISS does **not** populate the
 > **QAIRT 2.52.0 fixes this as well**: a 1,540-token prefix restored on Gemma 4 E2B gives the same
 > logits as the unrestored dialog.
 > An SDK patched for these defects also removes the second BOS above.
+
+> **A hit can change the output, for the same reason as the SDK's cache.** A hit
+> restores the system turn and prefills the rest from there, so the rest starts a
+> new prefill chunk where a miss, which runs the prompt whole, would not. On the
+> Qwen3-0.6B bundle measured for the SDK's cache, splitting a prompt at a token
+> position that is not a multiple of the prefill chunk (AR, 128 there) changed the
+> greedy answer even with no cache involved, and a split at a whole number of
+> chunks did not; on 2.52.0 the restore itself is exact (see the note above). We
+> have not measured this through this server's cache. To keep hits identical to
+> misses, make the warmed system prompt a whole number of AR-length chunks in
+> tokens, counting the BOS the SDK adds, if any.
 
 ### What it costs, and when it pays
 
