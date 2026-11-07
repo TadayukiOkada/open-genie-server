@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- **QAIRT 2.52.0 is now the recommended build throughout**, not only in its own
+  section: the README warning, [QAIRT_VERSIONS](QAIRT_VERSIONS.md) (summary,
+  evidence, D6, a new "On 2.52.0" in Choosing a library, tested builds) and
+  [MANUAL § SDK Compatibility](MANUAL.md#sdk-compatibility) say what 2.52.0 fixes
+  and still carries, and that it needs this server's 1.9.0 or later.
+- **Why a hit on the SDK's prefix cache changes the output.** The restore is exact;
+  the SDK keeps the whole system turn rather than a multiple of the prefill chunk,
+  so the rest of the prompt starts a new chunk, and on the bundle measured the
+  output depends on where chunks start. A system turn of a whole number of chunks
+  gave identical output. The same applies to a hit on this server's own cache
+  (not measured through it). Also corrected: the SDK's cache key does include the
+  LoRA strengths.
+- [PLATFORM_NOTES](PLATFORM_NOTES.md): 2.52.0 fixes the sliding-window
+  save/restore and the extra BOS; the value-buffer mix-up at a window eviction
+  is still there.
+
 ## 1.9.0 — QAIRT 2.52.0
 
 QAIRT 2.52.0 (Genie API 1.22) is supported; a libGenie from 2.48 through 2.51

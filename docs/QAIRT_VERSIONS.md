@@ -48,6 +48,12 @@ project rebuilt `libGenie.so` for 2.49.x and 2.50.x; D3 is the cost of doing
 so. Each section below says how to check a build we have not seen. See
 [What 2.51.0 changed](#what-2510-changed).
 
+**2.52.0.261104 also fixes D6**, and is the build we recommend now. D3 and D4
+are still there, with a few smaller defects listed in
+[What 2.52.0 changed](#what-2520-changed). Run it with open-genie-server 1.9.0 or
+later: on a 2.52 library an older server answers logprobs and echo requests with
+HTTP 400.
+
 > [!NOTE]
 > **2.50.0.260828 is a large release that leaves every one of them in place.** Its Genie
 > sources differ from 2.49.40.260810 in 78 files, and its public C API headers
@@ -76,7 +82,9 @@ so. Each section below says how to check a build we have not seen. See
   file defining the backend it declares. **2.51.0.260929**: D1, D2, D3, D4 and
   D6 were measured on hardware, D1 and D2 on both a multi-context and a
   single-context bundle. D5 rests on sources: no `ssd-q1` bundle was on the
-  board.
+  board. **2.52.0.261104**: D4 and D6 were measured on hardware and D3 rests on
+  sources. The D1, D2 and D5 reproducers were not re-run, so those rows carry
+  2.51.0's result.
 - **not reproduced** — the reproducer was run and did not trigger. This is
   weaker than "absent": it means that sequence is safe on that build, not that
   no sequence is.
@@ -353,7 +361,8 @@ Measured with a standalone reproducer on stock 2.49.40.260810 and stock
 output, a 1540-token one segfaults. Through this server on a stock 2.51.0, a
 1540-token prefix gave broken output on every hit and the process stayed up.
 2.50.0.260828 has the same code. Reported to Qualcomm with a patch; not fixed in
-2.51.0.
+2.51.0. **Fixed in 2.52.0.261104**: with the same reproducer on a stock 2.52.0,
+700- and 1540-token prefixes restore to the same logits as the unrestored dialog.
 
 ## Checking your own SDK
 
@@ -385,6 +394,28 @@ If the second call fails, your SDK has D1. Reload the slot to recover:
 > Reload the slot between probes.
 
 ## Choosing a library
+
+### On 2.52.0 — the stock library is the default we recommend
+
+A stock 2.52.0 library carries 2.51.0's fixes for the reset defects (their
+reproducers were not re-run on 2.52.0), has grammar including the per-request
+API, and, unlike 2.51.0, saves and restores a sliding-window bundle correctly
+(D6). Run it with open-genie-server 1.9.0 or later. What it still
+carries (details in [What 2.52.0 changed](#what-2520-changed)):
+
+- **D4**, as on 2.51.0.
+- **A concat-format sliding-window cache group goes wrong past the group's
+  context length** (LFM3-style bundles): a long prompt can change the answer.
+- **A value-buffer mix-up when a sliding-window group is evicted at a
+  graph-variant switch** (Gemma 4): the logits shift slightly.
+- **The swallowed graph-variant error** (change 2 below).
+
+Each of these has a source fix, which this project runs in a rebuilt library.
+Rebuilding drops grammar unless you also supply the backend
+([D3](#d3--a-library-you-rebuild-has-no-grammar)), and a stock 2.52.0 tree does
+not build until you add one include path (see
+[What 2.52.0 changed](#what-2520-changed)). The SDK's own prefix cache is off in
+this server by default; see the same section.
 
 ### On 2.51.0 — the stock library is a reasonable default
 
@@ -648,6 +679,9 @@ back if that fails. Switching to the custom sampler key by key (`type`, then
 `callback-name`) is refused both ways round, so on 2.52+ this server sends its
 sampler settings as one JSON update (an empty key). That form is new: 2.51.0
 rejects it even for a plain update, so older libraries keep the key-by-key path.
+An open-genie-server older than 1.9.0 has only the key-by-key path, so on a 2.52
+library it answers logprobs and echo requests with HTTP 400 (measured with
+1.8.0).
 
 **It is a drop-in swap for this server**, and this server uses most of what it
 adds. Genie's C API moves from 1.21.0 to 1.22.0: functions are only added, and the
@@ -660,9 +694,16 @@ load and run on the 2.52.0 runtime. On a 2.52+ libGenie:
 - `TOKENIZER_BACKEND` can use libGenie's standalone tokenizer (`GenieTokenizer_create`).
 
 **What it adds that this server does not use by default: the SDK's prefix cache**
-(`system_prompt_cache`). On a bundle with a `bos-token` it never hits, and where it
-hits, a hit changes the greedy output; both reproduced with `genie-app` alone. It
-is available with `PREFIX_CACHE_BACKEND: "sdk"`; see
+(`system_prompt_cache`). On a bundle with a `bos-token` it never hits. Where it
+hits, a hit changes the greedy output, although the restore itself is exact, byte
+for byte. The SDK keeps the whole system turn, not a multiple of the prefill
+chunk (AR), so the rest of the prompt is prefilled in a chunk that starts where
+it would not without the cache. On the Qwen3-0.6B bundle we measured, that alone
+changes the answer: splitting the same prompt at 700 or 823 tokens changes it even
+with no cache, at 640 or 768 it does not, and with a system turn of exactly 768
+tokens a hit, a miss and no cache gave bit-identical logits. Neither the config
+nor the API sets the captured length. Both reproduced with `genie-app` and the C
+API alone. It is available with `PREFIX_CACHE_BACKEND: "sdk"`; see
 [MANUAL § The SDK's prefix cache](./MANUAL.md#the-sdks-prefix-cache-qairt-252).
 
 **An older libGenie is deprecated.** Everything still works on 2.48 through 2.51,
@@ -686,12 +727,16 @@ and one Gemma-family bundle, on 2.49.40.260810 (extensively), 2.49.1.260821
 integration suite, and the grammar checks), and 2.51.0.260929 (the D1/D2/D4/D6
 reproducers, the VLM overrun reproducer, the integration suite on stock and
 rebuilt libraries, the grammar checks, and the per-request grammar through this
-server on four libraries).
+server on four libraries), and 2.52.0.261104 (the D6 reproducer, the
+sliding-window value-buffer and LUT-BOS reproducers, the integration suite on a
+stock library with Qwen3-0.6B and on a rebuilt one with Qwen3-0.6B and Gemma 4
+E2B, the concat-format sliding-window check on an LFM3 probe on a QCS9075
+evaluation kit and on a full LFM3 bundle, and the SDK's prefix cache).
 
 **Not tested:** every other SoC, ABI and model family. The D1/D2 reproducers on
 2.49.1. D4 on 2.48.40.260702 or 2.49.1.260821. D5 on 2.51.0. A rebuilt 2.50.0
-library. 2.50.40. Any SDK older than 2.48.40.260702 or newer than
-2.51.0.260929.
+library. 2.50.40. The D1/D2/D5 reproducers, VLM slots and speed on 2.52.0. Any
+SDK older than 2.48.40.260702 or newer than 2.52.0.261104.
 
 **Treat an untested SDK build as suspect** and run
 [the check](#checking-your-own-sdk) against it.

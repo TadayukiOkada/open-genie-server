@@ -27,7 +27,7 @@ properties of the SoC, and how to find out what yours does instead.
 | System Python | 3.10.14, without pip |
 | Hexagon NSP cores in use | **2** — `/dsp/image/dsp/cdsp0` and `cdsp1`, addressed as `device_id` 0 and 1 |
 | Subsystem restart (SSR) | **Not available.** `/sys/class/remoteproc` is empty inside the guest, so a wedged cDSP is recovered by power-cycling the board, not by restarting the subsystem |
-| QAIRT | 2.49.40.260810, 2.49.1.260821, 2.50.0.260828 and 2.51.0.260929, `aarch64-oe-linux-gcc11.2` |
+| QAIRT | 2.49.40.260810, 2.49.1.260821, 2.50.0.260828, 2.51.0.260929 and 2.52.0.261104, `aarch64-oe-linux-gcc11.2` |
 | Model bundles | Qwen3 w4a16 context binaries (0.6B, 1.7B, 4B, VL-4B), Gemma-4 E2B |
 
 The Android guest on the same board is a second data point: **6.0 GiB** of RAM,
@@ -423,6 +423,10 @@ Through this server, with a 1540-token system prompt, all six requests that hit 
 back as broken output (the same few tokens repeated) and the process stayed up. Do not read that
 as safer: the output is wrong either way, and the reproducer shows the crash is still reachable.
 
+**QAIRT 2.52.0 fixes it.** With the same reproducer and bundle on a stock 2.52.0.261104, 700- and
+1540-token prefixes restore to the same logits as the unrestored run. What follows is for 2.51.0
+and older.
+
 **What to do.** With the stock SDK keep a Gemma 4 system prompt that you warm up under about 600
 tokens, or do not call `POST /v1/prefix/warmup` for that model: a normal request that misses the
 cache does not populate it and runs the full prompt, so nothing else needs switching off. The
@@ -433,7 +437,9 @@ A second, smaller SDK defect sits in the same area: when a prompt longer than th
 is sent as two queries (which is what a cache hit does, and also what a client that splits a
 prompt does), the value cache is not moved correctly when the window evicts. It shifts the logits
 slightly (worst-step KL 0.015 to 0.09 in the same runs) but did not change the greedy output in
-our tests. The extra BOS on a hit ([Prefix KV Cache](./MANUAL.md#prefix-kv-cache)) is a third.
+our tests. **QAIRT 2.52.0 still has this one** (worst-step KL 0.091, against 0.003 with the fix).
+The extra BOS on a hit ([Prefix KV Cache](./MANUAL.md#prefix-kv-cache)) is a third; 2.52.0 fixes
+it.
 
 We have written all three up for Qualcomm with patches. A libGenie built with the patches
 restores bit-identically to the unrestored run at 312, 709, 1006 and 1548 prefix tokens and

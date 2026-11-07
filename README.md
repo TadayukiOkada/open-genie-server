@@ -81,8 +81,10 @@ install. On Android three of these publish no wheel — see
 > have tested carries three of them in one place: what `GenieDialog_reset()`
 > fails to put back.** A server resets between requests to keep them independent,
 > so that is the path under every request you serve. **2.51.0.260929 fixes
-> those three**, and is the version we recommend; it still has smaller defects
-> listed on the same page.
+> those three.** **2.52.0.261104 also fixes save and restore on sliding-window
+> bundles, and is the version we recommend**, with open-genie-server 1.9.0 or
+> later: an older server answers logprobs and echo requests with 400 on it. Both
+> still have smaller defects listed on the same page.
 >
 > You would see one oversized request wedging a slot for good; a long request
 > failing on an empty context because the one before it was shorter; or, on a
