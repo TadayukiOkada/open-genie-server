@@ -123,7 +123,10 @@ failure modes — therefore depend on which QAIRT SDK build you run it against.
 >   later. On top of what 2.51.0 fixes, it saves and restores a long prefix on a
 >   sliding-window bundle (Gemma 4) correctly. It still leaks grammar's terminal
 >   token, and a concat-format sliding-window group (LFM3-style bundles) still
->   goes wrong past that group's context length.
+>   goes wrong past that group's context length. On those bundles a request
+>   that ends on a stop sequence also leaves the slot failing every later
+>   request until it is reloaded
+>   ([D7](./QAIRT_VERSIONS.md#d7--a-stop-sequence-breaks-a-sliding-window-dialog-on-the-batching-scheduler)).
 > - **2.51.0.260929 fixes the slot wedge and the other two reset defects.** A
 >   stock 2.51.0 library is a reasonable default, and it has grammar, including
 >   the new per-request grammar. It still leaks grammar's terminal token, and

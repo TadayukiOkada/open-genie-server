@@ -16,6 +16,7 @@ model, read this page first.
 - [D4 — grammar leaks the terminal token into the text](#d4--grammar-leaks-the-terminal-token-into-the-text)
 - [D5 — reset corrupts a speculative-decoding dialog](#d5--reset-corrupts-a-speculative-decoding-dialog)
 - [D6 — save and restore break a sliding-window cache group](#d6--save-and-restore-break-a-sliding-window-cache-group)
+- [D7 — a stop sequence breaks a sliding-window dialog on the batching scheduler](#d7--a-stop-sequence-breaks-a-sliding-window-dialog-on-the-batching-scheduler)
 - [Checking your own SDK](#checking-your-own-sdk)
 - [Choosing a library](#choosing-a-library)
 - [What 2.49.1 changed](#what-2491-changed)
@@ -34,6 +35,7 @@ model, read this page first.
 | **D4** grammar leaks the terminal token as text | not tested | **present** (measured) | not tested | **present** (measured) | **present** (measured) | **present** (measured) |
 | **D5** reset corrupts a speculative-decoding dialog | not present (source argument) | **present** (measured) | **present** (source-identical) | **present** (measured) | fixed (source argument) | fixed (2.51.0) |
 | **D6** save/restore breaks a sliding-window cache group | not tested | **present** (measured) | not tested | **present** (source-identical) | **present** (measured) | fixed (measured) |
+| **D7** a stop sequence breaks a sliding-window dialog on the batching scheduler | not tested | not tested | not tested | not tested | **present** (measured) | **present** (measured) |
 
 > [!WARNING]
 > **`2.49.1.260821` is newer than `2.49.40.260810`, despite the smaller number.**
@@ -49,7 +51,8 @@ so. Each section below says how to check a build we have not seen. See
 [What 2.51.0 changed](#what-2510-changed).
 
 **2.52.0.261104 also fixes D6**, and is the build we recommend now. D3 and D4
-are still there, with a few smaller defects listed in
+are still there, and so is D7, which only bundles with a sliding-window cache
+group and no per-layer embeddings (LFM3-style) can hit; a few smaller defects are listed in
 [What 2.52.0 changed](#what-2520-changed). Run it with open-genie-server 1.9.0 or
 later: on a 2.52 library an older server answers logprobs and echo requests with
 HTTP 400.
@@ -84,7 +87,10 @@ HTTP 400.
   single-context bundle. D5 rests on sources: no `ssd-q1` bundle was on the
   board. **2.52.0.261104**: D4 and D6 were measured on hardware and D3 rests on
   sources. The D1, D2 and D5 reproducers were not re-run, so those rows carry
-  2.51.0's result.
+  2.51.0's result. **D7** was measured on a stock 2.52.0 and on a 2.51.0 library
+  rebuilt with this project's fixes; the code involved (the stop-sequence removal
+  in `qualla/dialog.cpp` and `SlidingWindow::processReduce`) is the same in a
+  stock 2.51.0.
 - **not reproduced** — the reproducer was run and did not trigger. This is
   weaker than "absent": it means that sequence is safe on that build, not that
   no sequence is.
@@ -364,6 +370,38 @@ output, a 1540-token one segfaults. Through this server on a stock 2.51.0, a
 2.51.0. **Fixed in 2.52.0.261104**: with the same reproducer on a stock 2.52.0,
 700- and 1540-token prefixes restore to the same logits as the unrestored dialog.
 
+## D7 — a stop sequence breaks a sliding-window dialog on the batching scheduler
+
+Applies to bundles with a sliding-window cache group **and no per-layer
+embeddings** — the ones that go through the continuous-batching scheduler, such
+as LFM3. A Gemma 4 bundle has per-layer embeddings, takes the older path, and is
+not affected.
+
+**Symptom.** A request that ends on a stop sequence (`stop`) returns normally.
+Every request after it on that slot fails with HTTP 500
+`GenieDialog_query failed with status -1`, until the slot is reloaded. The
+server log shows `KV$ removal is disabled after longcontext triggers for
+CacheGroup swa_` and then `Removal of stop sequence tokens from KV cache failed`.
+It does not take a long prompt: the first request of the integration suite that
+uses a stop sequence (a 20-token prompt) is enough, and the next request fails.
+
+**Cause** (read from the sources and confirmed with an instrumented library). On
+this path the scheduler keeps the KV bookkeeping for every cache group, and the
+library's other KV bookkeeping is advanced only for the default group. When a
+stop sequence matches, the library removes the matched tokens through that other
+bookkeeping, where the sliding-window group still holds nothing; the group takes
+the mismatch for an already evicted window and refuses. The failure is then kept
+across `GenieDialog_reset`, so every later query fails too. The prefix-match
+rewind and normal generation do not take that route on this path; only the
+stop-sequence removal does.
+
+**What to do.** On an affected bundle, either do not send `stop`, or run a
+library with the fix (rewind the scheduler's slot, as the prefix-match rewind
+does), which this project runs in its rebuilt library: with it, the requests
+above and a stop after 285 tokens (past the 256-token window) are answered, and
+the integration suite passes on two LFM3 builds. If it happens, reload the slot
+with `/v1/models/switch`.
+
 ## Checking your own SDK
 
 Send one request comfortably over the budget, then a trivial one:
@@ -409,6 +447,9 @@ carries (details in [What 2.52.0 changed](#what-2520-changed)):
 - **A value-buffer mix-up when a sliding-window group is evicted at a
   graph-variant switch** (Gemma 4): the logits shift slightly.
 - **The swallowed graph-variant error** (change 2 below).
+- **D7**: on a sliding-window bundle without per-layer embeddings (LFM3-style),
+  a request that ends on a stop sequence leaves the slot failing every later
+  request.
 
 Each of these has a source fix, which this project runs in a rebuilt library.
 Rebuilding drops grammar unless you also supply the backend
@@ -662,6 +703,11 @@ graph-variant error (change 2 of
 [Option 1](#option-1--run-a-fixed-libgenieso-recommended-on-249x--250x-unless-you-need-grammar))
 and a value-buffer mix-up when a sliding-window group is evicted at a variant
 switch (measured: KL 0.091 against 0.003 for a library with the fix).
+**D7** (a stop sequence breaks a sliding-window dialog on the batching scheduler)
+is there too. Found while fixing it, and not visible through this server, which
+resets the dialog before every request: the stop-sequence rewind removes one
+token more than it should when the dialog is continued, and any KV failure stays
+across `GenieDialog_reset`.
 
 **A concat-format sliding-window cache group is only half fixed.** The release
 notes list "continuous batching incorrectly handled windowed-path for concat
@@ -731,7 +777,8 @@ server on four libraries), and 2.52.0.261104 (the D6 reproducer, the
 sliding-window value-buffer and LUT-BOS reproducers, the integration suite on a
 stock library with Qwen3-0.6B and on a rebuilt one with Qwen3-0.6B and Gemma 4
 E2B, the concat-format sliding-window check on an LFM3 probe on a QCS9075
-evaluation kit and on a full LFM3 bundle, and the SDK's prefix cache).
+evaluation kit and on a full LFM3 bundle, the SDK's prefix cache, and the D7
+requests on stock and rebuilt libraries with two LFM3 builds).
 
 **Not tested:** every other SoC, ABI and model family. The D1/D2 reproducers on
 2.49.1. D4 on 2.48.40.260702 or 2.49.1.260821. D5 on 2.51.0. A rebuilt 2.50.0
