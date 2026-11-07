@@ -19,6 +19,13 @@
 - [PLATFORM_NOTES](PLATFORM_NOTES.md): 2.52.0 fixes the sliding-window
   save/restore and the extra BOS; the value-buffer mix-up at a window eviction
   is still there.
+- **A stop sequence breaks a sliding-window dialog** on 2.51 and 2.52 (new D7 in
+  [QAIRT_VERSIONS](QAIRT_VERSIONS.md#d7--a-stop-sequence-breaks-a-sliding-window-dialog-on-the-batching-scheduler)):
+  on a bundle with a sliding-window cache group and no per-layer embeddings
+  (LFM3-style), every request after a stop-sequence match fails until the slot is
+  reloaded. The cause is in libGenie; a rebuilt library with the fix answers
+  normally. Noted in the stop row of [API](API.md) and in
+  [MANUAL § SDK Compatibility](MANUAL.md#sdk-compatibility).
 
 ## 1.9.0 — QAIRT 2.52.0
 
